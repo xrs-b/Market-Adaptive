@@ -94,6 +94,9 @@ class OKXClient:
     def fetch_ticker(self, symbol: str) -> dict[str, Any]:
         return self.exchange.fetch_ticker(self._normalize_symbol(symbol))
 
+    def fetch_order_book(self, symbol: str, limit: int | None = None) -> dict[str, Any]:
+        return self.exchange.fetch_order_book(self._normalize_symbol(symbol), limit=limit)
+
     def fetch_last_price(self, symbol: str) -> float:
         ticker = self.fetch_ticker(symbol)
         last_price = ticker.get("last") or ticker.get("close")
@@ -311,6 +314,12 @@ class OKXClient:
             return float(self.exchange.amount_to_precision(self._normalize_symbol(symbol), amount))
         except Exception:
             return float(amount)
+
+    def price_to_precision(self, symbol: str, price: float) -> float:
+        try:
+            return float(self.exchange.price_to_precision(self._normalize_symbol(symbol), price))
+        except Exception:
+            return float(price)
 
     def estimate_notional(self, symbol: str, amount: float, price: float) -> float:
         contract_value = self.get_contract_value(symbol)

@@ -10,6 +10,7 @@ class MockExchange:
     def __init__(self) -> None:
         self.margin_mode_calls = []
         self.leverage_calls = []
+        self.order_book_calls = []
 
     def set_sandbox_mode(self, enabled: bool) -> None:
         self.sandbox_mode = enabled
@@ -23,6 +24,14 @@ class MockExchange:
     def fetch_position_mode(self, symbol: str) -> dict[str, bool]:
         del symbol
         return {"hedged": False}
+
+    def fetch_order_book(self, symbol: str, limit=None) -> dict:
+        self.order_book_calls.append((symbol, limit))
+        return {"bids": [[100.0, 1.0]], "asks": [[100.1, 1.0]]}
+
+    def price_to_precision(self, symbol: str, price: float) -> str:
+        del symbol
+        return f"{price:.2f}"
 
 
 class DummyOKXClient(OKXClient):
@@ -53,6 +62,25 @@ class OKXClientTests(unittest.TestCase):
             client.exchange.leverage_calls,
             [(5, "BTC/USDT:USDT", {"mgnMode": "cross"})],
         )
+
+    def test_fetch_order_book_normalizes_swap_symbol(self) -> None:
+        client = DummyOKXClient(
+            OKXConfig(api_key="", api_secret="", passphrase="", default_type="swap"),
+            ExecutionConfig(),
+        )
+
+        order_book = client.fetch_order_book("BTC/USDT", limit=20)
+
+        self.assertEqual(client.exchange.order_book_calls, [("BTC/USDT:USDT", 20)])
+        self.assertEqual(order_book["asks"][0][0], 100.1)
+
+    def test_price_to_precision_uses_exchange_formatter(self) -> None:
+        client = DummyOKXClient(
+            OKXConfig(api_key="", api_secret="", passphrase="", default_type="swap"),
+            ExecutionConfig(),
+        )
+
+        self.assertEqual(client.price_to_precision("BTC/USDT", 100.126), 100.13)
 
     def test_get_position_liquidation_price_reads_okx_info_field(self) -> None:
         client = DummyOKXClient(

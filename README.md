@@ -195,6 +195,8 @@ notification:
 - 即使 MTF 已 ready / trigger，多头仍必须继续通过现有 CTA stack：`OBV` 信号线偏多、`OBV` 归一化斜率角度高于 `obv_slope_threshold_degrees`（默认约等于 `30°`），以及基于最近约 24 小时 intraday OHLCV 构造的 `Volume Profile` breakout 条件（突破 `POC` 并站上 `Value Area High`）；若价格仍在 value area 内或低于 POC，则直接跳过开仓
 - 当 `4h`、`1h` 与 `15m` 三层信号 fully aligned 时，CTA 会把单笔风险从基线 `risk_percent_per_trade`（默认 `2%`）提升到 `boosted_risk_percent_per_trade`（默认 `3%`），再交给 `RiskControlManager` / Hybrid Shield 做最终仓位约束
 - CTA 多头开仓前会额外读取 OKX 公共 `long_short_accounts_ratio`；当零售多头情绪比值大于 `2.5` 时，默认阻止买入信号（也可配置为把多头仓位减半）
+- Sentiment 通过后，CTA 还会触发 `Order Flow Sentinel` 做最后一跳秒级盘口确认：调用 OKX `fetchOrderBook` 读取前 `20` 档深度，计算 `bid_sum / ask_sum`；当该比值低于 `1.5` 时，直接拒绝本次多头开仓
+- 当盘口失衡达到高确信度阈值（默认 `>= 2.0`）时，CTA 不再直接追市价，而是按盘口深度估算可成交边界，并生成带滑点上限的 `IOC` 限价单，尽量在保持成交概率的同时压低高确信度入场的冲击成本
 - CTA 持仓使用 `ATR` 动态止损距离作为主风控参数：开仓与后续上移/下移止损均以 `stop_loss_atr` 为准；默认在 `+2%` 先止盈 `50%`，`+5%` 再止盈 `25%`；`RiskControlManager` 还会通过快速风控 worker 高频盯防 ATR 硬止损，一旦击穿立即对剩余仓位执行 all-out 全部退出
 - CTA 单笔开仓 notional 可用 `cta_single_trade_equity_multiple` 约束为账户权益倍数上限，避免趋势单笔过重
 - `GridRobot` 只在 `sideways` 激活，先显式向 OKX 同步保证金模式（`execution.td_mode`）与 3x / 5x 杠杆，然后按当前价上下各 3% 的中性区间重建双边网格限价单；在同一方向持仓过重时会补充 reduce-only 再平衡单

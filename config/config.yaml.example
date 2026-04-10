@@ -102,6 +102,12 @@ cta:
   volume_profile_lookback_hours: 24
   volume_profile_bin_count: 24
   volume_profile_value_area_pct: 0.70
+  order_flow_enabled: true
+  order_flow_depth_levels: 20
+  order_flow_confirmation_ratio: 1.5
+  order_flow_high_conviction_ratio: 2.0
+  order_flow_limit_buffer_bps: 3.0
+  order_flow_max_slippage_bps: 12.0
   polling_interval_seconds: 60
   # 兼容旧配置，留空即可
   timeframe: "15m"

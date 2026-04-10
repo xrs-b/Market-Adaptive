@@ -150,6 +150,12 @@ class CTAConfig:
     volume_profile_lookback_hours: int = 24
     volume_profile_bin_count: int = 24
     volume_profile_value_area_pct: float = 0.70
+    order_flow_enabled: bool = True
+    order_flow_depth_levels: int = 20
+    order_flow_confirmation_ratio: float = 1.5
+    order_flow_high_conviction_ratio: float = 2.0
+    order_flow_limit_buffer_bps: float = 3.0
+    order_flow_max_slippage_bps: float = 12.0
     fast_ema: int = 7  # legacy compatibility
     slow_ema: int = 21  # legacy compatibility
     polling_interval_seconds: int = 60
@@ -181,6 +187,14 @@ class CTAConfig:
         self.timeframe = self.execution_timeframe
         if self.boosted_risk_percent_per_trade <= 0:
             self.boosted_risk_percent_per_trade = self.risk_percent_per_trade
+        self.order_flow_depth_levels = max(1, int(self.order_flow_depth_levels))
+        self.order_flow_confirmation_ratio = max(0.0, float(self.order_flow_confirmation_ratio))
+        self.order_flow_high_conviction_ratio = max(
+            self.order_flow_confirmation_ratio,
+            float(self.order_flow_high_conviction_ratio),
+        )
+        self.order_flow_limit_buffer_bps = max(0.0, float(self.order_flow_limit_buffer_bps))
+        self.order_flow_max_slippage_bps = max(0.0, float(self.order_flow_max_slippage_bps))
 
 
 @dataclass
@@ -365,6 +379,12 @@ def load_config(config_path: str | Path) -> AppConfig:
         volume_profile_lookback_hours=int(cta_payload.get("volume_profile_lookback_hours", 24)),
         volume_profile_bin_count=int(cta_payload.get("volume_profile_bin_count", 24)),
         volume_profile_value_area_pct=float(cta_payload.get("volume_profile_value_area_pct", 0.70)),
+        order_flow_enabled=bool(cta_payload.get("order_flow_enabled", True)),
+        order_flow_depth_levels=int(cta_payload.get("order_flow_depth_levels", 20)),
+        order_flow_confirmation_ratio=float(cta_payload.get("order_flow_confirmation_ratio", 1.5)),
+        order_flow_high_conviction_ratio=float(cta_payload.get("order_flow_high_conviction_ratio", 2.0)),
+        order_flow_limit_buffer_bps=float(cta_payload.get("order_flow_limit_buffer_bps", 3.0)),
+        order_flow_max_slippage_bps=float(cta_payload.get("order_flow_max_slippage_bps", 12.0)),
         fast_ema=int(cta_payload.get("fast_ema", 7)),
         slow_ema=int(cta_payload.get("slow_ema", 21)),
         polling_interval_seconds=int(cta_payload.get("polling_interval_seconds", 60)),

@@ -23,6 +23,10 @@ class DummyClient:
         self.ohlcv_by_timeframe = {}
         self.positions = []
         self.latest_long_short_ratio = None
+        self.order_book = {
+            "bids": [[100.0 - index * 0.1, 1.6] for index in range(20)],
+            "asks": [[100.1 + index * 0.1, 1.0] for index in range(20)],
+        }
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 200, since=None):
         del symbol, since
@@ -32,6 +36,15 @@ class DummyClient:
     def fetch_last_price(self, symbol: str) -> float:
         del symbol
         return self.last_price
+
+    def fetch_order_book(self, symbol: str, limit: int | None = None):
+        del symbol
+        if limit is None:
+            return self.order_book
+        return {
+            "bids": list(self.order_book.get("bids", []))[:limit],
+            "asks": list(self.order_book.get("asks", []))[:limit],
+        }
 
     def place_market_order(self, symbol: str, side: str, amount: float, **kwargs):
         payload = {"symbol": symbol, "side": side, "amount": amount, **kwargs}
@@ -69,6 +82,10 @@ class DummyClient:
     def amount_to_precision(self, symbol: str, amount: float) -> float:
         del symbol
         return round(float(amount), 8)
+
+    def price_to_precision(self, symbol: str, price: float) -> float:
+        del symbol
+        return round(float(price), 8)
 
     def get_contract_value(self, symbol: str) -> float:
         del symbol
@@ -192,6 +209,11 @@ class TheHandsTests(unittest.TestCase):
         major_closes = [major_last_close - 2.0 * (59 - index) for index in range(60)]
         self._set_ohlcv("1h", swing_closes, 3_600_000)
         self._set_ohlcv("4h", major_closes, 14_400_000)
+
+    def _set_order_book(self, *, bid_size: float, ask_size: float, ask_levels=None) -> None:
+        bids = [[100.0 - index * 0.1, bid_size] for index in range(20)]
+        asks = ask_levels or [[100.1 + index * 0.1, ask_size] for index in range(20)]
+        self.client.order_book = {"bids": bids, "asks": asks}
 
     def _load_bullish_signal(self, lower_last_close: float = 100.0, higher_last_close: float = 140.0) -> None:
         lower_closes = []
@@ -382,6 +404,42 @@ class TheHandsTests(unittest.TestCase):
         )
         self.assertIsNotNone(robot.position)
         self.assertAlmostEqual(robot.position.risk_percent, self.cta_config.boosted_risk_percent_per_trade)
+
+    def test_cta_robot_blocks_entry_when_order_flow_imbalance_fails_last_second_confirmation(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        self._set_order_book(bid_size=1.2, ask_size=1.0)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+
+        result = robot.run()
+
+        self.assertEqual(result.action, "cta:order_flow_blocked")
+        self.assertEqual(len(self.client.market_orders), 0)
+        self.assertEqual(len(self.client.limit_orders), 0)
+        self.assertIsNone(robot.position)
+
+    def test_cta_robot_uses_order_flow_limit_price_for_high_conviction_entry(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        self._set_order_book(
+            bid_size=2.4,
+            ask_size=1.0,
+            ask_levels=[
+                [100.1, 0.005],
+                [100.2, 0.005],
+                [100.3, 0.050],
+            ] + [[100.4 + index * 0.1, 1.0] for index in range(17)],
+        )
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+
+        result = robot.run()
+
+        self.assertEqual(result.action, "cta:open_long_limit")
+        self.assertEqual(len(self.client.market_orders), 0)
+        self.assertEqual(len(self.client.limit_orders), 1)
+        self.assertEqual(self.client.limit_orders[0]["params"]["timeInForce"], "IOC")
+        self.assertGreater(self.client.limit_orders[0]["price"], 100.1)
+        self.assertIsNotNone(robot.position)
 
     def test_cta_robot_scales_out_and_all_outs_on_atr_stop(self) -> None:
         self._insert_status("trend")

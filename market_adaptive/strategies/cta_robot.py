@@ -14,6 +14,7 @@ from market_adaptive.risk import CTARiskProfile, LogicalPositionSnapshot
 from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies.base import BaseStrategyRobot
 from market_adaptive.strategies.mtf_engine import MTFSignal, MultiTimeframeSignalEngine
+from market_adaptive.strategies.order_flow_sentinel import OrderFlowAssessment, OrderFlowSentinel
 
 
 @dataclass
@@ -107,6 +108,7 @@ class CTARobot(BaseStrategyRobot):
         self.sentiment_analyst = sentiment_analyst
         self.position: ManagedPosition | None = None
         self.mtf_engine = MultiTimeframeSignalEngine(client, config)
+        self.order_flow_sentinel = OrderFlowSentinel(client, config)
 
     def should_notify_action(self, action: str) -> bool:
         if action in {
@@ -116,6 +118,8 @@ class CTARobot(BaseStrategyRobot):
             "cta:risk_blocked",
             "cta:range_filter_blocked",
             "cta:bullish_ready",
+            "cta:order_flow_blocked",
+            "cta:slippage_blocked",
             "skip:inactive",
         }:
             return False
@@ -290,9 +294,19 @@ class CTARobot(BaseStrategyRobot):
                     self._publish_risk_profile(None)
                     return "cta:sentiment_blocked"
 
+        order_flow_assessment: OrderFlowAssessment | None = None
+        if side == "buy" and self.config.order_flow_enabled:
+            order_flow_assessment = self.order_flow_sentinel.assess_entry(self.symbol, side, amount)
+            if not order_flow_assessment.entry_allowed:
+                self._publish_risk_profile(None)
+                return "cta:order_flow_blocked"
+
         position_side = "long" if signal.direction > 0 else "short"
+        notional_price = signal.price
+        if order_flow_assessment is not None and order_flow_assessment.reference_price is not None:
+            notional_price = max(notional_price, order_flow_assessment.reference_price)
         if self.risk_manager is not None:
-            requested_notional = self.client.estimate_notional(self.symbol, amount, signal.price)
+            requested_notional = self.client.estimate_notional(self.symbol, amount, notional_price)
             allowed, _reason = self.risk_manager.can_open_new_position(
                 self.symbol,
                 requested_notional,
@@ -303,31 +317,79 @@ class CTARobot(BaseStrategyRobot):
                 self._publish_risk_profile(None)
                 return "cta:risk_blocked"
 
-        self.client.place_market_order(self.symbol, side, amount)
+        order_response, used_limit_order = self._place_entry_order(
+            side=side,
+            amount=amount,
+            order_flow_assessment=order_flow_assessment,
+        )
+        filled_amount = self._extract_filled_amount(order_response, amount, used_limit_order=used_limit_order)
+        filled_amount = self._normalize_order_amount(filled_amount)
+        if filled_amount <= 0:
+            self._publish_risk_profile(None)
+            return "cta:slippage_blocked" if used_limit_order else "cta:risk_blocked"
 
-        atr_value = self._normalized_atr(signal.price, signal.atr)
+        entry_price = self._extract_order_price(
+            order_response,
+            fallback=(
+                order_flow_assessment.expected_average_price
+                if order_flow_assessment is not None and order_flow_assessment.expected_average_price is not None
+                else notional_price
+            ),
+        )
+        entry_price = float(entry_price)
+        atr_value = self._normalized_atr(entry_price, signal.atr)
         stop_distance = atr_value * self.config.stop_loss_atr
         if signal.direction > 0:
-            stop_price = signal.price - stop_distance
+            stop_price = entry_price - stop_distance
         else:
-            stop_price = signal.price + stop_distance
+            stop_price = entry_price + stop_distance
 
         self.position = ManagedPosition(
             side=position_side,
-            entry_price=signal.price,
-            initial_size=amount,
-            remaining_size=amount,
+            entry_price=entry_price,
+            initial_size=filled_amount,
+            remaining_size=filled_amount,
             stop_price=stop_price,
-            best_price=signal.price,
+            best_price=entry_price,
             atr_value=atr_value,
             stop_distance=stop_distance,
             risk_percent=signal.risk_percent,
         )
         self._publish_risk_profile(signal)
         action = f"cta:open_{position_side}"
+        if used_limit_order:
+            action += "_limit"
         if sentiment_halved:
             action += "_sentiment_halved"
         return action
+
+    def _place_entry_order(
+        self,
+        *,
+        side: str,
+        amount: float,
+        order_flow_assessment: OrderFlowAssessment | None,
+    ) -> tuple[dict, bool]:
+        if (
+            side == "buy"
+            and order_flow_assessment is not None
+            and order_flow_assessment.use_limit_order
+            and order_flow_assessment.recommended_limit_price is not None
+        ):
+            response = self.client.place_limit_order(
+                self.symbol,
+                side,
+                amount,
+                order_flow_assessment.recommended_limit_price,
+                params={
+                    "timeInForce": "IOC",
+                    "orderFlowImbalance": round(order_flow_assessment.imbalance_ratio, 4),
+                },
+            )
+            return response, True
+
+        response = self.client.place_market_order(self.symbol, side, amount)
+        return response, False
 
     def _manage_position(self, signal: TrendSignal) -> tuple[list[str], bool]:
         assert self.position is not None
@@ -426,6 +488,51 @@ class CTARobot(BaseStrategyRobot):
                 stop_distance=self.position.stop_distance,
             )
         )
+
+    def _extract_filled_amount(self, order: dict | None, fallback: float, *, used_limit_order: bool) -> float:
+        if not order:
+            return 0.0 if used_limit_order else float(fallback)
+
+        filled = order.get("filled")
+        if filled not in (None, ""):
+            return abs(float(filled))
+
+        info = order.get("info") or {}
+        for key in ("accFillSz", "fillSz", "filledSize"):
+            value = info.get(key)
+            if value not in (None, ""):
+                return abs(float(value))
+
+        amount = order.get("amount")
+        remaining = order.get("remaining")
+        if amount not in (None, "") and remaining not in (None, ""):
+            inferred_filled = max(0.0, abs(float(amount)) - abs(float(remaining)))
+            if inferred_filled > 0:
+                return inferred_filled
+
+        status = str(order.get("status") or "").lower()
+        if used_limit_order and status in {"canceled", "cancelled", "expired", "rejected"}:
+            return 0.0
+
+        if amount not in (None, ""):
+            return abs(float(amount))
+        return float(fallback)
+
+    def _extract_order_price(self, order: dict | None, *, fallback: float) -> float:
+        if not order:
+            return float(fallback)
+
+        for key in ("average", "avgPrice", "price"):
+            value = order.get(key)
+            if value not in (None, "", 0, "0"):
+                return float(value)
+
+        info = order.get("info") or {}
+        for key in ("avgPx", "fillPx", "px"):
+            value = info.get(key)
+            if value not in (None, "", 0, "0"):
+                return float(value)
+        return float(fallback)
 
     def _normalize_order_amount(self, amount: float) -> float:
         normalized = max(0.0, float(amount))

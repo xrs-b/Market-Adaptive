@@ -20,6 +20,10 @@ class DummyClient:
         self.last_price = 100.0
         self.ohlcv = []
         self.ohlcv_by_timeframe = {}
+        self.order_book = {
+            "bids": [[100.0 - index * 0.1, 1.6] for index in range(20)],
+            "asks": [[100.1 + index * 0.1, 1.0] for index in range(20)],
+        }
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 200, since=None):
         payload = self.ohlcv_by_timeframe.get(timeframe, self.ohlcv)
@@ -27,6 +31,15 @@ class DummyClient:
 
     def fetch_last_price(self, symbol: str) -> float:
         return self.last_price
+
+    def fetch_order_book(self, symbol: str, limit: int | None = None):
+        del symbol
+        if limit is None:
+            return self.order_book
+        return {
+            "bids": list(self.order_book.get("bids", []))[:limit],
+            "asks": list(self.order_book.get("asks", []))[:limit],
+        }
 
     def place_market_order(self, symbol: str, side: str, amount: float, **kwargs):
         payload = {"symbol": symbol, "side": side, "amount": amount, **kwargs}
