@@ -32,6 +32,20 @@ class DatabaseConfig:
 
 
 @dataclass
+class DiscordNotificationConfig:
+    enabled: bool = False
+    channel_id: str = ""
+    webhook_url: str = ""
+    bot_token: str = ""
+    username: str = "Market-Adaptive"
+
+
+@dataclass
+class NotificationConfig:
+    discord: DiscordNotificationConfig
+
+
+@dataclass
 class RuntimeConfig:
     timezone: str = "Asia/Shanghai"
     default_timeframe: str = "1h"
@@ -84,6 +98,7 @@ class GridConfig:
 class AppConfig:
     okx: OKXConfig
     database: DatabaseConfig
+    notification: NotificationConfig
     runtime: RuntimeConfig
     market_oracle: MarketOracleConfig
     execution: ExecutionConfig
@@ -111,6 +126,8 @@ def load_config(config_path: str | Path) -> AppConfig:
 
     okx_payload = payload.get("okx") or {}
     db_payload = payload.get("database") or {}
+    notification_payload = payload.get("notification") or {}
+    discord_payload = notification_payload.get("discord") or {}
     runtime_payload = payload.get("runtime") or {}
     market_oracle_payload = payload.get("market_oracle") or {}
     execution_payload = payload.get("execution") or {}
@@ -129,6 +146,15 @@ def load_config(config_path: str | Path) -> AppConfig:
     )
     database = DatabaseConfig(
         path=(path.parent.parent / str(db_payload.get("path", "data/market_adaptive.sqlite3"))).resolve()
+    )
+    notification = NotificationConfig(
+        discord=DiscordNotificationConfig(
+            enabled=bool(discord_payload.get("enabled", False)),
+            channel_id=str(discord_payload.get("channel_id", "")),
+            webhook_url=str(discord_payload.get("webhook_url", "")),
+            bot_token=str(discord_payload.get("bot_token", "")),
+            username=str(discord_payload.get("username", "Market-Adaptive")),
+        )
     )
     runtime = RuntimeConfig(
         timezone=str(runtime_payload.get("timezone", "Asia/Shanghai")),
@@ -172,6 +198,7 @@ def load_config(config_path: str | Path) -> AppConfig:
     return AppConfig(
         okx=okx,
         database=database,
+        notification=notification,
         runtime=runtime,
         market_oracle=market_oracle,
         execution=execution,

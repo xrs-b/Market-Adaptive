@@ -36,6 +36,14 @@ execution:
   cta_order_size: 0.01
   grid_order_size: 0.01
 
+notification:
+  discord:
+    enabled: false
+    channel_id: ""
+    webhook_url: ""
+    bot_token: ""
+    username: "Market-Adaptive"
+
 cta:
   symbol: "BTC/USDT"
   timeframe: "15m"

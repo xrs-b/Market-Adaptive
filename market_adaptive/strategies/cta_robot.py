@@ -11,8 +11,8 @@ class CTARobot(BaseStrategyRobot):
     strategy_name = "cta"
     activation_status = "trend"
 
-    def __init__(self, client, database, config: CTAConfig, execution_config: ExecutionConfig) -> None:
-        super().__init__(client=client, database=database, symbol=config.symbol)
+    def __init__(self, client, database, config: CTAConfig, execution_config: ExecutionConfig, notifier=None) -> None:
+        super().__init__(client=client, database=database, symbol=config.symbol, notifier=notifier)
         self.config = config
         self.execution_config = execution_config
 

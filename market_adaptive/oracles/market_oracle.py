@@ -4,6 +4,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 import ccxt
 
@@ -40,10 +41,12 @@ class MarketOracle:
         client: OKXClient,
         database: DatabaseInitializer,
         config: MarketOracleConfig,
+        notifier: Any | None = None,
     ) -> None:
         self.client = client
         self.database = database
         self.config = config
+        self.notifier = notifier
 
     def collect_market_snapshot(self) -> MultiTimeframeMarketSnapshot:
         higher_ohlcv = self.client.fetch_ohlcv(
@@ -99,6 +102,7 @@ class MarketOracle:
         return "sideways"
 
     def run_once(self) -> MarketStatusRecord:
+        previous = self.database.fetch_latest_market_status(self.config.symbol)
         snapshot = self.collect_market_snapshot()
         status = self.determine_status(snapshot)
         record = MarketStatusRecord(
@@ -116,6 +120,8 @@ class MarketOracle:
             record.adx_value,
             record.volatility,
         )
+        if previous is None or previous.status != record.status:
+            self._notify_status_change(previous.status if previous else None, record)
         return record
 
     def run_forever(self) -> None:
@@ -132,3 +138,15 @@ class MarketOracle:
             except Exception as exc:  # pragma: no cover - hard runtime guard
                 logger.exception("Market-Oracle unexpected failure: %s", exc)
             time.sleep(self.config.polling_interval_seconds)
+
+    def _notify_status_change(self, previous_status: str | None, record: MarketStatusRecord) -> None:
+        if self.notifier is None:
+            return
+        old_status = previous_status or "none"
+        self.notifier.send(
+            "Market Status Switched",
+            (
+                f"symbol={record.symbol} | {old_status} -> {record.status} | "
+                f"adx={record.adx_value:.4f} | volatility={record.volatility:.6f}"
+            ),
+        )

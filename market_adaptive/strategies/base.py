@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from market_adaptive.clients.okx_client import OKXClient
 from market_adaptive.db import DatabaseInitializer, StrategyRuntimeState
@@ -22,10 +23,17 @@ class BaseStrategyRobot:
     strategy_name = "base"
     activation_status = ""
 
-    def __init__(self, client: OKXClient, database: DatabaseInitializer, symbol: str) -> None:
+    def __init__(
+        self,
+        client: OKXClient,
+        database: DatabaseInitializer,
+        symbol: str,
+        notifier: Any | None = None,
+    ) -> None:
         self.client = client
         self.database = database
         self.symbol = symbol
+        self.notifier = notifier
 
     def run(self) -> StrategyRunResult:
         market_status = self.database.fetch_latest_market_status(self.symbol)
@@ -43,6 +51,8 @@ class BaseStrategyRobot:
         active = current_status == self.activation_status
         if active:
             action = self.execute_active_cycle()
+            if action not in {"cta:no_cross", "skip:inactive"} and not action.startswith("grid:placed_0"):
+                self._notify_action(action, current_status)
 
         self.database.upsert_strategy_runtime_state(
             StrategyRuntimeState(
@@ -59,6 +69,19 @@ class BaseStrategyRobot:
         self.client.cancel_all_orders(self.symbol)
         self.client.close_all_positions(self.symbol)
         logger.info("%s flatten done: symbol=%s", self.strategy_name, self.symbol)
+        if self.notifier is not None:
+            self.notifier.send(
+                "Strategy Cleanup",
+                f"strategy={self.strategy_name} | symbol={self.symbol} | reason={reason}",
+            )
 
     def execute_active_cycle(self) -> str:
         raise NotImplementedError
+
+    def _notify_action(self, action: str, status: str) -> None:
+        if self.notifier is None:
+            return
+        self.notifier.send(
+            "Strategy Action",
+            f"strategy={self.strategy_name} | symbol={self.symbol} | status={status} | action={action}",
+        )

@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover - optional runtime dependency fallback
 from market_adaptive.clients.okx_client import OKXClient
 from market_adaptive.config import AppConfig
 from market_adaptive.db import DatabaseInitializer, SystemStateRecord
+from market_adaptive.notifiers import DiscordNotifier, NullNotifier
 from market_adaptive.oracles import MarketOracle
 from market_adaptive.strategies import CTARobot, GridRobot
 
@@ -37,6 +38,7 @@ class MainController:
         self.threads: list[threading.Thread] = []
         self.logger = logging.LoggerAdapter(logging.getLogger(__name__), {"robot": "main"})
         self.symbols = sorted({config.market_oracle.symbol, config.cta.symbol, config.grid.symbol})
+        self.notifier = DiscordNotifier(config.notification.discord) if config.notification.discord.enabled else NullNotifier()
 
         self.oracle_client = OKXClient(config.okx, config.execution)
         self.cta_client = OKXClient(config.okx, config.execution)
@@ -44,9 +46,9 @@ class MainController:
         self.risk_client = OKXClient(config.okx, config.execution)
         self.shutdown_client = OKXClient(config.okx, config.execution)
 
-        self.market_oracle = MarketOracle(self.oracle_client, database, config.market_oracle)
-        self.cta_robot = CTARobot(self.cta_client, database, config.cta, config.execution)
-        self.grid_robot = GridRobot(self.grid_client, database, config.grid, config.execution)
+        self.market_oracle = MarketOracle(self.oracle_client, database, config.market_oracle, notifier=self.notifier)
+        self.cta_robot = CTARobot(self.cta_client, database, config.cta, config.execution, notifier=self.notifier)
+        self.grid_robot = GridRobot(self.grid_client, database, config.grid, config.execution, notifier=self.notifier)
 
         self.starting_equity: float | None = None
         self.latest_total_pnl: float = 0.0
@@ -60,6 +62,7 @@ class MainController:
         self.install_signal_handlers()
         self.starting_equity = self.risk_client.fetch_total_equity()
         self.logger.info("Main Controller started | starting_equity=%.4f", self.starting_equity)
+        self.notifier.send("System Started", f"starting_equity={self.starting_equity:.4f} | symbols={','.join(self.symbols)}")
 
         worker_specs = [
             WorkerSpec("market_oracle", self.config.market_oracle.polling_interval_seconds, self.market_oracle.run_once),
@@ -100,6 +103,10 @@ class MainController:
         )
         if drawdown > 0.05:
             logger.error("Max drawdown breached: %.2f%% > 5.00%% | flattening now", drawdown * 100)
+            self.notifier.send(
+                "Risk Triggered",
+                f"drawdown={drawdown * 100:.2f}% | equity={current_equity:.4f} | unrealized_pnl={total_pnl:.4f}",
+            )
             self.shutdown_client.cancel_all_orders_for_symbols(self.symbols)
             self.shutdown_client.close_all_positions_for_symbols(self.symbols)
             self.stop_event.set()
@@ -140,12 +147,17 @@ class MainController:
             except Exception as exc:  # pragma: no cover
                 self.logger.exception("Shutdown cleanup failed: %s", exc)
 
+        shutdown_at = datetime.now(timezone.utc).isoformat()
         self.database.upsert_system_state(
             SystemStateRecord(
                 state_key="last_shutdown_at",
-                state_value=datetime.now(timezone.utc).isoformat(),
-                updated_at=datetime.now(timezone.utc).isoformat(),
+                state_value=shutdown_at,
+                updated_at=shutdown_at,
             )
+        )
+        self.notifier.send(
+            "System Stopped",
+            f"shutdown_at={shutdown_at} | unrealized_pnl={self.latest_total_pnl:.4f}",
         )
         self.logger.info("Database checkpoint saved. Main Controller stopped.")
 
