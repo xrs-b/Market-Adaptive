@@ -83,6 +83,34 @@ class DummyClient:
         return self.latest_long_short_ratio
 
 
+class DummyRiskManager:
+    def __init__(self, *, allow_grid: bool = True, grid_reason: str | None = None) -> None:
+        self.allow_grid = allow_grid
+        self.grid_reason = grid_reason
+        self.cta_profiles = []
+        self.grid_profiles = []
+
+    def calculate_position_size(self, symbol: str, risk_percent: float, stop_loss_atr: float, *, atr_value=None, last_price=None) -> float:
+        del symbol, risk_percent, stop_loss_atr, atr_value, last_price
+        return 0.02
+
+    def can_open_new_position(self, symbol: str, requested_notional: float, strategy_name: str | None = None):
+        del symbol, requested_notional
+        if strategy_name == "grid" and not self.allow_grid:
+            return False, self.grid_reason
+        return True, None
+
+    def check_symbol_notional_limit(self, symbol: str, requested_notional: float):
+        del symbol, requested_notional
+        return True, None
+
+    def update_cta_risk(self, profile) -> None:
+        self.cta_profiles.append(profile)
+
+    def update_grid_risk(self, profile) -> None:
+        self.grid_profiles.append(profile)
+
+
 class TheHandsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -95,6 +123,7 @@ class TheHandsTests(unittest.TestCase):
             lower_timeframe="15m",
             higher_timeframe="1h",
             atr_trailing_multiplier=1.0,
+            stop_loss_atr=2.0,
             first_take_profit_size=0.5,
             second_take_profit_size=0.25,
         )
@@ -178,6 +207,17 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(len(self.client.market_orders), 1)
         self.assertEqual(self.client.market_orders[0]["side"], "buy")
 
+    def test_cta_robot_uses_stop_loss_atr_for_initial_dynamic_stop(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+
+        robot.run()
+
+        self.assertIsNotNone(robot.position)
+        expected_stop = robot.position.entry_price - robot.position.atr_value * self.cta_config.stop_loss_atr
+        self.assertAlmostEqual(robot.position.stop_price, expected_stop)
+
     def test_cta_robot_blocks_bullish_entry_when_retail_sentiment_is_extreme(self) -> None:
         self._insert_status("trend")
         self._load_bullish_signal(lower_last_close=100.0)
@@ -217,7 +257,7 @@ class TheHandsTests(unittest.TestCase):
         self.assertIsNotNone(robot.position)
         self.assertAlmostEqual(robot.position.initial_size, 0.01)
 
-    def test_cta_robot_scales_out_and_uses_trailing_stop(self) -> None:
+    def test_cta_robot_scales_out_and_all_outs_on_atr_stop(self) -> None:
         self._insert_status("trend")
         robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
 
@@ -241,7 +281,7 @@ class TheHandsTests(unittest.TestCase):
         robot.position.stop_price = 104.0
         self._load_pullback_after_rally(latest_close=103.0)
         fourth_result = robot.run()
-        self.assertEqual(fourth_result.action, "cta:trailing_stop_exit")
+        self.assertEqual(fourth_result.action, "cta:atr_stop_all_out")
         self.assertAlmostEqual(self.client.market_orders[3]["amount"], 0.005)
         self.assertIsNone(robot.position)
 
@@ -271,6 +311,18 @@ class TheHandsTests(unittest.TestCase):
         self.assertTrue(all(order["price"] <= 103.0 for order in sell_orders))
         self.assertLess(max(buy_orders, key=lambda order: order["price"])["price"], 100.0)
         self.assertGreater(min(sell_orders, key=lambda order: order["price"])["price"], 100.0)
+
+    def test_grid_robot_honors_risk_observe_block_and_stops_opening_orders(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+        risk_manager = DummyRiskManager(allow_grid=False, grid_reason="grid_observe_lower_break|price=95.00|lower=97.00")
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, risk_manager=risk_manager)
+
+        result = robot.run()
+
+        self.assertEqual(result.action, "grid:risk_blocked")
+        self.assertEqual(len(self.client.limit_orders), 0)
+        self.assertEqual(len(risk_manager.grid_profiles), 1)
 
     def test_grid_robot_cools_down_repeatedly_triggered_buy_layer(self) -> None:
         self._insert_status("sideways")
@@ -354,18 +406,18 @@ class TheHandsTests(unittest.TestCase):
         self.assertTrue(all(order["amount"] > self.execution.grid_order_size for order in reduce_only_buys))
         self.assertIn("rebalances=2", result.action)
 
-    def test_grid_robot_triggers_liquidation_guard_when_price_is_too_close(self) -> None:
-        self._insert_status("sideways")
-        self._load_sideways_grid_data(center=100.0)
-        self.client.positions = [{"contracts": 0.08, "side": "long", "liquidationPrice": 96.0}]
+    def test_grid_robot_reduces_exposure_stepwise_instead_of_flattening(self) -> None:
+        self.client.positions = [{"contracts": 0.12, "side": "long", "info": {"posSide": "long"}}]
         robot = GridRobot(self.client, self.database, self.grid_config, self.execution)
 
-        result = robot.run()
+        result = robot.reduce_exposure_step("grid_liquidation_warning", 0.25)
 
-        self.assertEqual(result.action.split("|", 1)[0], "grid:liquidation_guard_triggered")
+        self.assertIn("grid:step_reduce", result)
         self.assertEqual(self.client.cancel_all_calls, ["BTC/USDT"])
-        self.assertEqual(self.client.close_all_calls, ["BTC/USDT"])
-        self.assertEqual(len(self.client.limit_orders), 0)
+        self.assertEqual(len(self.client.market_orders), 1)
+        self.assertEqual(self.client.market_orders[0]["side"], "sell")
+        self.assertTrue(self.client.market_orders[0]["reduce_only"])
+        self.assertAlmostEqual(self.client.market_orders[0]["amount"], 0.03)
 
     def test_status_switch_triggers_flatten_before_inactive_cycle(self) -> None:
         self._insert_status("trend", "2026-04-10T03:00:00+00:00")

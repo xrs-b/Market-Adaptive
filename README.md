@@ -89,6 +89,11 @@ risk_control:
   default_symbol_max_notional: 0
   symbol_notional_limits:
     BTC/USDT: 1500
+  grid_margin_ratio_warning: 0.45
+  grid_deviation_reduce_ratio: 0.25
+  grid_liquidation_warning_ratio: 0.08
+  grid_reduction_step_pct: 0.25
+  grid_reduction_cooldown_seconds: 300
 
 sentiment:
   enabled: true
@@ -169,17 +174,17 @@ notification:
 ### 策略规则
 - `CTARobot` 只在 `trend` 激活，同时读取 `15m` 与 `1h` 两个周期；只有当双周期 `SuperTrend` 方向一致且 `OBV` 相对其信号线方向一致时，才会发出 OKX 模拟盘合约市价单
 - CTA 多头开仓前会额外读取 OKX 公共 `long_short_accounts_ratio`；当零售多头情绪比值大于 `2.5` 时，默认阻止买入信号（也可配置为把多头仓位减半）
-- CTA 持仓使用 `ATR` 追踪止损模型，默认在 `+2%` 先止盈 `50%`，`+5%` 再止盈 `25%`，剩余仓位交给 trailing stop 管理
+- CTA 持仓使用 `ATR` 动态止损距离作为主风控参数：开仓与后续上移/下移止损均以 `stop_loss_atr` 为准；默认在 `+2%` 先止盈 `50%`，`+5%` 再止盈 `25%`，但一旦 ATR 风险止损被击穿，会立即对剩余仓位执行 all-out 全部退出
 - `GridRobot` 只在 `sideways` 激活，先显式向 OKX 同步保证金模式（`execution.td_mode`）与 3x / 5x 杠杆，然后按当前价上下各 3% 的中性区间重建双边网格限价单；在同一方向持仓过重时会补充 reduce-only 再平衡单
-- Grid 会持续读取交易所持仓的强平价；若当前价距离任一强平价不足 `5%`，会立即撤销该 symbol 全部网格挂单并市价减仓/平仓
+- Grid 由 `RiskControlManager` 接管分层风险治理：当价格跌破网格下沿时先暂停新增网格开仓并观察；当保证金风险率、边界偏离度或强平安全缓冲触发阈值时，改为按 `grid_reduction_step_pct` 分批减仓，而不是一次性全平
 - 若数据库状态发生切换，对应机器人会先尝试撤销该 symbol 全部挂单并平掉全部持仓，再进入新周期
 
 ### 总控与风控
 - `MainController` 使用 `threading` 并发启动 `MarketOracle`、`CTARobot`、`GridRobot`
 - `RiskControlManager` 每分钟检查一次账户日内起始权益、总浮盈亏、维护保证金 / 风险率，并执行仓位恢复检查
-- CTA 开仓使用 `calculate_position_size(symbol, risk_percent, stop_loss_atr)`，基于账户权益、ATR 止损距离与 OKX 合约面值动态换算下单张数
+- CTA 开仓使用 `calculate_position_size(symbol, risk_percent, stop_loss_atr)`，基于账户权益、ATR 动态止损距离与 OKX 合约面值动态换算下单张数；The Shield 还会持续校验 CTA 的实时 ATR 止损，一旦命中立即通知并触发全退
 - 当日内回撤超过 `5%` 时，会立即撤单、强平、写入数据库 `system_status=OFF`、停止机器人并触发通知
-- 当账户维护保证金风险率超过 `60%` 时，会阻止新开仓，并优先压缩 Grid 暴露，同时执行单币种名义仓位上限约束
+- Grid 风控会先用 `grid_margin_ratio_warning` 与下沿突破状态阻止新增挂单；当账户风险率达到 `max_margin_ratio`、价格偏离网格边界超过 `grid_deviation_reduce_ratio`，或当前价距离最近强平价小于 `grid_liquidation_warning_ratio` 时，会按 `grid_reduction_step_pct` 分批减仓并通过通知回报
 - 日志支持颜色区分、CPU 占用率输出、Ctrl/Cmd+C 优雅退出与 shutdown checkpoint 落库
 
 ## 可复用入口

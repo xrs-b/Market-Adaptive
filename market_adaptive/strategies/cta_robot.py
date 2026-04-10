@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from market_adaptive.config import CTAConfig, ExecutionConfig
 from market_adaptive.indicators import compute_atr, compute_obv, compute_supertrend, ohlcv_to_dataframe
-from market_adaptive.risk import LogicalPositionSnapshot
+from market_adaptive.risk import CTARiskProfile, LogicalPositionSnapshot
 from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies.base import BaseStrategyRobot
 
@@ -28,6 +28,8 @@ class ManagedPosition:
     remaining_size: float
     stop_price: float
     best_price: float
+    atr_value: float
+    stop_distance: float
     first_target_hit: bool = False
     second_target_hit: bool = False
 
@@ -44,15 +46,18 @@ class ManagedPosition:
             return (price - self.entry_price) / self.entry_price
         return (self.entry_price - price) / self.entry_price
 
-    def update_trailing_stop(self, price: float, atr: float, multiplier: float) -> None:
+    def update_dynamic_stop(self, price: float, atr: float, stop_multiplier: float) -> None:
+        current_stop_distance = max(float(atr) * float(stop_multiplier), float(price) * 0.001)
+        self.atr_value = float(atr)
+        self.stop_distance = current_stop_distance
         if self.side == "long":
             self.best_price = max(self.best_price, price)
-            candidate = self.best_price - atr * multiplier
+            candidate = self.best_price - current_stop_distance
             self.stop_price = max(self.stop_price, candidate)
             return
 
         self.best_price = min(self.best_price, price)
-        candidate = self.best_price + atr * multiplier
+        candidate = self.best_price + current_stop_distance
         self.stop_price = min(self.stop_price, candidate)
 
     def stop_hit(self, price: float) -> bool:
@@ -90,6 +95,18 @@ class CTARobot(BaseStrategyRobot):
     def flatten_and_cancel_all(self, reason: str) -> None:
         super().flatten_and_cancel_all(reason)
         self.position = None
+        self._publish_risk_profile(None)
+
+    def force_risk_exit(self, reason: str) -> str:
+        if self.position is None:
+            self.client.cancel_all_orders(self.symbol)
+            self._publish_risk_profile(None)
+            return "cta:risk_exit_no_position"
+
+        self.client.cancel_all_orders(self.symbol)
+        self._close_remaining_position(reason=reason)
+        self._publish_risk_profile(None)
+        return "cta:risk_exit_all_out"
 
     def get_logical_position(self) -> LogicalPositionSnapshot | None:
         if self.position is None:
@@ -104,10 +121,12 @@ class CTARobot(BaseStrategyRobot):
     def reset_local_position(self, reason: str) -> None:
         del reason
         self.position = None
+        self._publish_risk_profile(None)
 
     def execute_active_cycle(self) -> str:
         signal = self._build_trend_signal()
         if signal is None:
+            self._publish_risk_profile(None)
             return "cta:insufficient_data"
 
         actions: list[str] = []
@@ -118,11 +137,13 @@ class CTARobot(BaseStrategyRobot):
             if actions:
                 return "+".join(actions)
             if closed_position:
+                self._publish_risk_profile(None)
                 return "cta:hold"
 
         if self.position is None and signal.direction != 0:
             return self._open_position(signal)
 
+        self._publish_risk_profile(signal)
         return "cta:no_signal" if self.position is None else "cta:hold"
 
     def _build_trend_signal(self) -> TrendSignal | None:
@@ -195,16 +216,19 @@ class CTARobot(BaseStrategyRobot):
 
         amount = self._normalize_order_amount(amount)
         if amount <= 0:
+            self._publish_risk_profile(None)
             return "cta:risk_blocked"
 
         if side == "buy" and self.sentiment_analyst is not None:
             sentiment_decision = self.sentiment_analyst.evaluate_cta_buy(self.symbol)
             if sentiment_decision.blocked:
+                self._publish_risk_profile(None)
                 return "cta:sentiment_blocked"
             if sentiment_decision.size_multiplier < 1.0:
                 amount = self._normalize_order_amount(amount * sentiment_decision.size_multiplier)
                 sentiment_halved = amount > 0
                 if amount <= 0:
+                    self._publish_risk_profile(None)
                     return "cta:sentiment_blocked"
 
         if self.risk_manager is not None:
@@ -215,16 +239,18 @@ class CTARobot(BaseStrategyRobot):
                 strategy_name=self.strategy_name,
             )
             if not allowed:
+                self._publish_risk_profile(None)
                 return "cta:risk_blocked"
 
         self.client.place_market_order(self.symbol, side, amount)
 
         atr_value = self._normalized_atr(signal.price, signal.atr)
+        stop_distance = atr_value * self.config.stop_loss_atr
         if signal.direction > 0:
-            stop_price = signal.price - atr_value * self.config.atr_trailing_multiplier
+            stop_price = signal.price - stop_distance
             position_side = "long"
         else:
-            stop_price = signal.price + atr_value * self.config.atr_trailing_multiplier
+            stop_price = signal.price + stop_distance
             position_side = "short"
 
         self.position = ManagedPosition(
@@ -234,7 +260,10 @@ class CTARobot(BaseStrategyRobot):
             remaining_size=amount,
             stop_price=stop_price,
             best_price=signal.price,
+            atr_value=atr_value,
+            stop_distance=stop_distance,
         )
+        self._publish_risk_profile(signal)
         action = f"cta:open_{position_side}"
         if sentiment_halved:
             action += "_sentiment_halved"
@@ -246,6 +275,7 @@ class CTARobot(BaseStrategyRobot):
 
         if signal.direction != 0 and signal.direction != self.position.direction:
             self._close_remaining_position(reason="signal_flip")
+            self._publish_risk_profile(None)
             actions.append("cta:signal_flip_exit")
             return actions, True
 
@@ -264,15 +294,18 @@ class CTARobot(BaseStrategyRobot):
                 actions.append("cta:take_profit_5pct")
 
         if self.position is None:
+            self._publish_risk_profile(None)
             return actions, True
 
         atr_value = self._normalized_atr(signal.price, signal.atr)
-        self.position.update_trailing_stop(signal.price, atr_value, self.config.atr_trailing_multiplier)
+        self.position.update_dynamic_stop(signal.price, atr_value, self.config.stop_loss_atr)
         if self.position.stop_hit(signal.price):
-            self._close_remaining_position(reason="trailing_stop")
-            actions.append("cta:trailing_stop_exit")
+            self._close_remaining_position(reason="atr_stop")
+            self._publish_risk_profile(None)
+            actions.append("cta:atr_stop_all_out")
             return actions, True
 
+        self._publish_risk_profile(signal)
         return actions, False
 
     def _reduce_position(self, size: float) -> bool:
@@ -292,6 +325,9 @@ class CTARobot(BaseStrategyRobot):
         self.position.remaining_size = self._round_size(self.position.remaining_size - amount)
         if self.position.remaining_size <= 0:
             self.position = None
+            self._publish_risk_profile(None)
+        else:
+            self._publish_risk_profile(None)
         return True
 
     def _close_remaining_position(self, reason: str) -> None:
@@ -308,6 +344,28 @@ class CTARobot(BaseStrategyRobot):
                 params={"reason": reason},
             )
         self.position = None
+
+    def _publish_risk_profile(self, signal: TrendSignal | None) -> None:
+        if self.risk_manager is None:
+            return
+        if self.position is None:
+            self.risk_manager.update_cta_risk(None)
+            return
+
+        atr_value = self.position.atr_value
+        if signal is not None:
+            atr_value = self._normalized_atr(signal.price, signal.atr)
+
+        self.risk_manager.update_cta_risk(
+            CTARiskProfile(
+                symbol=self.symbol,
+                side=self.position.side,
+                stop_price=self.position.stop_price,
+                remaining_size=self._round_size(self.position.remaining_size),
+                atr_value=atr_value,
+                stop_distance=self.position.stop_distance,
+            )
+        )
 
     def _normalize_order_amount(self, amount: float) -> float:
         normalized = max(0.0, float(amount))

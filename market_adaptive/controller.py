@@ -69,6 +69,7 @@ class MainController:
             notifier=self.notifier,
             stop_callback=self.stop,
             reduce_grid_exposure_callback=self._reduce_grid_exposure,
+            flatten_cta_position_callback=self._flatten_cta_position,
             logical_position_provider=self._collect_logical_positions,
             local_position_reset_callback=self._reset_local_position,
         )
@@ -152,14 +153,23 @@ class MainController:
         if symbol == self.cta_robot.symbol:
             self.cta_robot.reset_local_position(reason)
 
-    def _reduce_grid_exposure(self, reason: str) -> None:
-        self.grid_client.cancel_all_orders(self.grid_robot.symbol)
-        if self.cta_robot.get_logical_position() is None:
-            self.grid_client.close_all_positions(self.grid_robot.symbol)
+    def _flatten_cta_position(self, reason: str) -> None:
+        result = self.cta_robot.force_risk_exit(reason)
         if self.notifier is not None:
             self.notifier.send(
                 "Risk Action",
-                f"strategy=grid | symbol={self.grid_robot.symbol} | action=reduce_exposure | reason={reason}",
+                f"strategy=cta | symbol={self.cta_robot.symbol} | action=full_exit | reason={reason} | result={result}",
+            )
+
+    def _reduce_grid_exposure(self, reason: str, reduction_step_pct: float) -> None:
+        result = self.grid_robot.reduce_exposure_step(reason, reduction_step_pct)
+        if self.notifier is not None:
+            self.notifier.send(
+                "Risk Action",
+                (
+                    f"strategy=grid | symbol={self.grid_robot.symbol} | action=reduce_exposure | "
+                    f"step={reduction_step_pct:.0%} | reason={reason} | result={result}"
+                ),
             )
 
     def _worker_loop(self, spec: WorkerSpec) -> None:

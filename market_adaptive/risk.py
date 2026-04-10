@@ -46,6 +46,43 @@ class AccountRiskSnapshot:
 
 
 @dataclass
+class CTARiskProfile:
+    symbol: str
+    side: str
+    stop_price: float
+    remaining_size: float
+    atr_value: float
+    stop_distance: float
+
+
+@dataclass
+class GridRiskProfile:
+    symbol: str
+    lower_bound: float
+    upper_bound: float
+
+
+@dataclass
+class GridLiveRiskMetrics:
+    symbol: str
+    current_price: float
+    lower_bound: float
+    upper_bound: float
+    total_deviation_ratio: float
+    net_position_size: float
+    nearest_liquidation_price: float | None = None
+    nearest_liquidation_distance_ratio: float | None = None
+
+    @property
+    def below_lower_bound(self) -> bool:
+        return self.current_price < self.lower_bound - 1e-12
+
+    @property
+    def has_exposure(self) -> bool:
+        return abs(self.net_position_size) > 1e-12
+
+
+@dataclass
 class RiskControlManager:
     config: RiskControlConfig
     runtime_config: RuntimeConfig
@@ -55,7 +92,8 @@ class RiskControlManager:
     symbols: list[str]
     notifier: Any | None = None
     stop_callback: Callable[[], None] | None = None
-    reduce_grid_exposure_callback: Callable[[str], None] | None = None
+    reduce_grid_exposure_callback: Callable[[str, float], None] | None = None
+    flatten_cta_position_callback: Callable[[str], None] | None = None
     logical_position_provider: Callable[[], dict[str, LogicalPositionSnapshot | None]] | None = None
     local_position_reset_callback: Callable[[str, str], None] | None = None
     daily_start_equity: float | None = None
@@ -64,7 +102,10 @@ class RiskControlManager:
     new_openings_blocked: bool = False
     block_reason: str | None = None
     circuit_breaker_triggered: bool = False
-    _grid_reduction_applied: bool = field(default=False, init=False, repr=False)
+    latest_cta_risk: CTARiskProfile | None = None
+    latest_grid_risk: GridRiskProfile | None = None
+    _grid_last_reduction_at: datetime | None = field(default=None, init=False, repr=False)
+    _cta_exit_applied: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.symbols = sorted(set(self.symbols))
@@ -75,6 +116,14 @@ class RiskControlManager:
         self._sync_daily_baseline(current_equity=current_equity)
         self._persist_system_status("ON")
         self._persist_opening_block(False, None)
+
+    def update_cta_risk(self, profile: CTARiskProfile | None) -> None:
+        self.latest_cta_risk = profile
+        if profile is None:
+            self._cta_exit_applied = False
+
+    def update_grid_risk(self, profile: GridRiskProfile | None) -> None:
+        self.latest_grid_risk = profile
 
     def monitor_once(self) -> AccountRiskSnapshot:
         current_equity = self.client.fetch_total_equity()
@@ -101,12 +150,6 @@ class RiskControlManager:
 
         self._persist_opening_block(margin_blocked, block_reason)
 
-        if margin_blocked and self.reduce_grid_exposure_callback is not None and not self._grid_reduction_applied:
-            self.reduce_grid_exposure_callback(block_reason or "margin_ratio_limit")
-            self._grid_reduction_applied = True
-        if not margin_blocked:
-            self._grid_reduction_applied = False
-
         snapshot = AccountRiskSnapshot(
             equity=current_equity,
             daily_start_equity=self.daily_start_equity,
@@ -118,6 +161,9 @@ class RiskControlManager:
             new_openings_blocked=margin_blocked,
             block_reason=block_reason,
         )
+
+        self._apply_cta_risk_controls()
+        self._apply_grid_risk_controls(snapshot)
 
         logger.info(
             "Risk heartbeat | equity=%.4f daily_start=%.4f drawdown=%.2f%% unrealized_pnl=%.4f margin_ratio=%.2f%% total_notional=%.4f blocked=%s",
@@ -170,14 +216,22 @@ class RiskControlManager:
             return 0.0
         return self.client.amount_to_precision(symbol, amount)
 
-    def can_open_new_position(self, symbol: str, requested_notional: float, strategy_name: str | None = None) -> tuple[bool, str | None]:
-        del strategy_name
+    def can_open_new_position(
+        self,
+        symbol: str,
+        requested_notional: float,
+        strategy_name: str | None = None,
+    ) -> tuple[bool, str | None]:
         if self.circuit_breaker_triggered:
             return False, "circuit_breaker"
 
         snapshot = self.monitor_once()
         if snapshot.new_openings_blocked:
             return False, snapshot.block_reason
+
+        strategy_block_reason = self._resolve_strategy_opening_block(snapshot, strategy_name)
+        if strategy_block_reason is not None:
+            return False, strategy_block_reason
 
         return self.check_symbol_notional_limit(symbol, requested_notional)
 
@@ -262,6 +316,146 @@ class RiskControlManager:
         )
         if self.stop_callback is not None:
             self.stop_callback()
+
+    def _apply_cta_risk_controls(self) -> None:
+        profile = self.latest_cta_risk
+        if profile is None:
+            self._cta_exit_applied = False
+            return
+
+        current_price = float(self.client.fetch_last_price(profile.symbol))
+        stop_hit = current_price <= profile.stop_price if profile.side == "long" else current_price >= profile.stop_price
+        if not stop_hit:
+            self._cta_exit_applied = False
+            return
+        if self._cta_exit_applied or self.flatten_cta_position_callback is None:
+            return
+
+        reason = (
+            "cta_atr_stop_hit"
+            f"|price={current_price:.2f}"
+            f"|stop={profile.stop_price:.2f}"
+            f"|distance={profile.stop_distance:.2f}"
+            f"|atr={profile.atr_value:.4f}"
+        )
+        self.flatten_cta_position_callback(reason)
+        self._cta_exit_applied = True
+
+    def _apply_grid_risk_controls(self, snapshot: AccountRiskSnapshot) -> None:
+        metrics = self._build_live_grid_metrics()
+        if metrics is None or not metrics.has_exposure:
+            return
+
+        reduction_reason = self._resolve_grid_reduction_reason(snapshot, metrics)
+        if reduction_reason is None:
+            return
+        if self.reduce_grid_exposure_callback is None:
+            return
+        if not self._grid_reduction_due():
+            return
+
+        step_pct = min(1.0, max(0.01, float(self.config.grid_reduction_step_pct)))
+        self.reduce_grid_exposure_callback(reduction_reason, step_pct)
+        self._grid_last_reduction_at = datetime.now(timezone.utc)
+
+    def _resolve_strategy_opening_block(
+        self,
+        snapshot: AccountRiskSnapshot,
+        strategy_name: str | None,
+    ) -> str | None:
+        if strategy_name != "grid":
+            return None
+
+        metrics = self._build_live_grid_metrics()
+        if metrics is None:
+            return None
+        if metrics.below_lower_bound:
+            return (
+                "grid_observe_lower_break"
+                f"|price={metrics.current_price:.2f}"
+                f"|lower={metrics.lower_bound:.2f}"
+                f"|deviation={metrics.total_deviation_ratio:.2%}"
+            )
+        if snapshot.margin_ratio >= self.config.grid_margin_ratio_warning:
+            return f"grid_margin_warning={snapshot.margin_ratio:.2%}"
+        return None
+
+    def _resolve_grid_reduction_reason(
+        self,
+        snapshot: AccountRiskSnapshot,
+        metrics: GridLiveRiskMetrics,
+    ) -> str | None:
+        if metrics.nearest_liquidation_distance_ratio is not None and (
+            metrics.nearest_liquidation_distance_ratio <= self.config.grid_liquidation_warning_ratio
+        ):
+            assert metrics.nearest_liquidation_price is not None
+            return (
+                "grid_liquidation_warning"
+                f"|price={metrics.current_price:.2f}"
+                f"|liq={metrics.nearest_liquidation_price:.2f}"
+                f"|distance={metrics.nearest_liquidation_distance_ratio:.2%}"
+            )
+        if snapshot.margin_ratio >= self.config.max_margin_ratio:
+            return f"grid_margin_ratio_critical={snapshot.margin_ratio:.2%}"
+        if metrics.total_deviation_ratio >= self.config.grid_deviation_reduce_ratio:
+            return (
+                "grid_deviation_critical"
+                f"|price={metrics.current_price:.2f}"
+                f"|bounds={metrics.lower_bound:.2f}-{metrics.upper_bound:.2f}"
+                f"|deviation={metrics.total_deviation_ratio:.2%}"
+            )
+        return None
+
+    def _grid_reduction_due(self) -> bool:
+        if self._grid_last_reduction_at is None:
+            return True
+        elapsed = (datetime.now(timezone.utc) - self._grid_last_reduction_at).total_seconds()
+        return elapsed >= max(1, int(self.config.grid_reduction_cooldown_seconds))
+
+    def _build_live_grid_metrics(self) -> GridLiveRiskMetrics | None:
+        profile = self.latest_grid_risk
+        if profile is None:
+            return None
+
+        current_price = float(self.client.fetch_last_price(profile.symbol))
+        positions = self.client.fetch_positions([profile.symbol]) or []
+        net_position_size = 0.0
+        nearest_liquidation_price = None
+        nearest_liquidation_distance_ratio = None
+
+        for position in positions:
+            size = self._extract_position_size(position)
+            if size <= 0:
+                continue
+            side = self._extract_position_side(position)
+            if side == "short":
+                net_position_size -= size
+            else:
+                net_position_size += size
+
+            liquidation_price = self._extract_liquidation_price(position)
+            if liquidation_price is None or liquidation_price <= 0:
+                continue
+            distance_ratio = abs(current_price - liquidation_price) / liquidation_price
+            if nearest_liquidation_distance_ratio is None or distance_ratio < nearest_liquidation_distance_ratio:
+                nearest_liquidation_distance_ratio = distance_ratio
+                nearest_liquidation_price = liquidation_price
+
+        band_width = max(profile.upper_bound - profile.lower_bound, 1e-12)
+        below = max(0.0, profile.lower_bound - current_price)
+        above = max(0.0, current_price - profile.upper_bound)
+        total_deviation_ratio = (below + above) / band_width
+
+        return GridLiveRiskMetrics(
+            symbol=profile.symbol,
+            current_price=current_price,
+            lower_bound=profile.lower_bound,
+            upper_bound=profile.upper_bound,
+            total_deviation_ratio=total_deviation_ratio,
+            net_position_size=net_position_size,
+            nearest_liquidation_price=nearest_liquidation_price,
+            nearest_liquidation_distance_ratio=nearest_liquidation_distance_ratio,
+        )
 
     def _sync_daily_baseline(self, *, current_equity: float, now: datetime | None = None) -> None:
         if now is None:
@@ -361,6 +555,20 @@ class RiskControlManager:
         if local.side != actual.side:
             return False
         return abs(local.size - actual.size) <= self.config.position_sync_tolerance
+
+    def _extract_liquidation_price(self, position: dict[str, Any]) -> float | None:
+        if hasattr(self.client, "get_position_liquidation_price"):
+            return self.client.get_position_liquidation_price(position)
+
+        liquidation_price = position.get("liquidationPrice")
+        if liquidation_price not in (None, "", 0, "0"):
+            return abs(float(liquidation_price))
+
+        info = position.get("info", {})
+        for key in ("liqPx", "liquidationPrice"):
+            if info.get(key) not in (None, "", 0, "0"):
+                return abs(float(info.get(key)))
+        return None
 
     @staticmethod
     def _extract_position_size(position: dict[str, Any]) -> float:

@@ -63,6 +63,11 @@ class RiskControlConfig:
     position_sync_tolerance: float = 1e-6
     default_symbol_max_notional: float = 0.0
     symbol_notional_limits: dict[str, float] = field(default_factory=dict)
+    grid_margin_ratio_warning: float = 0.45
+    grid_deviation_reduce_ratio: float = 0.25
+    grid_liquidation_warning_ratio: float = 0.08
+    grid_reduction_step_pct: float = 0.25
+    grid_reduction_cooldown_seconds: int = 300
 
     def resolve_symbol_notional_limit(self, symbol: str) -> float:
         if symbol in self.symbol_notional_limits:
@@ -237,6 +242,11 @@ def load_config(config_path: str | Path) -> AppConfig:
             str(symbol): float(limit)
             for symbol, limit in (risk_payload.get("symbol_notional_limits") or {}).items()
         },
+        grid_margin_ratio_warning=float(risk_payload.get("grid_margin_ratio_warning", 0.45)),
+        grid_deviation_reduce_ratio=float(risk_payload.get("grid_deviation_reduce_ratio", 0.25)),
+        grid_liquidation_warning_ratio=float(risk_payload.get("grid_liquidation_warning_ratio", 0.08)),
+        grid_reduction_step_pct=float(risk_payload.get("grid_reduction_step_pct", 0.25)),
+        grid_reduction_cooldown_seconds=int(risk_payload.get("grid_reduction_cooldown_seconds", 300)),
     )
     sentiment = SentimentConfig(
         enabled=bool(sentiment_payload.get("enabled", True)),

@@ -28,6 +28,11 @@ risk_control:
   symbol_notional_limits:
     BTC/USDT: 1500
     ETH/USDT: 1000
+  grid_margin_ratio_warning: 0.45
+  grid_deviation_reduce_ratio: 0.25
+  grid_liquidation_warning_ratio: 0.08
+  grid_reduction_step_pct: 0.25
+  grid_reduction_cooldown_seconds: 300
 
 sentiment:
   enabled: true

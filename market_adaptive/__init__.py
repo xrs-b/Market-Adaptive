@@ -16,7 +16,7 @@ from .config import (
     load_config,
 )
 from .db import DatabaseInitializer
-from .risk import RiskControlManager
+from .risk import CTARiskProfile, GridRiskProfile, RiskControlManager
 from .sentiment import CTASentimentDecision, SentimentAnalyst, SentimentSnapshot
 
 __all__ = [
@@ -35,6 +35,8 @@ __all__ = [
     "load_config",
     "DatabaseInitializer",
     "RiskControlManager",
+    "CTARiskProfile",
+    "GridRiskProfile",
     "CTASentimentDecision",
     "SentimentAnalyst",
     "SentimentSnapshot",

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from market_adaptive.config import RiskControlConfig, RuntimeConfig
 from market_adaptive.db import DatabaseInitializer
-from market_adaptive.risk import AccountRiskSnapshot, LogicalPositionSnapshot, RiskControlManager
+from market_adaptive.risk import CTARiskProfile, GridRiskProfile, LogicalPositionSnapshot, RiskControlManager
 from market_adaptive.testsupport import DummyNotifier
 
 
@@ -22,6 +22,7 @@ class DummyRiskClient:
         order_notional: float = 0.0,
         positions=None,
         contract_value: float = 0.01,
+        last_price: float = 100.0,
     ) -> None:
         self.equity = equity
         self.pnl = pnl
@@ -31,6 +32,7 @@ class DummyRiskClient:
         self.order_notional_value = order_notional
         self.positions = positions or []
         self.contract_value = contract_value
+        self.last_price = last_price
         self.cancelled_symbols = []
         self.closed_symbols = []
 
@@ -53,7 +55,7 @@ class DummyRiskClient:
 
     def fetch_last_price(self, symbol: str) -> float:
         del symbol
-        return 100.0
+        return self.last_price
 
     def get_contract_value(self, symbol: str) -> float:
         del symbol
@@ -87,6 +89,12 @@ class DummyRiskClient:
         del symbol
         return abs(float(position.get("notional", 0.0)))
 
+    def get_position_liquidation_price(self, position: dict) -> float | None:
+        liquidation_price = position.get("liquidationPrice") or position.get("info", {}).get("liqPx")
+        if liquidation_price in (None, "", 0, "0"):
+            return None
+        return abs(float(liquidation_price))
+
     def cancel_all_orders(self, symbol: str):
         self.cancelled_symbols.append(symbol)
         return []
@@ -112,10 +120,18 @@ class RiskControlManagerTests(unittest.TestCase):
         self.client = DummyRiskClient()
         self.shutdown_client = DummyRiskClient()
         self.stop_called = False
-        self.grid_reduce_reasons = []
+        self.grid_reduce_events: list[tuple[str, float]] = []
+        self.cta_exit_reasons: list[str] = []
         self.logical_positions = {"BTC/USDT": None}
         self.manager = RiskControlManager(
-            config=RiskControlConfig(default_symbol_max_notional=10_000.0),
+            config=RiskControlConfig(
+                default_symbol_max_notional=10_000.0,
+                grid_margin_ratio_warning=0.45,
+                grid_deviation_reduce_ratio=0.25,
+                grid_liquidation_warning_ratio=0.08,
+                grid_reduction_step_pct=0.25,
+                grid_reduction_cooldown_seconds=1,
+            ),
             runtime_config=RuntimeConfig(timezone="Asia/Shanghai"),
             database=self.database,
             client=self.client,
@@ -123,7 +139,8 @@ class RiskControlManagerTests(unittest.TestCase):
             symbols=["BTC/USDT"],
             notifier=DummyNotifier(),
             stop_callback=self._mark_stopped,
-            reduce_grid_exposure_callback=self.grid_reduce_reasons.append,
+            reduce_grid_exposure_callback=lambda reason, step: self.grid_reduce_events.append((reason, step)),
+            flatten_cta_position_callback=self.cta_exit_reasons.append,
             logical_position_provider=lambda: self.logical_positions,
         )
         self.manager.initialize()
@@ -160,17 +177,61 @@ class RiskControlManagerTests(unittest.TestCase):
 
         self.assertAlmostEqual(size, 1.0)
 
-    def test_margin_ratio_blocks_new_openings_and_reduces_grid(self) -> None:
+    def test_margin_ratio_blocks_new_openings(self) -> None:
         self.client.margin_ratio = 0.65
 
         snapshot = self.manager.monitor_once()
         allowed, reason = self.manager.can_open_new_position("BTC/USDT", requested_notional=50.0)
 
-        self.assertIsInstance(snapshot, AccountRiskSnapshot)
         self.assertFalse(allowed)
         self.assertIn("margin_ratio", reason)
+        self.assertEqual(snapshot.block_reason, reason)
         self.assertEqual(self.database.get_system_state("risk_new_openings").state_value, "OFF")
-        self.assertEqual(len(self.grid_reduce_reasons), 1)
+        self.assertEqual(self.grid_reduce_events, [])
+
+    def test_cta_stop_hit_triggers_immediate_full_exit(self) -> None:
+        self.client.last_price = 97.0
+        self.manager.update_cta_risk(
+            CTARiskProfile(
+                symbol="BTC/USDT",
+                side="long",
+                stop_price=98.0,
+                remaining_size=1.5,
+                atr_value=2.0,
+                stop_distance=4.0,
+            )
+        )
+
+        self.manager.monitor_once()
+
+        self.assertEqual(len(self.cta_exit_reasons), 1)
+        self.assertIn("cta_atr_stop_hit", self.cta_exit_reasons[0])
+
+    def test_grid_break_below_lower_bound_blocks_new_openings_and_observes(self) -> None:
+        self.client.last_price = 95.0
+        self.manager.update_grid_risk(GridRiskProfile(symbol="BTC/USDT", lower_bound=97.0, upper_bound=103.0))
+
+        allowed, reason = self.manager.can_open_new_position(
+            "BTC/USDT",
+            requested_notional=0.0,
+            strategy_name="grid",
+        )
+
+        self.assertFalse(allowed)
+        self.assertIn("grid_observe_lower_break", reason)
+        self.assertEqual(self.grid_reduce_events, [])
+
+    def test_grid_liquidation_warning_reduces_exposure_in_steps(self) -> None:
+        self.client.last_price = 95.0
+        self.client.positions = [{"contracts": 2.0, "side": "long", "liquidationPrice": 92.0, "notional": 200.0}]
+        self.manager.update_grid_risk(GridRiskProfile(symbol="BTC/USDT", lower_bound=97.0, upper_bound=103.0))
+
+        self.manager.monitor_once()
+
+        self.assertEqual(len(self.grid_reduce_events), 1)
+        reason, step = self.grid_reduce_events[0]
+        self.assertIn("grid_liquidation_warning", reason)
+        self.assertAlmostEqual(step, 0.25)
 
     def test_recovery_resets_local_state_when_exchange_is_flat(self) -> None:
         self.logical_positions["BTC/USDT"] = LogicalPositionSnapshot(

@@ -8,6 +8,7 @@ from typing import Callable
 
 from market_adaptive.config import ExecutionConfig, GridConfig
 from market_adaptive.indicators import compute_bollinger_bands, ohlcv_to_dataframe
+from market_adaptive.risk import GridRiskProfile
 from market_adaptive.strategies.base import BaseStrategyRobot
 
 
@@ -60,22 +61,22 @@ class GridRobot(BaseStrategyRobot):
             return False
         return super().should_notify_action(action)
 
+    def flatten_and_cancel_all(self, reason: str) -> None:
+        super().flatten_and_cancel_all(reason)
+        self._publish_grid_risk(None)
+
     def execute_active_cycle(self) -> str:
         now = self.now_provider().astimezone(timezone.utc)
         self._ensure_futures_settings()
         current_price = self.client.fetch_last_price(self.symbol)
 
-        liquidation_guard_action = self._check_liquidation_guard(current_price)
-        if liquidation_guard_action is not None:
-            self.client.cancel_all_orders(self.symbol)
-            self.client.close_all_positions(self.symbol)
-            return liquidation_guard_action
-
         self.client.cancel_all_orders(self.symbol)
         context = self._refresh_grid_context(current_price)
         if context is None:
+            self._publish_grid_risk(None)
             return "grid:insufficient_data"
 
+        self._publish_grid_risk(context)
         allow_new_openings = True
         risk_blocked_reason = None
         if self.risk_manager is not None:
@@ -127,6 +128,37 @@ class GridRobot(BaseStrategyRobot):
             action_parts.append(f"risk={risk_blocked_reason}")
         return "|".join(action_parts)
 
+    def reduce_exposure_step(self, reason: str, reduction_step_pct: float) -> str:
+        self.client.cancel_all_orders(self.symbol)
+        reduction_ratio = min(1.0, max(0.01, float(reduction_step_pct)))
+        actions: list[str] = []
+
+        for position in self.client.fetch_positions([self.symbol]) or []:
+            raw_size = position.get("contracts") or position.get("positionAmt") or position.get("info", {}).get("pos") or 0.0
+            size = abs(float(raw_size or 0.0))
+            if size <= 0:
+                continue
+
+            side = str(position.get("side") or position.get("info", {}).get("posSide") or "").lower()
+            if side not in {"long", "short"}:
+                side = "long" if float(raw_size or 0.0) >= 0 else "short"
+            close_side = "sell" if side == "long" else "buy"
+            pos_side = str(position.get("info", {}).get("posSide") or side)
+            reduce_amount = min(size, self._normalize_amount(size * reduction_ratio))
+            if reduce_amount <= 0:
+                continue
+
+            self.client.place_market_order(
+                self.symbol,
+                close_side,
+                reduce_amount,
+                reduce_only=True,
+                params={"reason": reason, "posSide": pos_side},
+            )
+            actions.append(f"{side}:{reduce_amount:.8f}")
+
+        return "grid:step_reduce_idle" if not actions else "grid:step_reduce|" + "+".join(actions)
+
     def _ensure_futures_settings(self) -> None:
         if hasattr(self.client, "ensure_futures_settings"):
             self.client.ensure_futures_settings(
@@ -134,53 +166,6 @@ class GridRobot(BaseStrategyRobot):
                 leverage=self.config.leverage,
                 margin_mode=self.execution_config.td_mode,
             )
-
-    def _check_liquidation_guard(self, current_price: float) -> str | None:
-        if not hasattr(self.client, "fetch_positions"):
-            return None
-
-        nearest_snapshot: tuple[float, float, str] | None = None
-        for position in self.client.fetch_positions([self.symbol]) or []:
-            raw_size = position.get("contracts") or position.get("positionAmt") or position.get("info", {}).get("pos") or 0.0
-            size = abs(float(raw_size or 0.0))
-            if size <= 0:
-                continue
-            liquidation_price = self._extract_liquidation_price(position)
-            if liquidation_price is None or liquidation_price <= 0:
-                continue
-            distance_ratio = abs(current_price - liquidation_price) / liquidation_price
-            side = str(position.get("side") or position.get("info", {}).get("posSide") or "net").lower()
-            snapshot = (distance_ratio, liquidation_price, side)
-            if nearest_snapshot is None or snapshot[0] < nearest_snapshot[0]:
-                nearest_snapshot = snapshot
-
-        if nearest_snapshot is None:
-            return None
-
-        distance_ratio, liquidation_price, side = nearest_snapshot
-        if distance_ratio > self.config.liquidation_protection_ratio:
-            return None
-        return (
-            "grid:liquidation_guard_triggered"
-            f"|price={current_price:.2f}"
-            f"|liq={liquidation_price:.2f}"
-            f"|distance={distance_ratio:.2%}"
-            f"|side={side}"
-        )
-
-    def _extract_liquidation_price(self, position: dict) -> float | None:
-        if hasattr(self.client, "get_position_liquidation_price"):
-            return self.client.get_position_liquidation_price(position)
-
-        liquidation_price = position.get("liquidationPrice")
-        if liquidation_price not in (None, "", 0, "0"):
-            return abs(float(liquidation_price))
-
-        info = position.get("info", {})
-        for key in ("liqPx", "liquidationPrice"):
-            if info.get(key) not in (None, "", 0, "0"):
-                return abs(float(info.get(key)))
-        return None
 
     def _refresh_grid_context(self, current_price: float) -> GridContext | None:
         ohlcv = self.client.fetch_ohlcv(
@@ -418,6 +403,21 @@ class GridRobot(BaseStrategyRobot):
             normalized = float(self.client.amount_to_precision(self.symbol, normalized))
         normalized = round(normalized, 12)
         return 0.0 if normalized < 1e-12 else normalized
+
+    def _publish_grid_risk(self, context: GridContext | None) -> None:
+        if self.risk_manager is None:
+            return
+        if context is None:
+            self.risk_manager.update_grid_risk(None)
+            return
+
+        self.risk_manager.update_grid_risk(
+            GridRiskProfile(
+                symbol=self.symbol,
+                lower_bound=context.lower_bound,
+                upper_bound=context.upper_bound,
+            )
+        )
 
     def _prune_layer_state(self, active_anchor_timestamp_ms: int) -> None:
         active_prefix = f"{active_anchor_timestamp_ms}:"
