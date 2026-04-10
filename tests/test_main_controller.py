@@ -19,6 +19,7 @@ from market_adaptive.config import (
     OKXConfig,
     RiskControlConfig,
     RuntimeConfig,
+    SentimentConfig,
 )
 from market_adaptive.controller import MainController
 from market_adaptive.db import DatabaseInitializer, SystemStateRecord
@@ -115,6 +116,7 @@ class MainControllerTests(unittest.TestCase):
             notification=NotificationConfig(discord=DiscordNotificationConfig(enabled=False)),
             runtime=RuntimeConfig(),
             risk_control=RiskControlConfig(),
+            sentiment=SentimentConfig(enabled=False),
             market_oracle=MarketOracleConfig(),
             execution=ExecutionConfig(),
             cta=CTAConfig(),

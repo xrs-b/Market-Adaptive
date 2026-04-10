@@ -29,6 +29,14 @@ risk_control:
     BTC/USDT: 1500
     ETH/USDT: 1000
 
+sentiment:
+  enabled: true
+  symbol: "BTC/USDT"
+  timeframe: "5m"
+  lookback_limit: 1
+  extreme_bullish_ratio: 2.5
+  cta_buy_action: "block"  # 可选: block / halve
+
 market_oracle:
   symbol: "BTC/USDT"
   polling_interval_seconds: 300
@@ -78,14 +86,16 @@ cta:
 
 grid:
   symbol: "BTC/USDT"
-  timeframe: "1h"
+  bollinger_timeframe: "1h"
   lookback_limit: 120
-  bollinger_period: 20
+  bollinger_length: 20
   bollinger_std: 2.0
   levels: 10
-  martingale_factor: 1.1
-  trigger_window_seconds: 300
-  trigger_limit_per_layer: 3
-  rebalance_threshold_ratio: 0.65
+  martingale_factor: 1.25
+  layer_trigger_window_seconds: 300
+  layer_trigger_limit: 3
+  layer_cooldown_seconds: 300
+  rebalance_exposure_threshold: 2.0
+  max_rebalance_orders: 2
   polling_interval_seconds: 60
-  range_percent: 0.02
+  range_percent: 0.02  # 数据不足时的兜底范围

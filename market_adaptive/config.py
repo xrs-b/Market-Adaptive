@@ -71,6 +71,24 @@ class RiskControlConfig:
 
 
 @dataclass
+class SentimentConfig:
+    enabled: bool = True
+    symbol: str = ""
+    timeframe: str = "5m"
+    lookback_limit: int = 1
+    extreme_bullish_ratio: float = 2.5
+    cta_buy_action: str = "block"
+
+    def resolve_symbol(self, fallback_symbol: str) -> str:
+        return self.symbol or fallback_symbol
+
+    @property
+    def normalized_cta_buy_action(self) -> str:
+        action = self.cta_buy_action.strip().lower()
+        return action if action in {"block", "halve"} else "block"
+
+
+@dataclass
 class MarketOracleConfig:
     symbol: str = "BTC/USDT"
     polling_interval_seconds: int = 300
@@ -117,17 +135,20 @@ class CTAConfig:
 @dataclass
 class GridConfig:
     symbol: str = "BTC/USDT"
-    timeframe: str = "1h"
+    timeframe: str = "1h"  # legacy alias for Bollinger timeframe
     lookback_limit: int = 120
     bollinger_period: int = 20
     bollinger_std: float = 2.0
     levels: int = 10
-    martingale_factor: float = 1.1
+    martingale_factor: float = 1.25
     trigger_window_seconds: int = 300
     trigger_limit_per_layer: int = 3
-    rebalance_threshold_ratio: float = 0.65
+    layer_cooldown_seconds: int = 300
+    rebalance_exposure_threshold: float = 2.0
+    max_rebalance_orders: int = 2
+    rebalance_threshold_ratio: float = 0.65  # legacy compatibility
     polling_interval_seconds: int = 60
-    range_percent: float = 0.02  # legacy fallback
+    range_percent: float = 0.02  # legacy fallback when Bollinger data is unavailable
 
 
 @dataclass
@@ -137,6 +158,7 @@ class AppConfig:
     notification: NotificationConfig
     runtime: RuntimeConfig
     risk_control: RiskControlConfig
+    sentiment: SentimentConfig
     market_oracle: MarketOracleConfig
     execution: ExecutionConfig
     cta: CTAConfig
@@ -167,6 +189,7 @@ def load_config(config_path: str | Path) -> AppConfig:
     discord_payload = notification_payload.get("discord") or {}
     runtime_payload = payload.get("runtime") or {}
     risk_payload = payload.get("risk_control") or {}
+    sentiment_payload = payload.get("sentiment") or {}
     market_oracle_payload = payload.get("market_oracle") or {}
     execution_payload = payload.get("execution") or {}
     cta_payload = payload.get("cta") or {}
@@ -213,6 +236,14 @@ def load_config(config_path: str | Path) -> AppConfig:
             for symbol, limit in (risk_payload.get("symbol_notional_limits") or {}).items()
         },
     )
+    sentiment = SentimentConfig(
+        enabled=bool(sentiment_payload.get("enabled", True)),
+        symbol=str(sentiment_payload.get("symbol", "")),
+        timeframe=str(sentiment_payload.get("timeframe", "5m")),
+        lookback_limit=max(1, int(sentiment_payload.get("lookback_limit", 1))),
+        extreme_bullish_ratio=float(sentiment_payload.get("extreme_bullish_ratio", 2.5)),
+        cta_buy_action=str(sentiment_payload.get("cta_buy_action", "block")),
+    )
     market_oracle = MarketOracleConfig(
         symbol=str(market_oracle_payload.get("symbol", "BTC/USDT")),
         polling_interval_seconds=int(market_oracle_payload.get("polling_interval_seconds", 300)),
@@ -254,14 +285,17 @@ def load_config(config_path: str | Path) -> AppConfig:
     )
     grid = GridConfig(
         symbol=str(grid_payload.get("symbol", "BTC/USDT")),
-        timeframe=str(grid_payload.get("timeframe", "1h")),
+        timeframe=str(grid_payload.get("bollinger_timeframe", grid_payload.get("timeframe", "1h"))),
         lookback_limit=int(grid_payload.get("lookback_limit", 120)),
-        bollinger_period=int(grid_payload.get("bollinger_period", 20)),
+        bollinger_period=int(grid_payload.get("bollinger_length", grid_payload.get("bollinger_period", 20))),
         bollinger_std=float(grid_payload.get("bollinger_std", 2.0)),
         levels=int(grid_payload.get("levels", 10)),
-        martingale_factor=float(grid_payload.get("martingale_factor", 1.1)),
-        trigger_window_seconds=int(grid_payload.get("trigger_window_seconds", 300)),
-        trigger_limit_per_layer=int(grid_payload.get("trigger_limit_per_layer", 3)),
+        martingale_factor=float(grid_payload.get("martingale_factor", 1.25)),
+        trigger_window_seconds=int(grid_payload.get("layer_trigger_window_seconds", grid_payload.get("trigger_window_seconds", 300))),
+        trigger_limit_per_layer=int(grid_payload.get("layer_trigger_limit", grid_payload.get("trigger_limit_per_layer", 3))),
+        layer_cooldown_seconds=int(grid_payload.get("layer_cooldown_seconds", 300)),
+        rebalance_exposure_threshold=float(grid_payload.get("rebalance_exposure_threshold", 2.0)),
+        max_rebalance_orders=int(grid_payload.get("max_rebalance_orders", 2)),
         rebalance_threshold_ratio=float(grid_payload.get("rebalance_threshold_ratio", 0.65)),
         polling_interval_seconds=int(grid_payload.get("polling_interval_seconds", 60)),
         range_percent=float(grid_payload.get("range_percent", 0.02)),
@@ -272,6 +306,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         notification=notification,
         runtime=runtime,
         risk_control=risk_control,
+        sentiment=sentiment,
         market_oracle=market_oracle,
         execution=execution,
         cta=cta,

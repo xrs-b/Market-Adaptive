@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from market_adaptive.config import CTAConfig, ExecutionConfig, GridConfig
+from market_adaptive.config import CTAConfig, ExecutionConfig, GridConfig, SentimentConfig
 from market_adaptive.db import DatabaseInitializer, MarketStatusRecord
+from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies import CTARobot, GridRobot, HandsCoordinator
 
 
@@ -19,12 +21,15 @@ class DummyClient:
         self.ohlcv = []
         self.ohlcv_by_timeframe = {}
         self.positions = []
+        self.latest_long_short_ratio = None
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 200, since=None):
+        del symbol, since
         payload = self.ohlcv_by_timeframe.get(timeframe, self.ohlcv)
         return payload[-limit:]
 
     def fetch_last_price(self, symbol: str) -> float:
+        del symbol
         return self.last_price
 
     def place_market_order(self, symbol: str, side: str, amount: float, **kwargs):
@@ -46,7 +51,24 @@ class DummyClient:
         return []
 
     def fetch_positions(self, symbols=None):
+        del symbols
         return list(self.positions)
+
+    def amount_to_precision(self, symbol: str, amount: float) -> float:
+        del symbol
+        return round(float(amount), 8)
+
+    def get_contract_value(self, symbol: str) -> float:
+        del symbol
+        return 1.0
+
+    def estimate_notional(self, symbol: str, amount: float, price: float) -> float:
+        del symbol
+        return abs(float(amount)) * abs(float(price))
+
+    def fetch_latest_long_short_account_ratio(self, symbol: str, timeframe: str = "5m", limit: int = 1):
+        del symbol, timeframe, limit
+        return self.latest_long_short_ratio
 
 
 class TheHandsTests(unittest.TestCase):
@@ -64,7 +86,20 @@ class TheHandsTests(unittest.TestCase):
             first_take_profit_size=0.5,
             second_take_profit_size=0.25,
         )
-        self.grid_config = GridConfig(symbol="BTC/USDT", levels=10, martingale_factor=1.1)
+        self.grid_config = GridConfig(
+            symbol="BTC/USDT",
+            timeframe="1h",
+            lookback_limit=80,
+            bollinger_period=20,
+            bollinger_std=2.0,
+            levels=10,
+            martingale_factor=1.5,
+            trigger_window_seconds=300,
+            trigger_limit_per_layer=3,
+            layer_cooldown_seconds=300,
+            rebalance_exposure_threshold=2.0,
+            max_rebalance_orders=2,
+        )
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -99,8 +134,21 @@ class TheHandsTests(unittest.TestCase):
         higher_closes = [140 - 1.0 * (59 - index) for index in range(60)]
         self._set_ohlcv("1h", higher_closes, 3_600_000)
 
-    def _load_grid_hourly_band_data(self) -> None:
-        closes = [100 + ((index % 6) - 3) * 1.4 + index * 0.08 for index in range(80)]
+    def _set_sentiment_ratio(self, ratio: float, timestamp: int = 1_712_722_800_000) -> None:
+        self.client.latest_long_short_ratio = {
+            "timestamp": timestamp,
+            "longShortRatio": ratio,
+        }
+
+    def _build_sentiment_analyst(self, **overrides) -> SentimentAnalyst:
+        config = SentimentConfig(enabled=True, **overrides)
+        return SentimentAnalyst(self.client, config)
+
+    def _load_sideways_grid_data(self, center: float = 100.0, width: float = 4.0, length: int = 60) -> None:
+        closes = []
+        pattern = [0.0, 1.0, -0.8, 0.7, -0.6, 0.4, -0.3, 0.2]
+        for index in range(length):
+            closes.append(center + pattern[index % len(pattern)] * width / 2.0)
         self._set_ohlcv("1h", closes, 3_600_000)
 
     def test_cta_robot_opens_long_only_in_trend(self) -> None:
@@ -114,6 +162,45 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(result.action, "cta:open_long")
         self.assertEqual(len(self.client.market_orders), 1)
         self.assertEqual(self.client.market_orders[0]["side"], "buy")
+
+    def test_cta_robot_blocks_bullish_entry_when_retail_sentiment_is_extreme(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        self._set_sentiment_ratio(3.1)
+        robot = CTARobot(
+            self.client,
+            self.database,
+            self.cta_config,
+            self.execution,
+            sentiment_analyst=self._build_sentiment_analyst(),
+        )
+
+        result = robot.run()
+
+        self.assertTrue(result.active)
+        self.assertEqual(result.action, "cta:sentiment_blocked")
+        self.assertEqual(len(self.client.market_orders), 0)
+        self.assertIsNone(robot.position)
+
+    def test_cta_robot_can_halve_bullish_entry_when_sentiment_policy_requests_it(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        self._set_sentiment_ratio(3.1)
+        robot = CTARobot(
+            self.client,
+            self.database,
+            self.cta_config,
+            self.execution,
+            sentiment_analyst=self._build_sentiment_analyst(cta_buy_action="halve"),
+        )
+
+        result = robot.run()
+
+        self.assertEqual(result.action, "cta:open_long_sentiment_halved")
+        self.assertEqual(len(self.client.market_orders), 1)
+        self.assertAlmostEqual(self.client.market_orders[0]["amount"], 0.01)
+        self.assertIsNotNone(robot.position)
+        self.assertAlmostEqual(robot.position.initial_size, 0.01)
 
     def test_cta_robot_scales_out_and_uses_trailing_stop(self) -> None:
         self._insert_status("trend")
@@ -143,45 +230,72 @@ class TheHandsTests(unittest.TestCase):
         self.assertAlmostEqual(self.client.market_orders[3]["amount"], 0.005)
         self.assertIsNone(robot.position)
 
-    def test_grid_robot_places_dynamic_bollinger_grid_orders(self) -> None:
+    def test_grid_robot_uses_bollinger_bounds_and_martingale_buys(self) -> None:
         self._insert_status("sideways")
-        self._load_grid_hourly_band_data()
+        self._load_sideways_grid_data(center=100.0)
         robot = GridRobot(self.client, self.database, self.grid_config, self.execution)
 
         result = robot.run()
 
         self.assertTrue(result.active)
-        self.assertIn("grid:placed_", result.action)
-        self.assertGreaterEqual(len(self.client.limit_orders), 10)
-        buy_amounts = [order["amount"] for order in self.client.limit_orders if order["side"] == "buy"]
-        self.assertGreater(buy_amounts[-1], buy_amounts[0])
+        self.assertIn("grid:placed_10_orders@100.00", result.action)
+        self.assertIn("rebalances=0", result.action)
+        self.assertEqual(len(self.client.limit_orders), 10)
+        self.assertEqual(self.client.cancel_all_calls, ["BTC/USDT"])
 
-    def test_grid_robot_cools_down_repeatedly_triggered_layer(self) -> None:
+        buy_orders = [order for order in self.client.limit_orders if order["side"] == "buy"]
+        sell_orders = [order for order in self.client.limit_orders if order["side"] == "sell"]
+        self.assertEqual(len(buy_orders), 5)
+        self.assertEqual(len(sell_orders), 5)
+        self.assertGreater(buy_orders[-1]["amount"], buy_orders[0]["amount"])
+        self.assertTrue(all(not order.get("reduce_only", False) for order in sell_orders))
+
+    def test_grid_robot_cools_down_repeatedly_triggered_buy_layer(self) -> None:
         self._insert_status("sideways")
-        self._load_grid_hourly_band_data()
+        self._load_sideways_grid_data(center=100.0)
+        now = datetime(2026, 4, 10, 3, 0, tzinfo=timezone.utc)
+        now_values = [now, now + timedelta(minutes=2), now + timedelta(minutes=4)]
+        robot = GridRobot(
+            self.client,
+            self.database,
+            self.grid_config,
+            self.execution,
+            now_provider=lambda: now_values.pop(0),
+        )
+
+        first_preview = robot._refresh_grid_context(self.client.last_price)
+        assert first_preview is not None
+        first_buy_price = first_preview.buy_prices[0]
+        self.client.last_price = first_buy_price - 0.1
+
+        first_result = robot.run()
+        first_count = len(self.client.limit_orders)
+        second_result = robot.run()
+        second_count = len(self.client.limit_orders) - first_count
+        third_result = robot.run()
+        third_count = len(self.client.limit_orders) - first_count - second_count
+
+        self.assertEqual(first_count, 10)
+        self.assertEqual(second_count, 10)
+        self.assertEqual(third_count, 9)
+        self.assertIn("cooldown=1", third_result.action)
+        self.assertIn("cooldown=0", first_result.action)
+        self.assertIn("cooldown=0", second_result.action)
+
+    def test_grid_robot_places_reduce_only_rebalance_orders_when_long_heavy(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+        self.client.positions = [{"contracts": 0.12, "side": "long"}]
         robot = GridRobot(self.client, self.database, self.grid_config, self.execution)
-        robot.last_price = 100.0
-        now = 1_700_000_000.0
-        robot.layer_triggers[0].extend([now - 200, now - 100, now])
-        self.client.last_price = 99.0
 
         result = robot.run()
 
-        self.assertIn("cooldown=", result.action)
-
-    def test_grid_robot_places_rebalance_order_when_long_heavy(self) -> None:
-        self._insert_status("sideways")
-        self._load_grid_hourly_band_data()
-        self.client.positions = [
-            {"side": "long", "contracts": 9.0, "info": {"posSide": "long", "pos": "9"}},
-            {"side": "short", "contracts": 1.0, "info": {"posSide": "short", "pos": "1"}},
+        reduce_only_sells = [
+            order for order in self.client.limit_orders if order["side"] == "sell" and order.get("reduce_only")
         ]
-        robot = GridRobot(self.client, self.database, self.grid_config, self.execution)
-
-        robot.run()
-
-        reduce_orders = [o for o in self.client.limit_orders if o["side"] == "sell" and o.get("reduce_only")]
-        self.assertTrue(reduce_orders)
+        self.assertEqual(len(reduce_only_sells), 2)
+        self.assertTrue(all(order["amount"] > self.execution.grid_order_size for order in reduce_only_sells))
+        self.assertIn("rebalances=2", result.action)
 
     def test_status_switch_triggers_flatten_before_inactive_cycle(self) -> None:
         self._insert_status("trend", "2026-04-10T03:00:00+00:00")
@@ -200,7 +314,7 @@ class TheHandsTests(unittest.TestCase):
 
     def test_hands_coordinator_runs_both_robots(self) -> None:
         self._insert_status("sideways")
-        self._load_grid_hourly_band_data()
+        self._load_sideways_grid_data(center=100.0)
         coordinator = HandsCoordinator(
             cta_robot=CTARobot(self.client, self.database, self.cta_config, self.execution),
             grid_robot=GridRobot(self.client, self.database, self.grid_config, self.execution),

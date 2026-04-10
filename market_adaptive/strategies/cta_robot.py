@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from market_adaptive.config import CTAConfig, ExecutionConfig
 from market_adaptive.indicators import compute_atr, compute_obv, compute_supertrend, ohlcv_to_dataframe
 from market_adaptive.risk import LogicalPositionSnapshot
+from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies.base import BaseStrategyRobot
 
 
@@ -72,11 +73,13 @@ class CTARobot(BaseStrategyRobot):
         execution_config: ExecutionConfig,
         notifier=None,
         risk_manager=None,
+        sentiment_analyst: SentimentAnalyst | None = None,
     ) -> None:
         super().__init__(client=client, database=database, symbol=config.symbol, notifier=notifier)
         self.config = config
         self.execution_config = execution_config
         self.risk_manager = risk_manager
+        self.sentiment_analyst = sentiment_analyst
         self.position: ManagedPosition | None = None
 
     def should_notify_action(self, action: str) -> bool:
@@ -179,6 +182,7 @@ class CTARobot(BaseStrategyRobot):
     def _open_position(self, signal: TrendSignal) -> str:
         side = "buy" if signal.direction > 0 else "sell"
         amount = self.execution_config.cta_order_size
+        sentiment_halved = False
 
         if self.risk_manager is not None:
             amount = self.risk_manager.calculate_position_size(
@@ -188,13 +192,29 @@ class CTARobot(BaseStrategyRobot):
                 atr_value=signal.atr,
                 last_price=signal.price,
             )
+
+        amount = self._normalize_order_amount(amount)
+        if amount <= 0:
+            return "cta:risk_blocked"
+
+        if side == "buy" and self.sentiment_analyst is not None:
+            sentiment_decision = self.sentiment_analyst.evaluate_cta_buy(self.symbol)
+            if sentiment_decision.blocked:
+                return "cta:sentiment_blocked"
+            if sentiment_decision.size_multiplier < 1.0:
+                amount = self._normalize_order_amount(amount * sentiment_decision.size_multiplier)
+                sentiment_halved = amount > 0
+                if amount <= 0:
+                    return "cta:sentiment_blocked"
+
+        if self.risk_manager is not None:
             requested_notional = self.client.estimate_notional(self.symbol, amount, signal.price)
             allowed, _reason = self.risk_manager.can_open_new_position(
                 self.symbol,
                 requested_notional,
                 strategy_name=self.strategy_name,
             )
-            if not allowed or amount <= 0:
+            if not allowed:
                 return "cta:risk_blocked"
 
         self.client.place_market_order(self.symbol, side, amount)
@@ -215,7 +235,10 @@ class CTARobot(BaseStrategyRobot):
             stop_price=stop_price,
             best_price=signal.price,
         )
-        return f"cta:open_{position_side}"
+        action = f"cta:open_{position_side}"
+        if sentiment_halved:
+            action += "_sentiment_halved"
+        return action
 
     def _manage_position(self, signal: TrendSignal) -> tuple[list[str], bool]:
         assert self.position is not None
@@ -285,6 +308,18 @@ class CTARobot(BaseStrategyRobot):
                 params={"reason": reason},
             )
         self.position = None
+
+    def _normalize_order_amount(self, amount: float) -> float:
+        normalized = max(0.0, float(amount))
+        if hasattr(self.client, "amount_to_precision"):
+            normalized = float(self.client.amount_to_precision(self.symbol, normalized))
+        minimum_amount = 0.0
+        if hasattr(self.client, "get_min_order_amount"):
+            minimum_amount = float(self.client.get_min_order_amount(self.symbol))
+        normalized = self._round_size(normalized)
+        if normalized < minimum_amount - 1e-12:
+            return 0.0
+        return normalized
 
     def _normalized_atr(self, price: float, atr: float) -> float:
         return max(float(atr), float(price) * 0.001)

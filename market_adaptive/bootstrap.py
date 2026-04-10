@@ -5,6 +5,7 @@ from pathlib import Path
 from market_adaptive.clients.okx_client import OKXClient
 from market_adaptive.config import AppConfig, load_config
 from market_adaptive.db import DatabaseInitializer
+from market_adaptive.sentiment import SentimentAnalyst
 
 
 class MarketAdaptiveBootstrap:
@@ -14,6 +15,7 @@ class MarketAdaptiveBootstrap:
         self.config = config
         self.database = DatabaseInitializer(config.database.path)
         self.okx_client = OKXClient(config.okx, config.execution)
+        self.sentiment_analyst = SentimentAnalyst(self.okx_client, config.sentiment)
 
     @classmethod
     def from_config_file(cls, config_path: str | Path) -> "MarketAdaptiveBootstrap":

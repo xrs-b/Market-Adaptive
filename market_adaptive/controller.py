@@ -21,6 +21,7 @@ from market_adaptive.db import DatabaseInitializer, SystemStateRecord
 from market_adaptive.notifiers import DiscordNotifier, NullNotifier
 from market_adaptive.oracles import MarketOracle
 from market_adaptive.risk import LogicalPositionSnapshot, RiskControlManager
+from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies import CTARobot, GridRobot
 
 
@@ -47,8 +48,16 @@ class MainController:
         self.risk_client = OKXClient(config.okx, config.execution)
         self.shutdown_client = OKXClient(config.okx, config.execution)
 
+        self.sentiment_analyst = SentimentAnalyst(self.cta_client, config.sentiment)
         self.market_oracle = MarketOracle(self.oracle_client, database, config.market_oracle, notifier=self.notifier)
-        self.cta_robot = CTARobot(self.cta_client, database, config.cta, config.execution, notifier=self.notifier)
+        self.cta_robot = CTARobot(
+            self.cta_client,
+            database,
+            config.cta,
+            config.execution,
+            notifier=self.notifier,
+            sentiment_analyst=self.sentiment_analyst,
+        )
         self.grid_robot = GridRobot(self.grid_client, database, config.grid, config.execution, notifier=self.notifier)
         self.risk_control = RiskControlManager(
             config=config.risk_control,

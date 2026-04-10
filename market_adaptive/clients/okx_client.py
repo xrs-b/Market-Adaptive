@@ -162,6 +162,36 @@ class OKXClient:
             total += self.estimate_notional(symbol, float(amount), float(price))
         return total
 
+    def fetch_long_short_account_ratio_history(
+        self,
+        symbol: str,
+        timeframe: str = "5m",
+        limit: int = 1,
+        since: int | None = None,
+        until: int | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {}
+        if until is not None:
+            params["until"] = until
+        return self.exchange.fetch_long_short_ratio_history(
+            self._normalize_symbol(symbol),
+            timeframe=timeframe,
+            since=since,
+            limit=limit,
+            params=params,
+        )
+
+    def fetch_latest_long_short_account_ratio(
+        self,
+        symbol: str,
+        timeframe: str = "5m",
+        limit: int = 1,
+    ) -> dict[str, Any] | None:
+        history = self.fetch_long_short_account_ratio_history(symbol, timeframe=timeframe, limit=max(1, limit))
+        if not history:
+            return None
+        return max(history, key=lambda item: int(item.get("timestamp") or 0))
+
     def place_market_order(
         self,
         symbol: str,

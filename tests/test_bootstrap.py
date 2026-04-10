@@ -15,6 +15,15 @@ class MarketAdaptiveBootstrapTests(unittest.TestCase):
         self.assertEqual(config.okx.headers["x-simulated-id"], "1")
         self.assertEqual(config.okx.headers["x-simulated-trading"], "1")
         self.assertTrue(config.okx.sandbox)
+        self.assertEqual(config.grid.timeframe, "1h")
+        self.assertEqual(config.grid.bollinger_period, 20)
+        self.assertEqual(config.grid.trigger_limit_per_layer, 3)
+        self.assertEqual(config.grid.layer_cooldown_seconds, 300)
+        self.assertEqual(config.grid.max_rebalance_orders, 2)
+        self.assertTrue(config.sentiment.enabled)
+        self.assertEqual(config.sentiment.timeframe, "5m")
+        self.assertEqual(config.sentiment.extreme_bullish_ratio, 2.5)
+        self.assertEqual(config.sentiment.normalized_cta_buy_action, "block")
 
     def test_database_initializer_creates_market_status_table(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
