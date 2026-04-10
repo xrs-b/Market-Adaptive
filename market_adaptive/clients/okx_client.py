@@ -14,6 +14,7 @@ class OKXClient:
         self.config = config
         self.execution_config = execution_config or ExecutionConfig()
         self.exchange = self._build_exchange()
+        self._hedged_mode: bool | None = None
 
     def _build_exchange(self) -> ccxt.okx:
         exchange = ccxt.okx(
@@ -61,14 +62,14 @@ class OKXClient:
         since: int | None = None,
     ) -> list[list[Any]]:
         return self.exchange.fetch_ohlcv(
-            symbol=symbol,
+            symbol=self._normalize_symbol(symbol),
             timeframe=timeframe,
             since=since,
             limit=limit,
         )
 
     def fetch_ticker(self, symbol: str) -> dict[str, Any]:
-        return self.exchange.fetch_ticker(symbol)
+        return self.exchange.fetch_ticker(self._normalize_symbol(symbol))
 
     def fetch_last_price(self, symbol: str) -> float:
         ticker = self.fetch_ticker(symbol)
@@ -78,10 +79,10 @@ class OKXClient:
         return float(last_price)
 
     def fetch_open_orders(self, symbol: str) -> list[dict[str, Any]]:
-        return self.exchange.fetch_open_orders(symbol)
+        return self.exchange.fetch_open_orders(self._normalize_symbol(symbol))
 
     def cancel_order(self, order_id: str, symbol: str) -> dict[str, Any]:
-        return self.exchange.cancel_order(order_id, symbol)
+        return self.exchange.cancel_order(order_id, self._normalize_symbol(symbol))
 
     def cancel_all_orders(self, symbol: str) -> list[dict[str, Any]]:
         responses: list[dict[str, Any]] = []
@@ -99,11 +100,11 @@ class OKXClient:
         return responses
 
     def fetch_positions(self, symbols: list[str] | None = None) -> list[dict[str, Any]]:
-        symbols = symbols or None
+        normalized = None if symbols is None else [self._normalize_symbol(symbol) for symbol in symbols]
         try:
-            return self.exchange.fetch_positions(symbols)
+            return self.exchange.fetch_positions(normalized)
         except TypeError:
-            return self.exchange.fetch_positions(symbols, params={"type": self.config.default_type})
+            return self.exchange.fetch_positions(normalized, params={"type": self.config.default_type})
 
     def fetch_total_unrealized_pnl(self, symbols: list[str] | None = None) -> float:
         total = 0.0
@@ -126,8 +127,8 @@ class OKXClient:
         reduce_only: bool = False,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        payload = self._merge_order_params(params, reduce_only=reduce_only)
-        return self.exchange.create_order(symbol, "market", side, amount, None, payload)
+        payload = self._merge_order_params(side=side, params=params, reduce_only=reduce_only)
+        return self.exchange.create_order(self._normalize_symbol(symbol), "market", side, amount, None, payload)
 
     def place_limit_order(
         self,
@@ -139,8 +140,8 @@ class OKXClient:
         reduce_only: bool = False,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        payload = self._merge_order_params(params, reduce_only=reduce_only)
-        return self.exchange.create_order(symbol, "limit", side, amount, price, payload)
+        payload = self._merge_order_params(side=side, params=params, reduce_only=reduce_only)
+        return self.exchange.create_order(self._normalize_symbol(symbol), "limit", side, amount, price, payload)
 
     def close_all_positions(self, symbol: str) -> list[dict[str, Any]]:
         responses: list[dict[str, Any]] = []
@@ -152,7 +153,12 @@ class OKXClient:
             if size <= 0:
                 continue
             side = str(position.get("side") or "").lower()
-            if side == "long" or float(contracts) > 0:
+            pos_side = str(position.get("info", {}).get("posSide") or side)
+            if side == "short" or pos_side == "short":
+                close_side = "buy"
+            elif side == "long" or pos_side == "long":
+                close_side = "sell"
+            elif float(contracts) > 0:
                 close_side = "sell"
             else:
                 close_side = "buy"
@@ -162,6 +168,7 @@ class OKXClient:
                     close_side,
                     size,
                     reduce_only=True,
+                    params={"posSide": pos_side},
                 )
             )
         return responses
@@ -172,12 +179,38 @@ class OKXClient:
             responses.extend(self.close_all_positions(symbol))
         return responses
 
-    def _merge_order_params(self, params: dict[str, Any] | None, *, reduce_only: bool) -> dict[str, Any]:
+    def _merge_order_params(
+        self,
+        side: str,
+        params: dict[str, Any] | None,
+        *,
+        reduce_only: bool,
+    ) -> dict[str, Any]:
         payload = {
             "tdMode": self.execution_config.td_mode,
         }
+        if self._is_hedged_mode():
+            payload["posSide"] = "long" if side == "buy" else "short"
         if reduce_only:
             payload["reduceOnly"] = True
         if params:
             payload.update(params)
         return payload
+
+    def _normalize_symbol(self, symbol: str) -> str:
+        if self.config.default_type != "swap":
+            return symbol
+        if ":" in symbol or "/" not in symbol:
+            return symbol
+        base, quote = symbol.split("/", 1)
+        return f"{base}/{quote}:{quote}"
+
+    def _is_hedged_mode(self) -> bool:
+        if self._hedged_mode is not None:
+            return self._hedged_mode
+        try:
+            info = self.exchange.fetch_position_mode(self._normalize_symbol("BTC/USDT"))
+            self._hedged_mode = bool(info.get("hedged"))
+        except Exception:
+            self._hedged_mode = False
+        return self._hedged_mode

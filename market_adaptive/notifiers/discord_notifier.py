@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
 from urllib import request
+from urllib.error import HTTPError, URLError
 
 from market_adaptive.config import DiscordNotificationConfig
 
@@ -23,9 +23,19 @@ class DiscordNotifier:
             return False
 
         content = f"**{title}**\n{message}"
-        if self.config.webhook_url:
-            return self._send_via_webhook(content)
-        return self._send_via_bot(content)
+        try:
+            if self.config.webhook_url:
+                return self._send_via_webhook(content)
+            return self._send_via_bot(content)
+        except HTTPError as exc:
+            logger.warning("Discord notification failed with HTTP %s: %s", exc.code, exc.reason)
+            return False
+        except URLError as exc:
+            logger.warning("Discord notification network failure: %s", exc)
+            return False
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Discord notification unexpected failure: %s", exc)
+            return False
 
     def _send_via_webhook(self, content: str) -> bool:
         payload = {
