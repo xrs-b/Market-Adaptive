@@ -3,7 +3,9 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from market_adaptive.config import (
     AppConfig,
@@ -15,25 +17,83 @@ from market_adaptive.config import (
     MarketOracleConfig,
     NotificationConfig,
     OKXConfig,
+    RiskControlConfig,
     RuntimeConfig,
 )
 from market_adaptive.controller import MainController
-from market_adaptive.db import DatabaseInitializer
+from market_adaptive.db import DatabaseInitializer, SystemStateRecord
 from market_adaptive.testsupport import DummyNotifier
 
 
 class DummyAccountClient:
-    def __init__(self, equity: float, pnl: float = 0.0) -> None:
+    def __init__(self, equity: float, pnl: float = 0.0, margin_ratio: float = 0.0, positions=None) -> None:
         self.equity = equity
         self.pnl = pnl
+        self.margin_ratio = margin_ratio
+        self.positions = positions or []
         self.cancelled_symbols = []
         self.closed_symbols = []
 
     def fetch_total_equity(self, quote_currency: str = "USDT") -> float:
+        del quote_currency
         return self.equity
 
     def fetch_total_unrealized_pnl(self, symbols=None) -> float:
+        del symbols
         return self.pnl
+
+    def fetch_account_risk_snapshot(self, symbols=None) -> dict[str, float]:
+        del symbols
+        return {
+            "equity": self.equity,
+            "margin_ratio": self.margin_ratio,
+            "maintenance_margin": self.margin_ratio * self.equity,
+            "total_notional": 0.0,
+        }
+
+    def fetch_last_price(self, symbol: str) -> float:
+        del symbol
+        return 100.0
+
+    def get_contract_value(self, symbol: str) -> float:
+        del symbol
+        return 0.01
+
+    def amount_to_precision(self, symbol: str, amount: float) -> float:
+        del symbol
+        return float(amount)
+
+    def get_min_order_amount(self, symbol: str) -> float:
+        del symbol
+        return 0.0
+
+    def fetch_symbol_position_notional(self, symbol: str) -> float:
+        del symbol
+        return 0.0
+
+    def fetch_symbol_open_order_notional(self, symbol: str) -> float:
+        del symbol
+        return 0.0
+
+    def estimate_notional(self, symbol: str, amount: float, price: float) -> float:
+        del symbol
+        return abs(amount) * abs(price) * 0.01
+
+    def fetch_positions(self, symbols=None):
+        del symbols
+        return list(self.positions)
+
+    def position_notional(self, symbol: str, position: dict) -> float:
+        del symbol
+        return abs(float(position.get("notional", 0.0)))
+
+    def cancel_all_orders(self, symbol):
+        self.cancelled_symbols.append(symbol)
+        return []
+
+    def close_all_positions(self, symbol):
+        self.closed_symbols.append(symbol)
+        return []
 
     def cancel_all_orders_for_symbols(self, symbols):
         self.cancelled_symbols.extend(sorted(set(symbols)))
@@ -54,6 +114,7 @@ class MainControllerTests(unittest.TestCase):
             database=DatabaseConfig(path=Path(self.temp_dir.name) / "market_adaptive.sqlite3"),
             notification=NotificationConfig(discord=DiscordNotificationConfig(enabled=False)),
             runtime=RuntimeConfig(),
+            risk_control=RiskControlConfig(),
             market_oracle=MarketOracleConfig(),
             execution=ExecutionConfig(),
             cta=CTAConfig(),
@@ -64,19 +125,38 @@ class MainControllerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def test_risk_manager_stops_when_drawdown_exceeds_five_percent(self) -> None:
+    def test_risk_manager_stops_when_daily_drawdown_exceeds_five_percent(self) -> None:
         controller = MainController(self.config, self.database)
         controller.notifier = DummyNotifier()
-        controller.starting_equity = 100.0
-        controller.risk_client = DummyAccountClient(equity=94.0, pnl=-6.0)
-        controller.shutdown_client = DummyAccountClient(equity=94.0, pnl=-6.0)
+        controller.risk_control.notifier = controller.notifier
+        current_date = datetime.now(timezone.utc).astimezone(ZoneInfo(self.config.runtime.timezone)).date().isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
+        self.database.upsert_system_state(SystemStateRecord("risk_daily_start_date", current_date, timestamp))
+        self.database.upsert_system_state(SystemStateRecord("risk_daily_start_equity", "100.0", timestamp))
+        controller.risk_control.client = DummyAccountClient(equity=94.0, pnl=-6.0)
+        controller.risk_control.shutdown_client = DummyAccountClient(equity=94.0, pnl=-6.0)
 
         controller.monitor_risk_once()
 
         self.assertTrue(controller.stop_event.is_set())
-        self.assertIn("BTC/USDT", controller.shutdown_client.cancelled_symbols)
-        self.assertIn("BTC/USDT", controller.shutdown_client.closed_symbols)
+        self.assertIn("BTC/USDT", controller.risk_control.shutdown_client.cancelled_symbols)
+        self.assertIn("BTC/USDT", controller.risk_control.shutdown_client.closed_symbols)
         self.assertTrue(any(title == "Risk Triggered" for title, _ in controller.notifier.messages))
+        self.assertEqual(self.database.get_system_state("system_status").state_value, "OFF")
+
+    def test_recovery_closes_rogue_exchange_position(self) -> None:
+        controller = MainController(self.config, self.database)
+        controller.risk_control.client = DummyAccountClient(
+            equity=100.0,
+            positions=[{"contracts": 2.0, "side": "long", "notional": 200.0}],
+        )
+        controller.risk_control.shutdown_client = DummyAccountClient(equity=100.0)
+
+        result = controller.recover_orders_once()
+
+        self.assertIn("closed_rogue_position", result)
+        self.assertIn("BTC/USDT", controller.risk_control.shutdown_client.cancelled_symbols)
+        self.assertIn("BTC/USDT", controller.risk_control.shutdown_client.closed_symbols)
 
     def test_shutdown_persists_checkpoint(self) -> None:
         controller = MainController(self.config, self.database)

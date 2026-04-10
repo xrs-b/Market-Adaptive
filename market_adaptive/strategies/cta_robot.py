@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from market_adaptive.config import CTAConfig, ExecutionConfig
 from market_adaptive.indicators import compute_atr, compute_obv, compute_supertrend, ohlcv_to_dataframe
+from market_adaptive.risk import LogicalPositionSnapshot
 from market_adaptive.strategies.base import BaseStrategyRobot
 
 
@@ -63,19 +64,42 @@ class CTARobot(BaseStrategyRobot):
     strategy_name = "cta"
     activation_status = "trend"
 
-    def __init__(self, client, database, config: CTAConfig, execution_config: ExecutionConfig, notifier=None) -> None:
+    def __init__(
+        self,
+        client,
+        database,
+        config: CTAConfig,
+        execution_config: ExecutionConfig,
+        notifier=None,
+        risk_manager=None,
+    ) -> None:
         super().__init__(client=client, database=database, symbol=config.symbol, notifier=notifier)
         self.config = config
         self.execution_config = execution_config
+        self.risk_manager = risk_manager
         self.position: ManagedPosition | None = None
 
     def should_notify_action(self, action: str) -> bool:
-        if action in {"cta:hold", "cta:no_signal", "cta:insufficient_data", "skip:inactive"}:
+        if action in {"cta:hold", "cta:no_signal", "cta:insufficient_data", "cta:risk_blocked", "skip:inactive"}:
             return False
         return super().should_notify_action(action)
 
     def flatten_and_cancel_all(self, reason: str) -> None:
         super().flatten_and_cancel_all(reason)
+        self.position = None
+
+    def get_logical_position(self) -> LogicalPositionSnapshot | None:
+        if self.position is None:
+            return None
+        return LogicalPositionSnapshot(
+            symbol=self.symbol,
+            side=self.position.side,
+            size=self._round_size(self.position.remaining_size),
+            strategy_name=self.strategy_name,
+        )
+
+    def reset_local_position(self, reason: str) -> None:
+        del reason
         self.position = None
 
     def execute_active_cycle(self) -> str:
@@ -154,7 +178,26 @@ class CTARobot(BaseStrategyRobot):
 
     def _open_position(self, signal: TrendSignal) -> str:
         side = "buy" if signal.direction > 0 else "sell"
-        self.client.place_market_order(self.symbol, side, self.execution_config.cta_order_size)
+        amount = self.execution_config.cta_order_size
+
+        if self.risk_manager is not None:
+            amount = self.risk_manager.calculate_position_size(
+                self.symbol,
+                self.config.risk_percent_per_trade,
+                self.config.stop_loss_atr,
+                atr_value=signal.atr,
+                last_price=signal.price,
+            )
+            requested_notional = self.client.estimate_notional(self.symbol, amount, signal.price)
+            allowed, _reason = self.risk_manager.can_open_new_position(
+                self.symbol,
+                requested_notional,
+                strategy_name=self.strategy_name,
+            )
+            if not allowed or amount <= 0:
+                return "cta:risk_blocked"
+
+        self.client.place_market_order(self.symbol, side, amount)
 
         atr_value = self._normalized_atr(signal.price, signal.atr)
         if signal.direction > 0:
@@ -167,8 +210,8 @@ class CTARobot(BaseStrategyRobot):
         self.position = ManagedPosition(
             side=position_side,
             entry_price=signal.price,
-            initial_size=self.execution_config.cta_order_size,
-            remaining_size=self.execution_config.cta_order_size,
+            initial_size=amount,
+            remaining_size=amount,
             stop_price=stop_price,
             best_price=signal.price,
         )

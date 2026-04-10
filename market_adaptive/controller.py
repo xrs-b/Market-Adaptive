@@ -20,6 +20,7 @@ from market_adaptive.config import AppConfig
 from market_adaptive.db import DatabaseInitializer, SystemStateRecord
 from market_adaptive.notifiers import DiscordNotifier, NullNotifier
 from market_adaptive.oracles import MarketOracle
+from market_adaptive.risk import LogicalPositionSnapshot, RiskControlManager
 from market_adaptive.strategies import CTARobot, GridRobot
 
 
@@ -49,26 +50,57 @@ class MainController:
         self.market_oracle = MarketOracle(self.oracle_client, database, config.market_oracle, notifier=self.notifier)
         self.cta_robot = CTARobot(self.cta_client, database, config.cta, config.execution, notifier=self.notifier)
         self.grid_robot = GridRobot(self.grid_client, database, config.grid, config.execution, notifier=self.notifier)
-
-        self.starting_equity: float | None = None
-        self.latest_total_pnl: float = 0.0
+        self.risk_control = RiskControlManager(
+            config=config.risk_control,
+            runtime_config=config.runtime,
+            database=database,
+            client=self.risk_client,
+            shutdown_client=self.shutdown_client,
+            symbols=self.symbols,
+            notifier=self.notifier,
+            stop_callback=self.stop,
+            reduce_grid_exposure_callback=self._reduce_grid_exposure,
+            logical_position_provider=self._collect_logical_positions,
+            local_position_reset_callback=self._reset_local_position,
+        )
+        self.cta_robot.risk_manager = self.risk_control
+        self.grid_robot.risk_manager = self.risk_control
 
     def install_signal_handlers(self) -> None:
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
 
+    @property
+    def starting_equity(self) -> float | None:
+        return self.risk_control.daily_start_equity
+
+    @starting_equity.setter
+    def starting_equity(self, value: float | None) -> None:
+        self.risk_control.daily_start_equity = value
+
+    @property
+    def latest_total_pnl(self) -> float:
+        return self.risk_control.latest_total_pnl
+
     def start(self) -> None:
         self.database.initialize()
         self.install_signal_handlers()
-        self.starting_equity = self.risk_client.fetch_total_equity()
-        self.logger.info("Main Controller started | starting_equity=%.4f", self.starting_equity)
-        self.notifier.send("System Started", f"starting_equity={self.starting_equity:.4f} | symbols={','.join(self.symbols)}")
+        self.risk_control.initialize()
+        self.logger.info("Main Controller started | daily_start_equity=%.4f", self.risk_control.daily_start_equity or 0.0)
+        self.notifier.send(
+            "System Started",
+            (
+                f"daily_start_equity={(self.risk_control.daily_start_equity or 0.0):.4f} | "
+                f"symbols={','.join(self.symbols)}"
+            ),
+        )
 
         worker_specs = [
             WorkerSpec("market_oracle", self.config.market_oracle.polling_interval_seconds, self.market_oracle.run_once),
             WorkerSpec("cta", self.config.cta.polling_interval_seconds, self.cta_robot.run),
             WorkerSpec("grid", self.config.grid.polling_interval_seconds, self.grid_robot.run),
             WorkerSpec("risk", self.config.runtime.risk_check_interval_seconds, self.monitor_risk_once),
+            WorkerSpec("recovery", self.config.risk_control.recovery_check_interval_seconds, self.recover_orders_once),
             WorkerSpec("main", self.config.runtime.account_check_interval_seconds, self.log_system_health_once),
         ]
 
@@ -85,40 +117,41 @@ class MainController:
     def stop(self) -> None:
         self.stop_event.set()
 
-    def monitor_risk_once(self) -> None:
-        logger = logging.LoggerAdapter(logging.getLogger(__name__), {"robot": "risk"})
-        current_equity = self.risk_client.fetch_total_equity()
-        total_pnl = self.risk_client.fetch_total_unrealized_pnl(self.symbols)
-        self.latest_total_pnl = total_pnl
+    def monitor_risk_once(self):
+        return self.risk_control.monitor_once()
 
-        if self.starting_equity is None or self.starting_equity <= 0:
-            self.starting_equity = current_equity
-
-        drawdown = max(0.0, (self.starting_equity - current_equity) / self.starting_equity)
-        logger.info(
-            "Risk heartbeat | equity=%.4f unrealized_pnl=%.4f drawdown=%.2f%%",
-            current_equity,
-            total_pnl,
-            drawdown * 100,
-        )
-        if drawdown > 0.05:
-            logger.error("Max drawdown breached: %.2f%% > 5.00%% | flattening now", drawdown * 100)
-            self.notifier.send(
-                "Risk Triggered",
-                f"drawdown={drawdown * 100:.2f}% | equity={current_equity:.4f} | unrealized_pnl={total_pnl:.4f}",
-            )
-            self.shutdown_client.cancel_all_orders_for_symbols(self.symbols)
-            self.shutdown_client.close_all_positions_for_symbols(self.symbols)
-            self.stop_event.set()
+    def recover_orders_once(self) -> str:
+        return self.risk_control.recover_positions_once()
 
     def log_system_health_once(self) -> None:
         cpu_percent = psutil.cpu_percent(interval=None) if psutil is not None else 0.0
         self.logger.info(
-            "System heartbeat | cpu=%.2f%% unrealized_pnl=%.4f tracked_symbols=%s",
+            "System heartbeat | cpu=%.2f%% unrealized_pnl=%.4f blocked=%s tracked_symbols=%s",
             cpu_percent,
             self.latest_total_pnl,
+            self.risk_control.new_openings_blocked,
             ",".join(self.symbols),
         )
+
+    def _collect_logical_positions(self) -> dict[str, LogicalPositionSnapshot | None]:
+        return {
+            self.cta_robot.symbol: self.cta_robot.get_logical_position(),
+            self.grid_robot.symbol: None,
+        }
+
+    def _reset_local_position(self, symbol: str, reason: str) -> None:
+        if symbol == self.cta_robot.symbol:
+            self.cta_robot.reset_local_position(reason)
+
+    def _reduce_grid_exposure(self, reason: str) -> None:
+        self.grid_client.cancel_all_orders(self.grid_robot.symbol)
+        if self.cta_robot.get_logical_position() is None:
+            self.grid_client.close_all_positions(self.grid_robot.symbol)
+        if self.notifier is not None:
+            self.notifier.send(
+                "Risk Action",
+                f"strategy=grid | symbol={self.grid_robot.symbol} | action=reduce_exposure | reason={reason}",
+            )
 
     def _worker_loop(self, spec: WorkerSpec) -> None:
         logger = logging.LoggerAdapter(logging.getLogger(__name__), {"robot": spec.name})

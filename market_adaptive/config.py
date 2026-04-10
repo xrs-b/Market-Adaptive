@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +56,21 @@ class RuntimeConfig:
 
 
 @dataclass
+class RiskControlConfig:
+    daily_loss_cutoff_pct: float = 0.05
+    max_margin_ratio: float = 0.60
+    recovery_check_interval_seconds: int = 60
+    position_sync_tolerance: float = 1e-6
+    default_symbol_max_notional: float = 0.0
+    symbol_notional_limits: dict[str, float] = field(default_factory=dict)
+
+    def resolve_symbol_notional_limit(self, symbol: str) -> float:
+        if symbol in self.symbol_notional_limits:
+            return float(self.symbol_notional_limits[symbol])
+        return float(self.default_symbol_max_notional)
+
+
+@dataclass
 class MarketOracleConfig:
     symbol: str = "BTC/USDT"
     polling_interval_seconds: int = 300
@@ -88,6 +103,8 @@ class CTAConfig:
     obv_signal_period: int = 8
     atr_period: int = 14
     atr_trailing_multiplier: float = 2.5
+    stop_loss_atr: float = 2.0
+    risk_percent_per_trade: float = 0.01
     first_take_profit_pct: float = 0.02
     first_take_profit_size: float = 0.50
     second_take_profit_pct: float = 0.05
@@ -111,6 +128,7 @@ class AppConfig:
     database: DatabaseConfig
     notification: NotificationConfig
     runtime: RuntimeConfig
+    risk_control: RiskControlConfig
     market_oracle: MarketOracleConfig
     execution: ExecutionConfig
     cta: CTAConfig
@@ -140,6 +158,7 @@ def load_config(config_path: str | Path) -> AppConfig:
     notification_payload = payload.get("notification") or {}
     discord_payload = notification_payload.get("discord") or {}
     runtime_payload = payload.get("runtime") or {}
+    risk_payload = payload.get("risk_control") or {}
     market_oracle_payload = payload.get("market_oracle") or {}
     execution_payload = payload.get("execution") or {}
     cta_payload = payload.get("cta") or {}
@@ -175,6 +194,17 @@ def load_config(config_path: str | Path) -> AppConfig:
         risk_check_interval_seconds=int(runtime_payload.get("risk_check_interval_seconds", 60)),
         shutdown_cancel_open_orders=bool(runtime_payload.get("shutdown_cancel_open_orders", True)),
     )
+    risk_control = RiskControlConfig(
+        daily_loss_cutoff_pct=float(risk_payload.get("daily_loss_cutoff_pct", 0.05)),
+        max_margin_ratio=float(risk_payload.get("max_margin_ratio", 0.60)),
+        recovery_check_interval_seconds=int(risk_payload.get("recovery_check_interval_seconds", 60)),
+        position_sync_tolerance=float(risk_payload.get("position_sync_tolerance", 1e-6)),
+        default_symbol_max_notional=float(risk_payload.get("default_symbol_max_notional", 0.0)),
+        symbol_notional_limits={
+            str(symbol): float(limit)
+            for symbol, limit in (risk_payload.get("symbol_notional_limits") or {}).items()
+        },
+    )
     market_oracle = MarketOracleConfig(
         symbol=str(market_oracle_payload.get("symbol", "BTC/USDT")),
         polling_interval_seconds=int(market_oracle_payload.get("polling_interval_seconds", 300)),
@@ -204,6 +234,8 @@ def load_config(config_path: str | Path) -> AppConfig:
         obv_signal_period=int(cta_payload.get("obv_signal_period", 8)),
         atr_period=int(cta_payload.get("atr_period", 14)),
         atr_trailing_multiplier=float(cta_payload.get("atr_trailing_multiplier", 2.5)),
+        stop_loss_atr=float(cta_payload.get("stop_loss_atr", 2.0)),
+        risk_percent_per_trade=float(cta_payload.get("risk_percent_per_trade", 0.01)),
         first_take_profit_pct=float(cta_payload.get("first_take_profit_pct", 0.02)),
         first_take_profit_size=float(cta_payload.get("first_take_profit_size", 0.50)),
         second_take_profit_pct=float(cta_payload.get("second_take_profit_pct", 0.05)),
@@ -223,6 +255,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         database=database,
         notification=notification,
         runtime=runtime,
+        risk_control=risk_control,
         market_oracle=market_oracle,
         execution=execution,
         cta=cta,

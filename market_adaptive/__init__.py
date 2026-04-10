@@ -10,10 +10,12 @@ from .config import (
     MarketOracleConfig,
     NotificationConfig,
     OKXConfig,
+    RiskControlConfig,
     RuntimeConfig,
     load_config,
 )
 from .db import DatabaseInitializer
+from .risk import RiskControlManager
 
 __all__ = [
     "AppConfig",
@@ -25,7 +27,9 @@ __all__ = [
     "MarketOracleConfig",
     "NotificationConfig",
     "OKXConfig",
+    "RiskControlConfig",
     "RuntimeConfig",
     "load_config",
     "DatabaseInitializer",
+    "RiskControlManager",
 ]

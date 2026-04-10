@@ -54,6 +54,28 @@ class OKXClient:
                     return float(eq)
         raise ValueError(f"Unable to determine total equity for {quote_currency}")
 
+    def fetch_account_risk_snapshot(self, symbols: list[str] | None = None) -> dict[str, float]:
+        equity = self.fetch_total_equity()
+        balance = self.fetch_balance()
+        positions = self.fetch_positions(symbols)
+
+        balance_info = balance.get("info") or {}
+        account_data = (balance_info.get("data") or [{}])[0]
+        margin_ratio = self._extract_margin_ratio(balance, positions)
+        maintenance_margin = self._extract_maintenance_margin(account_data, positions)
+        total_notional = 0.0
+        for position in positions:
+            total_notional += self.position_notional(position.get("symbol") or symbols[0] if symbols else "BTC/USDT", position)
+        if margin_ratio <= 0 and equity > 0 and maintenance_margin > 0:
+            margin_ratio = maintenance_margin / equity
+
+        return {
+            "equity": equity,
+            "margin_ratio": max(0.0, margin_ratio),
+            "maintenance_margin": max(0.0, maintenance_margin),
+            "total_notional": max(0.0, total_notional),
+        }
+
     def fetch_ohlcv(
         self,
         symbol: str,
@@ -118,6 +140,28 @@ class OKXClient:
             total += float(unrealized)
         return total
 
+    def fetch_symbol_position_notional(self, symbol: str) -> float:
+        total = 0.0
+        for position in self.fetch_positions([symbol]):
+            total += self.position_notional(symbol, position)
+        return total
+
+    def fetch_symbol_open_order_notional(self, symbol: str) -> float:
+        total = 0.0
+        last_price = None
+        for order in self.fetch_open_orders(symbol):
+            reduce_only = bool(order.get("reduceOnly") or order.get("info", {}).get("reduceOnly"))
+            if reduce_only:
+                continue
+            amount = order.get("remaining") or order.get("amount") or order.get("info", {}).get("sz") or 0.0
+            price = order.get("price")
+            if price in (None, ""):
+                if last_price is None:
+                    last_price = self.fetch_last_price(symbol)
+                price = last_price
+            total += self.estimate_notional(symbol, float(amount), float(price))
+        return total
+
     def place_market_order(
         self,
         symbol: str,
@@ -179,6 +223,54 @@ class OKXClient:
             responses.extend(self.close_all_positions(symbol))
         return responses
 
+    def fetch_market(self, symbol: str) -> dict[str, Any]:
+        self.exchange.load_markets()
+        return self.exchange.market(self._normalize_symbol(symbol))
+
+    def get_contract_value(self, symbol: str) -> float:
+        market = self.fetch_market(symbol)
+        contract_size = market.get("contractSize")
+        if contract_size not in (None, "", 0, 0.0):
+            return float(contract_size)
+        contract_size = market.get("info", {}).get("ctVal")
+        if contract_size not in (None, "", 0, 0.0):
+            return float(contract_size)
+        return 1.0
+
+    def get_min_order_amount(self, symbol: str) -> float:
+        market = self.fetch_market(symbol)
+        amount_min = market.get("limits", {}).get("amount", {}).get("min")
+        if amount_min not in (None, ""):
+            return float(amount_min)
+        amount_min = market.get("info", {}).get("minSz") or market.get("info", {}).get("lotSz")
+        if amount_min not in (None, ""):
+            return float(amount_min)
+        return 0.0
+
+    def amount_to_precision(self, symbol: str, amount: float) -> float:
+        try:
+            return float(self.exchange.amount_to_precision(self._normalize_symbol(symbol), amount))
+        except Exception:
+            return float(amount)
+
+    def estimate_notional(self, symbol: str, amount: float, price: float) -> float:
+        contract_value = self.get_contract_value(symbol)
+        return abs(float(amount)) * abs(float(price)) * contract_value
+
+    def position_notional(self, symbol: str, position: dict[str, Any]) -> float:
+        notional = position.get("notional") or position.get("info", {}).get("notionalUsd")
+        if notional not in (None, ""):
+            return abs(float(notional))
+        contracts = position.get("contracts") or position.get("positionAmt") or position.get("info", {}).get("pos") or 0.0
+        price = (
+            position.get("markPrice")
+            or position.get("entryPrice")
+            or position.get("info", {}).get("markPx")
+            or position.get("info", {}).get("avgPx")
+            or 0.0
+        )
+        return self.estimate_notional(symbol, float(contracts), float(price or 0.0))
+
     def _merge_order_params(
         self,
         side: str,
@@ -214,3 +306,45 @@ class OKXClient:
         except Exception:
             self._hedged_mode = False
         return self._hedged_mode
+
+    @staticmethod
+    def _safe_float(value: Any) -> float:
+        if value in (None, ""):
+            return 0.0
+        text = str(value).strip()
+        if text.endswith("%"):
+            return float(text[:-1]) / 100.0
+        return float(text)
+
+    def _extract_margin_ratio(self, balance: dict[str, Any], positions: list[dict[str, Any]]) -> float:
+        info = balance.get("info") or {}
+        data = info.get("data") or []
+        candidates: list[float] = []
+        for item in data:
+            for key in ("mgnRatio", "marginRatio", "riskRate"):
+                if item.get(key) not in (None, ""):
+                    candidates.append(self._safe_float(item.get(key)))
+            for detail in item.get("details") or []:
+                for key in ("mgnRatio", "marginRatio", "riskRate"):
+                    if detail.get(key) not in (None, ""):
+                        candidates.append(self._safe_float(detail.get(key)))
+        for position in positions:
+            info = position.get("info", {})
+            for key in ("mgnRatio", "marginRatio", "riskRate"):
+                if info.get(key) not in (None, ""):
+                    candidates.append(self._safe_float(info.get(key)))
+        return max(candidates) if candidates else 0.0
+
+    def _extract_maintenance_margin(self, account_data: dict[str, Any], positions: list[dict[str, Any]]) -> float:
+        for key in ("mmr", "maintMargin", "maintenanceMargin"):
+            if account_data.get(key) not in (None, ""):
+                return self._safe_float(account_data.get(key))
+
+        total = 0.0
+        for position in positions:
+            info = position.get("info", {})
+            for key in ("mmr", "maintMargin", "maintenanceMargin"):
+                if info.get(key) not in (None, ""):
+                    total += self._safe_float(info.get(key))
+                    break
+        return total
