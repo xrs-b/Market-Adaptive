@@ -17,6 +17,16 @@ CREATE TABLE IF NOT EXISTS market_status (
 );
 """
 
+STRATEGY_RUNTIME_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS strategy_runtime_state (
+    strategy_name TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    last_status TEXT NOT NULL CHECK(last_status IN ('trend', 'sideways')),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (strategy_name, symbol)
+);
+"""
+
 MARKET_STATUS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_market_status_symbol ON market_status(symbol);",
     "CREATE INDEX IF NOT EXISTS idx_market_status_status ON market_status(status);",
@@ -32,6 +42,14 @@ class MarketStatusRecord:
     volatility: float
 
 
+@dataclass
+class StrategyRuntimeState:
+    strategy_name: str
+    symbol: str
+    last_status: str
+    updated_at: str
+
+
 class DatabaseInitializer:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path).expanduser().resolve()
@@ -40,6 +58,7 @@ class DatabaseInitializer:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(MARKET_STATUS_SCHEMA)
+            conn.execute(STRATEGY_RUNTIME_STATE_SCHEMA)
             for statement in MARKET_STATUS_INDEXES:
                 conn.execute(statement)
             conn.commit()
@@ -94,3 +113,40 @@ class DatabaseInitializer:
             adx_value=float(row["adx_value"]),
             volatility=float(row["volatility"]),
         )
+
+    def get_strategy_runtime_state(self, strategy_name: str, symbol: str) -> StrategyRuntimeState | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT strategy_name, symbol, last_status, updated_at
+                FROM strategy_runtime_state
+                WHERE strategy_name = ? AND symbol = ?
+                LIMIT 1
+                """,
+                (strategy_name, symbol),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return StrategyRuntimeState(
+            strategy_name=str(row["strategy_name"]),
+            symbol=str(row["symbol"]),
+            last_status=str(row["last_status"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    def upsert_strategy_runtime_state(self, state: StrategyRuntimeState) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO strategy_runtime_state (strategy_name, symbol, last_status, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(strategy_name, symbol)
+                DO UPDATE SET
+                    last_status=excluded.last_status,
+                    updated_at=excluded.updated_at
+                """,
+                (state.strategy_name, state.symbol, state.last_status, state.updated_at),
+            )
+            conn.commit()

@@ -53,11 +53,37 @@ class MarketOracleConfig:
 
 
 @dataclass
+class ExecutionConfig:
+    td_mode: str = "isolated"
+    cta_order_size: float = 0.01
+    grid_order_size: float = 0.01
+
+
+@dataclass
+class CTAConfig:
+    symbol: str = "BTC/USDT"
+    timeframe: str = "15m"
+    lookback_limit: int = 200
+    fast_ema: int = 7
+    slow_ema: int = 21
+
+
+@dataclass
+class GridConfig:
+    symbol: str = "BTC/USDT"
+    range_percent: float = 0.02
+    levels: int = 10
+
+
+@dataclass
 class AppConfig:
     okx: OKXConfig
     database: DatabaseConfig
     runtime: RuntimeConfig
     market_oracle: MarketOracleConfig
+    execution: ExecutionConfig
+    cta: CTAConfig
+    grid: GridConfig
     config_path: Path
 
 
@@ -82,6 +108,9 @@ def load_config(config_path: str | Path) -> AppConfig:
     db_payload = payload.get("database") or {}
     runtime_payload = payload.get("runtime") or {}
     market_oracle_payload = payload.get("market_oracle") or {}
+    execution_payload = payload.get("execution") or {}
+    cta_payload = payload.get("cta") or {}
+    grid_payload = payload.get("grid") or {}
 
     okx = OKXConfig(
         api_key=str(okx_payload.get("api_key", "")),
@@ -93,7 +122,6 @@ def load_config(config_path: str | Path) -> AppConfig:
         default_type=str(okx_payload.get("default_type", "swap")),
         timeout_ms=int(okx_payload.get("timeout_ms", 10_000)),
     )
-
     database = DatabaseConfig(
         path=(path.parent.parent / str(db_payload.get("path", "data/market_adaptive.sqlite3"))).resolve()
     )
@@ -114,10 +142,30 @@ def load_config(config_path: str | Path) -> AppConfig:
         trend_adx_threshold=float(market_oracle_payload.get("trend_adx_threshold", 25)),
         sideways_adx_threshold=float(market_oracle_payload.get("sideways_adx_threshold", 20)),
     )
+    execution = ExecutionConfig(
+        td_mode=str(execution_payload.get("td_mode", "isolated")),
+        cta_order_size=float(execution_payload.get("cta_order_size", 0.01)),
+        grid_order_size=float(execution_payload.get("grid_order_size", 0.01)),
+    )
+    cta = CTAConfig(
+        symbol=str(cta_payload.get("symbol", "BTC/USDT")),
+        timeframe=str(cta_payload.get("timeframe", "15m")),
+        lookback_limit=int(cta_payload.get("lookback_limit", 200)),
+        fast_ema=int(cta_payload.get("fast_ema", 7)),
+        slow_ema=int(cta_payload.get("slow_ema", 21)),
+    )
+    grid = GridConfig(
+        symbol=str(grid_payload.get("symbol", "BTC/USDT")),
+        range_percent=float(grid_payload.get("range_percent", 0.02)),
+        levels=int(grid_payload.get("levels", 10)),
+    )
     return AppConfig(
         okx=okx,
         database=database,
         runtime=runtime,
         market_oracle=market_oracle,
+        execution=execution,
+        cta=cta,
+        grid=grid,
         config_path=path,
     )

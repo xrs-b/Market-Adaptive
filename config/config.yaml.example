@@ -27,3 +27,20 @@ market_oracle:
   bb_std: 2.0
   trend_adx_threshold: 25
   sideways_adx_threshold: 20
+
+execution:
+  td_mode: "isolated"
+  cta_order_size: 0.01
+  grid_order_size: 0.01
+
+cta:
+  symbol: "BTC/USDT"
+  timeframe: "15m"
+  lookback_limit: 200
+  fast_ema: 7
+  slow_ema: 21
+
+grid:
+  symbol: "BTC/USDT"
+  range_percent: 0.02
+  levels: 10

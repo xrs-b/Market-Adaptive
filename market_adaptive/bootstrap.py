@@ -13,7 +13,7 @@ class MarketAdaptiveBootstrap:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.database = DatabaseInitializer(config.database.path)
-        self.okx_client = OKXClient(config.okx)
+        self.okx_client = OKXClient(config.okx, config.execution)
 
     @classmethod
     def from_config_file(cls, config_path: str | Path) -> "MarketAdaptiveBootstrap":

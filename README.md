@@ -45,14 +45,28 @@ python3 scripts/run_market_oracle.py --config config/config.yaml --once
 python3 scripts/run_market_oracle.py --config config/config.yaml
 ```
 
+运行双核心策略机器人：
+
+```bash
+python3 scripts/run_the_hands.py --config config/config.yaml
+```
+
 判定规则：
 - 任一周期 `ADX > 25` 且布林带带宽较上一根 K 线放大 => `trend`
 - 两个周期 `ADX < 20` => `sideways`
 - 中间模糊区间则沿用上一条数据库状态；若无历史，则默认 `sideways`
+
+策略规则：
+- `CTARobot` 只在 `trend` 激活，依据 EMA 7/21 金叉死叉发出 OKX 模拟盘合约市价单
+- `GridRobot` 只在 `sideways` 激活，在当前价上下各 2% 范围布 10 层等差网格限价单
+- 若数据库状态发生切换，对应机器人会先尝试撤销该 symbol 全部挂单并平掉全部持仓，再进入新周期
 
 后续机器人可直接复用：
 - `market_adaptive.config.load_config`
 - `market_adaptive.db.DatabaseInitializer`
 - `market_adaptive.clients.OKXClient`
 - `market_adaptive.oracles.MarketOracle`
+- `market_adaptive.strategies.CTARobot`
+- `market_adaptive.strategies.GridRobot`
+- `market_adaptive.strategies.HandsCoordinator`
 - `market_adaptive.bootstrap.MarketAdaptiveBootstrap`
