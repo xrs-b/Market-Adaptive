@@ -17,6 +17,7 @@ class DummyClient:
         self.limit_orders = []
         self.cancel_all_calls = []
         self.close_all_calls = []
+        self.futures_settings_calls = []
         self.last_price = 100.0
         self.ohlcv = []
         self.ohlcv_by_timeframe = {}
@@ -53,6 +54,17 @@ class DummyClient:
     def fetch_positions(self, symbols=None):
         del symbols
         return list(self.positions)
+
+    def ensure_futures_settings(self, symbol: str, leverage: int, margin_mode: str | None = None) -> None:
+        self.futures_settings_calls.append(
+            {"symbol": symbol, "leverage": leverage, "margin_mode": margin_mode}
+        )
+
+    def get_position_liquidation_price(self, position: dict) -> float | None:
+        liquidation_price = position.get("liquidationPrice") or position.get("info", {}).get("liqPx")
+        if liquidation_price in (None, "", 0, "0"):
+            return None
+        return abs(float(liquidation_price))
 
     def amount_to_precision(self, symbol: str, amount: float) -> float:
         del symbol
@@ -93,12 +105,15 @@ class TheHandsTests(unittest.TestCase):
             bollinger_period=20,
             bollinger_std=2.0,
             levels=10,
+            leverage=5,
             martingale_factor=1.5,
             trigger_window_seconds=300,
             trigger_limit_per_layer=3,
             layer_cooldown_seconds=300,
             rebalance_exposure_threshold=2.0,
             max_rebalance_orders=2,
+            range_percent=0.03,
+            liquidation_protection_ratio=0.05,
         )
 
     def tearDown(self) -> None:
@@ -230,7 +245,7 @@ class TheHandsTests(unittest.TestCase):
         self.assertAlmostEqual(self.client.market_orders[3]["amount"], 0.005)
         self.assertIsNone(robot.position)
 
-    def test_grid_robot_uses_bollinger_bounds_and_martingale_buys(self) -> None:
+    def test_grid_robot_uses_neutral_price_band_and_martingale_buys(self) -> None:
         self._insert_status("sideways")
         self._load_sideways_grid_data(center=100.0)
         robot = GridRobot(self.client, self.database, self.grid_config, self.execution)
@@ -241,6 +256,9 @@ class TheHandsTests(unittest.TestCase):
         self.assertIn("grid:placed_10_orders@100.00", result.action)
         self.assertIn("rebalances=0", result.action)
         self.assertEqual(len(self.client.limit_orders), 10)
+        self.assertEqual(len(self.client.futures_settings_calls), 1)
+        self.assertEqual(self.client.futures_settings_calls[0]["leverage"], 5)
+        self.assertEqual(self.client.futures_settings_calls[0]["margin_mode"], "isolated")
         self.assertEqual(self.client.cancel_all_calls, ["BTC/USDT"])
 
         buy_orders = [order for order in self.client.limit_orders if order["side"] == "buy"]
@@ -249,12 +267,21 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(len(sell_orders), 5)
         self.assertGreater(buy_orders[-1]["amount"], buy_orders[0]["amount"])
         self.assertTrue(all(not order.get("reduce_only", False) for order in sell_orders))
+        self.assertTrue(all(order["price"] >= 97.0 for order in buy_orders))
+        self.assertTrue(all(order["price"] <= 103.0 for order in sell_orders))
+        self.assertLess(max(buy_orders, key=lambda order: order["price"])["price"], 100.0)
+        self.assertGreater(min(sell_orders, key=lambda order: order["price"])["price"], 100.0)
 
     def test_grid_robot_cools_down_repeatedly_triggered_buy_layer(self) -> None:
         self._insert_status("sideways")
         self._load_sideways_grid_data(center=100.0)
         now = datetime(2026, 4, 10, 3, 0, tzinfo=timezone.utc)
-        now_values = [now, now + timedelta(minutes=2), now + timedelta(minutes=4)]
+        now_values = [
+            now,
+            now + timedelta(minutes=2),
+            now + timedelta(minutes=4),
+            now + timedelta(minutes=5),
+        ]
         robot = GridRobot(
             self.client,
             self.database,
@@ -265,22 +292,37 @@ class TheHandsTests(unittest.TestCase):
 
         first_preview = robot._refresh_grid_context(self.client.last_price)
         assert first_preview is not None
-        first_buy_price = first_preview.buy_prices[0]
-        self.client.last_price = first_buy_price - 0.1
+        self.client.last_price = first_preview.buy_prices[0] - 0.1
 
         first_result = robot.run()
         first_count = len(self.client.limit_orders)
+
+        second_preview = robot._refresh_grid_context(self.client.last_price)
+        assert second_preview is not None
+        self.client.last_price = second_preview.buy_prices[0] - 0.1
         second_result = robot.run()
         second_count = len(self.client.limit_orders) - first_count
+
+        third_preview = robot._refresh_grid_context(self.client.last_price)
+        assert third_preview is not None
+        self.client.last_price = third_preview.buy_prices[0] - 0.1
         third_result = robot.run()
         third_count = len(self.client.limit_orders) - first_count - second_count
 
+        fourth_preview = robot._refresh_grid_context(self.client.last_price)
+        assert fourth_preview is not None
+        self.client.last_price = fourth_preview.buy_prices[0] - 0.1
+        fourth_result = robot.run()
+        fourth_count = len(self.client.limit_orders) - first_count - second_count - third_count
+
         self.assertEqual(first_count, 10)
         self.assertEqual(second_count, 10)
-        self.assertEqual(third_count, 9)
-        self.assertIn("cooldown=1", third_result.action)
+        self.assertEqual(third_count, 10)
+        self.assertEqual(fourth_count, 9)
+        self.assertIn("cooldown=1", fourth_result.action)
         self.assertIn("cooldown=0", first_result.action)
         self.assertIn("cooldown=0", second_result.action)
+        self.assertIn("cooldown=0", third_result.action)
 
     def test_grid_robot_places_reduce_only_rebalance_orders_when_long_heavy(self) -> None:
         self._insert_status("sideways")
@@ -296,6 +338,34 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(len(reduce_only_sells), 2)
         self.assertTrue(all(order["amount"] > self.execution.grid_order_size for order in reduce_only_sells))
         self.assertIn("rebalances=2", result.action)
+
+    def test_grid_robot_places_reduce_only_rebalance_orders_when_short_heavy(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+        self.client.positions = [{"contracts": 0.12, "side": "short"}]
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution)
+
+        result = robot.run()
+
+        reduce_only_buys = [
+            order for order in self.client.limit_orders if order["side"] == "buy" and order.get("reduce_only")
+        ]
+        self.assertEqual(len(reduce_only_buys), 2)
+        self.assertTrue(all(order["amount"] > self.execution.grid_order_size for order in reduce_only_buys))
+        self.assertIn("rebalances=2", result.action)
+
+    def test_grid_robot_triggers_liquidation_guard_when_price_is_too_close(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+        self.client.positions = [{"contracts": 0.08, "side": "long", "liquidationPrice": 96.0}]
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution)
+
+        result = robot.run()
+
+        self.assertEqual(result.action.split("|", 1)[0], "grid:liquidation_guard_triggered")
+        self.assertEqual(self.client.cancel_all_calls, ["BTC/USDT"])
+        self.assertEqual(self.client.close_all_calls, ["BTC/USDT"])
+        self.assertEqual(len(self.client.limit_orders), 0)
 
     def test_status_switch_triggers_flatten_before_inactive_cycle(self) -> None:
         self._insert_status("trend", "2026-04-10T03:00:00+00:00")

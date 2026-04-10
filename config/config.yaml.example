@@ -91,6 +91,7 @@ grid:
   bollinger_length: 20
   bollinger_std: 2.0
   levels: 10
+  leverage: 3  # 可选: 3 / 5
   martingale_factor: 1.25
   layer_trigger_window_seconds: 300
   layer_trigger_limit: 3
@@ -98,4 +99,5 @@ grid:
   rebalance_exposure_threshold: 2.0
   max_rebalance_orders: 2
   polling_interval_seconds: 60
-  range_percent: 0.02  # 数据不足时的兜底范围
+  price_band_ratio: 0.03
+  liquidation_protection_ratio: 0.05

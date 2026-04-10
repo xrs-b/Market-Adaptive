@@ -122,13 +122,18 @@ grid:
   bollinger_length: 20
   bollinger_std: 2.0
   levels: 10
+  leverage: 3  # 可选: 3 / 5
   martingale_factor: 1.25
   layer_trigger_window_seconds: 300
   layer_trigger_limit: 3
   layer_cooldown_seconds: 300
   rebalance_exposure_threshold: 2.0
   max_rebalance_orders: 2
+  price_band_ratio: 0.03
+  liquidation_protection_ratio: 0.05
 ```
+
+> Grid 保证金模式沿用 `execution.td_mode`，可配置为 `isolated` 或 `cross`。
 
 > 兼容旧配置中的 `timeframe` / `fast_ema` / `slow_ema` 字段，但新版本 CTA 已改为 SuperTrend + OBV + ATR 模型。
 
@@ -165,7 +170,8 @@ notification:
 - `CTARobot` 只在 `trend` 激活，同时读取 `15m` 与 `1h` 两个周期；只有当双周期 `SuperTrend` 方向一致且 `OBV` 相对其信号线方向一致时，才会发出 OKX 模拟盘合约市价单
 - CTA 多头开仓前会额外读取 OKX 公共 `long_short_accounts_ratio`；当零售多头情绪比值大于 `2.5` 时，默认阻止买入信号（也可配置为把多头仓位减半）
 - CTA 持仓使用 `ATR` 追踪止损模型，默认在 `+2%` 先止盈 `50%`，`+5%` 再止盈 `25%`，剩余仓位交给 trailing stop 管理
-- `GridRobot` 只在 `sideways` 激活，在当前价上下各 2% 范围布 10 层等差网格限价单
+- `GridRobot` 只在 `sideways` 激活，先显式向 OKX 同步保证金模式（`execution.td_mode`）与 3x / 5x 杠杆，然后按当前价上下各 3% 的中性区间重建双边网格限价单；在同一方向持仓过重时会补充 reduce-only 再平衡单
+- Grid 会持续读取交易所持仓的强平价；若当前价距离任一强平价不足 `5%`，会立即撤销该 symbol 全部网格挂单并市价减仓/平仓
 - 若数据库状态发生切换，对应机器人会先尝试撤销该 symbol 全部挂单并平掉全部持仓，再进入新周期
 
 ### 总控与风控

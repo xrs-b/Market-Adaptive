@@ -140,6 +140,7 @@ class GridConfig:
     bollinger_period: int = 20
     bollinger_std: float = 2.0
     levels: int = 10
+    leverage: int = 3
     martingale_factor: float = 1.25
     trigger_window_seconds: int = 300
     trigger_limit_per_layer: int = 3
@@ -148,7 +149,8 @@ class GridConfig:
     max_rebalance_orders: int = 2
     rebalance_threshold_ratio: float = 0.65  # legacy compatibility
     polling_interval_seconds: int = 60
-    range_percent: float = 0.02  # legacy fallback when Bollinger data is unavailable
+    range_percent: float = 0.03  # neutral grid orders stay within current price ±3%
+    liquidation_protection_ratio: float = 0.05
 
 
 @dataclass
@@ -290,6 +292,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         bollinger_period=int(grid_payload.get("bollinger_length", grid_payload.get("bollinger_period", 20))),
         bollinger_std=float(grid_payload.get("bollinger_std", 2.0)),
         levels=int(grid_payload.get("levels", 10)),
+        leverage=int(grid_payload.get("leverage", 3)),
         martingale_factor=float(grid_payload.get("martingale_factor", 1.25)),
         trigger_window_seconds=int(grid_payload.get("layer_trigger_window_seconds", grid_payload.get("trigger_window_seconds", 300))),
         trigger_limit_per_layer=int(grid_payload.get("layer_trigger_limit", grid_payload.get("trigger_limit_per_layer", 3))),
@@ -298,7 +301,8 @@ def load_config(config_path: str | Path) -> AppConfig:
         max_rebalance_orders=int(grid_payload.get("max_rebalance_orders", 2)),
         rebalance_threshold_ratio=float(grid_payload.get("rebalance_threshold_ratio", 0.65)),
         polling_interval_seconds=int(grid_payload.get("polling_interval_seconds", 60)),
-        range_percent=float(grid_payload.get("range_percent", 0.02)),
+        range_percent=float(grid_payload.get("price_band_ratio", grid_payload.get("range_percent", 0.03))),
+        liquidation_protection_ratio=float(grid_payload.get("liquidation_protection_ratio", 0.05)),
     )
     return AppConfig(
         okx=okx,

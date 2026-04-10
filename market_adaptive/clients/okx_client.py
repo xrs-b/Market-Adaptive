@@ -15,6 +15,7 @@ class OKXClient:
         self.execution_config = execution_config or ExecutionConfig()
         self.exchange = self._build_exchange()
         self._hedged_mode: bool | None = None
+        self._futures_settings_cache: dict[str, tuple[int, str]] = {}
 
     def _build_exchange(self) -> ccxt.okx:
         exchange = ccxt.okx(
@@ -192,6 +193,34 @@ class OKXClient:
             return None
         return max(history, key=lambda item: int(item.get("timestamp") or 0))
 
+    def ensure_futures_settings(self, symbol: str, leverage: int, margin_mode: str | None = None) -> None:
+        normalized_symbol = self._normalize_symbol(symbol)
+        normalized_margin_mode = self._normalize_margin_mode(margin_mode)
+        normalized_leverage = self._normalize_leverage(leverage)
+        cached = self._futures_settings_cache.get(normalized_symbol)
+        if cached == (normalized_leverage, normalized_margin_mode):
+            return
+
+        if hasattr(self.exchange, "set_margin_mode"):
+            try:
+                self.exchange.set_margin_mode(normalized_margin_mode, normalized_symbol)
+            except ccxt.ExchangeError as exc:
+                if not self._is_idempotent_setting_error(exc):
+                    raise
+
+        leverage_params = {"mgnMode": normalized_margin_mode}
+        if self._is_hedged_mode():
+            for pos_side in ("long", "short"):
+                self.exchange.set_leverage(
+                    normalized_leverage,
+                    normalized_symbol,
+                    params={**leverage_params, "posSide": pos_side},
+                )
+        else:
+            self.exchange.set_leverage(normalized_leverage, normalized_symbol, params=leverage_params)
+
+        self._futures_settings_cache[normalized_symbol] = (normalized_leverage, normalized_margin_mode)
+
     def place_market_order(
         self,
         symbol: str,
@@ -301,6 +330,17 @@ class OKXClient:
         )
         return self.estimate_notional(symbol, float(contracts), float(price or 0.0))
 
+    def get_position_liquidation_price(self, position: dict[str, Any]) -> float | None:
+        liquidation_price = position.get("liquidationPrice")
+        if liquidation_price not in (None, "", 0, "0"):
+            return abs(float(liquidation_price))
+
+        info = position.get("info", {})
+        for key in ("liqPx", "liquidationPrice"):
+            if info.get(key) not in (None, "", 0, "0"):
+                return abs(float(info.get(key)))
+        return None
+
     def _merge_order_params(
         self,
         side: str,
@@ -309,7 +349,7 @@ class OKXClient:
         reduce_only: bool,
     ) -> dict[str, Any]:
         payload = {
-            "tdMode": self.execution_config.td_mode,
+            "tdMode": self._normalize_margin_mode(self.execution_config.td_mode),
         }
         if self._is_hedged_mode():
             payload["posSide"] = "long" if side == "buy" else "short"
@@ -326,6 +366,20 @@ class OKXClient:
             return symbol
         base, quote = symbol.split("/", 1)
         return f"{base}/{quote}:{quote}"
+
+    @staticmethod
+    def _normalize_margin_mode(margin_mode: str | None) -> str:
+        normalized = str(margin_mode or "isolated").strip().lower()
+        return "cross" if normalized == "cross" else "isolated"
+
+    @staticmethod
+    def _normalize_leverage(leverage: int | float) -> int:
+        return 5 if int(leverage) == 5 else 3
+
+    @staticmethod
+    def _is_idempotent_setting_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "no need" in message or "already" in message or "same" in message
 
     def _is_hedged_mode(self) -> bool:
         if self._hedged_mode is not None:
