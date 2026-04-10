@@ -1,0 +1,17 @@
+okx:
+  api_key: "your_okx_api_key"
+  api_secret: "your_okx_api_secret"
+  passphrase: "your_okx_passphrase"
+  sandbox: true
+  simulated_id: "1"
+  simulated_trading: true
+  default_type: "swap"
+  timeout_ms: 10000
+
+database:
+  path: "data/market_adaptive.sqlite3"
+
+runtime:
+  timezone: "Asia/Shanghai"
+  default_timeframe: "1h"
+  default_ohlcv_limit: 200
