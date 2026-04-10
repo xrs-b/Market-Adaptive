@@ -19,9 +19,11 @@ class DummyClient:
         self.close_all_calls = []
         self.last_price = 100.0
         self.ohlcv = []
+        self.ohlcv_by_timeframe = {}
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 200, since=None):
-        return self.ohlcv[-limit:]
+        payload = self.ohlcv_by_timeframe.get(timeframe, self.ohlcv)
+        return payload[-limit:]
 
     def fetch_last_price(self, symbol: str) -> float:
         return self.last_price
@@ -55,6 +57,19 @@ class NotificationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def _set_bullish_ohlcv(self, client: DummyClient, lower_last_close: float = 100.0) -> None:
+        base = 1_700_000_000_000
+        lower_closes = [lower_last_close - 0.4 * (59 - index) for index in range(60)]
+        higher_closes = [140 - 1.0 * (59 - index) for index in range(60)]
+        client.ohlcv_by_timeframe["15m"] = [
+            [base + index * 900_000, close - 0.3, close + 0.4, close - 0.5, close, 100 + index * 3]
+            for index, close in enumerate(lower_closes)
+        ]
+        client.ohlcv_by_timeframe["1h"] = [
+            [base + index * 3_600_000, close - 0.5, close + 0.8, close - 0.7, close, 200 + index * 5]
+            for index, close in enumerate(higher_closes)
+        ]
+
     def test_market_oracle_notifies_on_status_change(self) -> None:
         client = DummyClient()
         oracle = MarketOracle(client, self.database, MarketOracleConfig(), notifier=self.notifier)
@@ -74,14 +89,13 @@ class NotificationTests(unittest.TestCase):
         notifier = self.notifier
         db = self.database
         db.insert_market_status(MarketStatusRecord('2026-04-10T00:00:00+00:00', 'BTC/USDT', 'trend', 28.0, 0.02))
-        closes = [120, 118, 116, 114, 112, 110, 108, 106, 104, 102, 100, 98, 96, 94, 92, 90, 88, 86, 84, 82, 80, 85, 95, 110, 130]
-        base = 1_700_000_000_000
-        client.ohlcv = [[base + i * 900_000, c - 1, c + 1, c - 2, c, 100 + i] for i, c in enumerate(closes)]
+        self._set_bullish_ohlcv(client, lower_last_close=100.0)
 
         robot = CTARobot(client, db, CTAConfig(), ExecutionConfig(), notifier=notifier)
         robot.run()
 
         self.assertTrue(any(title == 'Strategy Action' for title, _ in notifier.messages))
+        self.assertTrue(any('cta:open_long' in body for _, body in notifier.messages))
 
     def test_grid_robot_notifies_on_cleanup(self) -> None:
         client = DummyClient()

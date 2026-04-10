@@ -51,7 +51,7 @@ class BaseStrategyRobot:
         active = current_status == self.activation_status
         if active:
             action = self.execute_active_cycle()
-            if action not in {"cta:no_cross", "skip:inactive"} and not action.startswith("grid:placed_0"):
+            if self.should_notify_action(action):
                 self._notify_action(action, current_status)
 
         self.database.upsert_strategy_runtime_state(
@@ -77,6 +77,13 @@ class BaseStrategyRobot:
 
     def execute_active_cycle(self) -> str:
         raise NotImplementedError
+
+    def should_notify_action(self, action: str) -> bool:
+        if action == "skip:inactive":
+            return False
+        if action.startswith("grid:placed_0"):
+            return False
+        return True
 
     def _notify_action(self, action: str, status: str) -> None:
         if self.notifier is None:

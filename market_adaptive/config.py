@@ -79,10 +79,21 @@ class ExecutionConfig:
 @dataclass
 class CTAConfig:
     symbol: str = "BTC/USDT"
-    timeframe: str = "15m"
+    timeframe: str = "15m"  # legacy alias for lower_timeframe
+    lower_timeframe: str = "15m"
+    higher_timeframe: str = "1h"
     lookback_limit: int = 200
-    fast_ema: int = 7
-    slow_ema: int = 21
+    supertrend_period: int = 10
+    supertrend_multiplier: float = 3.0
+    obv_signal_period: int = 8
+    atr_period: int = 14
+    atr_trailing_multiplier: float = 2.5
+    first_take_profit_pct: float = 0.02
+    first_take_profit_size: float = 0.50
+    second_take_profit_pct: float = 0.05
+    second_take_profit_size: float = 0.25
+    fast_ema: int = 7  # legacy compatibility
+    slow_ema: int = 21  # legacy compatibility
     polling_interval_seconds: int = 60
 
 
@@ -181,10 +192,22 @@ def load_config(config_path: str | Path) -> AppConfig:
         cta_order_size=float(execution_payload.get("cta_order_size", 0.01)),
         grid_order_size=float(execution_payload.get("grid_order_size", 0.01)),
     )
+    cta_timeframe = str(cta_payload.get("timeframe", "15m"))
     cta = CTAConfig(
         symbol=str(cta_payload.get("symbol", "BTC/USDT")),
-        timeframe=str(cta_payload.get("timeframe", "15m")),
+        timeframe=cta_timeframe,
+        lower_timeframe=str(cta_payload.get("lower_timeframe", cta_timeframe)),
+        higher_timeframe=str(cta_payload.get("higher_timeframe", "1h")),
         lookback_limit=int(cta_payload.get("lookback_limit", 200)),
+        supertrend_period=int(cta_payload.get("supertrend_period", 10)),
+        supertrend_multiplier=float(cta_payload.get("supertrend_multiplier", 3.0)),
+        obv_signal_period=int(cta_payload.get("obv_signal_period", 8)),
+        atr_period=int(cta_payload.get("atr_period", 14)),
+        atr_trailing_multiplier=float(cta_payload.get("atr_trailing_multiplier", 2.5)),
+        first_take_profit_pct=float(cta_payload.get("first_take_profit_pct", 0.02)),
+        first_take_profit_size=float(cta_payload.get("first_take_profit_size", 0.50)),
+        second_take_profit_pct=float(cta_payload.get("second_take_profit_pct", 0.05)),
+        second_take_profit_size=float(cta_payload.get("second_take_profit_size", 0.25)),
         fast_ema=int(cta_payload.get("fast_ema", 7)),
         slow_ema=int(cta_payload.get("slow_ema", 21)),
         polling_interval_seconds=int(cta_payload.get("polling_interval_seconds", 60)),

@@ -46,8 +46,20 @@ notification:
 
 cta:
   symbol: "BTC/USDT"
-  timeframe: "15m"
+  lower_timeframe: "15m"
+  higher_timeframe: "1h"
   lookback_limit: 200
+  supertrend_period: 10
+  supertrend_multiplier: 3.0
+  obv_signal_period: 8
+  atr_period: 14
+  atr_trailing_multiplier: 2.5
+  first_take_profit_pct: 0.02
+  first_take_profit_size: 0.50
+  second_take_profit_pct: 0.05
+  second_take_profit_size: 0.25
+  # 兼容旧配置，留空即可
+  timeframe: "15m"
   fast_ema: 7
   slow_ema: 21
 
