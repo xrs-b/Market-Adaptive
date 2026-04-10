@@ -52,6 +52,7 @@ class RuntimeConfig:
     default_ohlcv_limit: int = 200
     account_check_interval_seconds: int = 60
     risk_check_interval_seconds: int = 60
+    fast_risk_check_interval_seconds: int = 1
     shutdown_cancel_open_orders: bool = True
 
 
@@ -63,9 +64,11 @@ class RiskControlConfig:
     position_sync_tolerance: float = 1e-6
     default_symbol_max_notional: float = 0.0
     symbol_notional_limits: dict[str, float] = field(default_factory=dict)
+    cta_single_trade_equity_multiple: float = 0.0
+    max_directional_leverage: float = 8.0
     grid_margin_ratio_warning: float = 0.45
     grid_deviation_reduce_ratio: float = 0.25
-    grid_liquidation_warning_ratio: float = 0.08
+    grid_liquidation_warning_ratio: float = 0.10
     grid_reduction_step_pct: float = 0.25
     grid_reduction_cooldown_seconds: int = 300
 
@@ -230,6 +233,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         default_ohlcv_limit=int(runtime_payload.get("default_ohlcv_limit", 200)),
         account_check_interval_seconds=int(runtime_payload.get("account_check_interval_seconds", 60)),
         risk_check_interval_seconds=int(runtime_payload.get("risk_check_interval_seconds", 60)),
+        fast_risk_check_interval_seconds=int(runtime_payload.get("fast_risk_check_interval_seconds", 1)),
         shutdown_cancel_open_orders=bool(runtime_payload.get("shutdown_cancel_open_orders", True)),
     )
     risk_control = RiskControlConfig(
@@ -242,9 +246,11 @@ def load_config(config_path: str | Path) -> AppConfig:
             str(symbol): float(limit)
             for symbol, limit in (risk_payload.get("symbol_notional_limits") or {}).items()
         },
+        cta_single_trade_equity_multiple=float(risk_payload.get("cta_single_trade_equity_multiple", 0.0)),
+        max_directional_leverage=float(risk_payload.get("max_directional_leverage", 8.0)),
         grid_margin_ratio_warning=float(risk_payload.get("grid_margin_ratio_warning", 0.45)),
         grid_deviation_reduce_ratio=float(risk_payload.get("grid_deviation_reduce_ratio", 0.25)),
-        grid_liquidation_warning_ratio=float(risk_payload.get("grid_liquidation_warning_ratio", 0.08)),
+        grid_liquidation_warning_ratio=float(risk_payload.get("grid_liquidation_warning_ratio", 0.10)),
         grid_reduction_step_pct=float(risk_payload.get("grid_reduction_step_pct", 0.25)),
         grid_reduction_cooldown_seconds=int(risk_payload.get("grid_reduction_cooldown_seconds", 300)),
     )

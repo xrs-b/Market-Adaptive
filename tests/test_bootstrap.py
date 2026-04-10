@@ -27,9 +27,12 @@ class MarketAdaptiveBootstrapTests(unittest.TestCase):
         self.assertEqual(config.sentiment.timeframe, "5m")
         self.assertEqual(config.sentiment.extreme_bullish_ratio, 2.5)
         self.assertEqual(config.sentiment.normalized_cta_buy_action, "block")
+        self.assertEqual(config.runtime.fast_risk_check_interval_seconds, 1)
+        self.assertEqual(config.risk_control.cta_single_trade_equity_multiple, 1.5)
+        self.assertEqual(config.risk_control.max_directional_leverage, 8.0)
         self.assertEqual(config.risk_control.grid_margin_ratio_warning, 0.45)
         self.assertEqual(config.risk_control.grid_deviation_reduce_ratio, 0.25)
-        self.assertEqual(config.risk_control.grid_liquidation_warning_ratio, 0.08)
+        self.assertEqual(config.risk_control.grid_liquidation_warning_ratio, 0.10)
         self.assertEqual(config.risk_control.grid_reduction_step_pct, 0.25)
 
     def test_database_initializer_creates_market_status_table(self) -> None:

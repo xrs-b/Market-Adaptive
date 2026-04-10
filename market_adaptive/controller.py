@@ -72,6 +72,7 @@ class MainController:
             flatten_cta_position_callback=self._flatten_cta_position,
             logical_position_provider=self._collect_logical_positions,
             local_position_reset_callback=self._reset_local_position,
+            grid_cleanup_callback=self._cleanup_grid_positions,
         )
         self.cta_robot.risk_manager = self.risk_control
         self.grid_robot.risk_manager = self.risk_control
@@ -110,11 +111,18 @@ class MainController:
             WorkerSpec("cta", self.config.cta.polling_interval_seconds, self.cta_robot.run),
             WorkerSpec("grid", self.config.grid.polling_interval_seconds, self.grid_robot.run),
             WorkerSpec("risk", self.config.runtime.risk_check_interval_seconds, self.monitor_risk_once),
+            WorkerSpec(
+                "cta_fast_risk",
+                self.config.runtime.fast_risk_check_interval_seconds,
+                self.monitor_cta_fast_once,
+            ),
             WorkerSpec("recovery", self.config.risk_control.recovery_check_interval_seconds, self.recover_orders_once),
             WorkerSpec("main", self.config.runtime.account_check_interval_seconds, self.log_system_health_once),
         ]
 
         for spec in worker_specs:
+            if spec.interval_seconds <= 0:
+                continue
             thread = threading.Thread(target=self._worker_loop, args=(spec,), daemon=True, name=spec.name)
             self.threads.append(thread)
             thread.start()
@@ -129,6 +137,9 @@ class MainController:
 
     def monitor_risk_once(self):
         return self.risk_control.monitor_once()
+
+    def monitor_cta_fast_once(self) -> str:
+        return self.risk_control.monitor_cta_fast_once()
 
     def recover_orders_once(self) -> str:
         return self.risk_control.recover_positions_once()
@@ -171,6 +182,9 @@ class MainController:
                     f"step={reduction_step_pct:.0%} | reason={reason} | result={result}"
                 ),
             )
+
+    def _cleanup_grid_positions(self, reason: str) -> str:
+        return self.grid_robot.cleanup_for_regime_switch(reason)
 
     def _worker_loop(self, spec: WorkerSpec) -> None:
         logger = logging.LoggerAdapter(logging.getLogger(__name__), {"robot": spec.name})

@@ -46,6 +46,15 @@ class AccountRiskSnapshot:
 
 
 @dataclass
+class StrategyExposureSnapshot:
+    equity: float
+    gross_long_notional: float
+    gross_short_notional: float
+    net_long_notional: float
+    net_short_notional: float
+
+
+@dataclass
 class CTARiskProfile:
     symbol: str
     side: str
@@ -78,8 +87,24 @@ class GridLiveRiskMetrics:
         return self.current_price < self.lower_bound - 1e-12
 
     @property
+    def above_upper_bound(self) -> bool:
+        return self.current_price > self.upper_bound + 1e-12
+
+    @property
     def has_exposure(self) -> bool:
         return abs(self.net_position_size) > 1e-12
+
+
+@dataclass
+class GridObserveState:
+    symbol: str
+    lower_bound: float
+    upper_bound: float
+    reason: str
+    entered_at: datetime
+
+    def contains(self, price: float) -> bool:
+        return self.lower_bound - 1e-12 <= price <= self.upper_bound + 1e-12
 
 
 @dataclass
@@ -96,6 +121,7 @@ class RiskControlManager:
     flatten_cta_position_callback: Callable[[str], None] | None = None
     logical_position_provider: Callable[[], dict[str, LogicalPositionSnapshot | None]] | None = None
     local_position_reset_callback: Callable[[str, str], None] | None = None
+    grid_cleanup_callback: Callable[[str], str] | None = None
     daily_start_equity: float | None = None
     daily_start_date: str | None = None
     latest_total_pnl: float = 0.0
@@ -105,6 +131,7 @@ class RiskControlManager:
     latest_cta_risk: CTARiskProfile | None = None
     latest_grid_risk: GridRiskProfile | None = None
     _grid_last_reduction_at: datetime | None = field(default=None, init=False, repr=False)
+    _grid_observe_state: GridObserveState | None = field(default=None, init=False, repr=False)
     _cta_exit_applied: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -124,6 +151,8 @@ class RiskControlManager:
 
     def update_grid_risk(self, profile: GridRiskProfile | None) -> None:
         self.latest_grid_risk = profile
+        if profile is None:
+            self._clear_grid_observe_mode("grid_profile_cleared")
 
     def monitor_once(self) -> AccountRiskSnapshot:
         current_equity = self.client.fetch_total_equity()
@@ -181,6 +210,23 @@ class RiskControlManager:
 
         return snapshot
 
+    def monitor_cta_fast_once(self) -> str:
+        profile = self.latest_cta_risk
+        if profile is None:
+            self._cta_exit_applied = False
+            return "cta_fast_guard:idle"
+
+        triggered, reason = self._evaluate_cta_stop(profile)
+        if not triggered:
+            self._cta_exit_applied = False
+            return "cta_fast_guard:armed"
+        if self._cta_exit_applied or self.flatten_cta_position_callback is None:
+            return "cta_fast_guard:exit_pending"
+
+        self.flatten_cta_position_callback(reason)
+        self._cta_exit_applied = True
+        return "cta_fast_guard:stop_hit"
+
     def calculate_position_size(
         self,
         symbol: str,
@@ -210,6 +256,7 @@ class RiskControlManager:
 
         amount = risk_amount / per_unit_risk
         amount = self.client.amount_to_precision(symbol, amount)
+        amount = self._cap_amount_by_equity_multiple(symbol, amount, price, account_equity)
         amount = self._cap_amount_by_symbol_limit(symbol, amount, price)
         minimum_amount = self.client.get_min_order_amount(symbol)
         if amount < minimum_amount:
@@ -221,6 +268,7 @@ class RiskControlManager:
         symbol: str,
         requested_notional: float,
         strategy_name: str | None = None,
+        opening_side: str | None = None,
     ) -> tuple[bool, str | None]:
         if self.circuit_breaker_triggered:
             return False, "circuit_breaker"
@@ -232,6 +280,10 @@ class RiskControlManager:
         strategy_block_reason = self._resolve_strategy_opening_block(snapshot, strategy_name)
         if strategy_block_reason is not None:
             return False, strategy_block_reason
+
+        leverage_allowed, leverage_reason = self.check_directional_exposure_limit(requested_notional, opening_side)
+        if not leverage_allowed:
+            return False, leverage_reason
 
         return self.check_symbol_notional_limit(symbol, requested_notional)
 
@@ -245,6 +297,31 @@ class RiskControlManager:
         total_if_opened = current_position_notional + current_order_notional + max(0.0, float(requested_notional))
         if total_if_opened > symbol_limit + 1e-9:
             return False, f"symbol_limit={symbol_limit:.4f}"
+        return True, None
+
+    def check_directional_exposure_limit(
+        self,
+        requested_notional: float,
+        opening_side: str | None,
+    ) -> tuple[bool, str | None]:
+        normalized_side = self._normalize_opening_side(opening_side)
+        max_directional_leverage = float(self.config.max_directional_leverage)
+        if normalized_side is None or requested_notional <= 0 or max_directional_leverage <= 0:
+            return True, None
+
+        account_equity = float(self.client.fetch_total_equity())
+        if account_equity <= 0:
+            return False, "equity_unavailable"
+
+        exposure = self._build_strategy_exposure_snapshot(account_equity)
+        if normalized_side == "long":
+            projected_net_notional = exposure.net_long_notional + max(0.0, float(requested_notional))
+        else:
+            projected_net_notional = exposure.net_short_notional + max(0.0, float(requested_notional))
+
+        projected_leverage = projected_net_notional / account_equity
+        if projected_leverage > max_directional_leverage + 1e-9:
+            return False, f"net_{normalized_side}_leverage={projected_leverage:.2f}x"
         return True, None
 
     def recover_positions_once(self) -> str:
@@ -281,6 +358,16 @@ class RiskControlManager:
             actions.append(f"{symbol}:flattened_mismatch")
 
         return "recovery:ok" if not actions else "recovery:" + "+".join(actions)
+
+    def coordinate_strategy_cleanup(self, strategy_name: str, reason: str) -> str | None:
+        if strategy_name != "grid" or self.grid_cleanup_callback is None:
+            return None
+        if not str(reason).startswith("status_switch"):
+            return None
+
+        result = self.grid_cleanup_callback(reason)
+        self.update_grid_risk(None)
+        return result
 
     def trigger_circuit_breaker(self, snapshot: AccountRiskSnapshot | None = None) -> None:
         if self.circuit_breaker_triggered:
@@ -323,14 +410,19 @@ class RiskControlManager:
             self._cta_exit_applied = False
             return
 
-        current_price = float(self.client.fetch_last_price(profile.symbol))
-        stop_hit = current_price <= profile.stop_price if profile.side == "long" else current_price >= profile.stop_price
-        if not stop_hit:
+        triggered, reason = self._evaluate_cta_stop(profile)
+        if not triggered:
             self._cta_exit_applied = False
             return
         if self._cta_exit_applied or self.flatten_cta_position_callback is None:
             return
 
+        self.flatten_cta_position_callback(reason)
+        self._cta_exit_applied = True
+
+    def _evaluate_cta_stop(self, profile: CTARiskProfile) -> tuple[bool, str]:
+        current_price = float(self.client.fetch_last_price(profile.symbol))
+        stop_hit = current_price <= profile.stop_price if profile.side == "long" else current_price >= profile.stop_price
         reason = (
             "cta_atr_stop_hit"
             f"|price={current_price:.2f}"
@@ -338,8 +430,7 @@ class RiskControlManager:
             f"|distance={profile.stop_distance:.2f}"
             f"|atr={profile.atr_value:.4f}"
         )
-        self.flatten_cta_position_callback(reason)
-        self._cta_exit_applied = True
+        return stop_hit, reason
 
     def _apply_grid_risk_controls(self, snapshot: AccountRiskSnapshot) -> None:
         metrics = self._build_live_grid_metrics()
@@ -368,17 +459,57 @@ class RiskControlManager:
 
         metrics = self._build_live_grid_metrics()
         if metrics is None:
+            self._clear_grid_observe_mode("grid_metrics_unavailable")
             return None
+
+        observe_reason = self._resolve_grid_observe_block(metrics)
+        if observe_reason is not None:
+            return observe_reason
+        if snapshot.margin_ratio >= self.config.grid_margin_ratio_warning:
+            return f"grid_margin_warning={snapshot.margin_ratio:.2%}"
+        return None
+
+    def _resolve_grid_observe_block(self, metrics: GridLiveRiskMetrics) -> str | None:
+        breach_reason: str | None = None
         if metrics.below_lower_bound:
-            return (
+            breach_reason = (
                 "grid_observe_lower_break"
                 f"|price={metrics.current_price:.2f}"
                 f"|lower={metrics.lower_bound:.2f}"
                 f"|deviation={metrics.total_deviation_ratio:.2%}"
             )
-        if snapshot.margin_ratio >= self.config.grid_margin_ratio_warning:
-            return f"grid_margin_warning={snapshot.margin_ratio:.2%}"
-        return None
+        elif metrics.above_upper_bound:
+            breach_reason = (
+                "grid_observe_upper_break"
+                f"|price={metrics.current_price:.2f}"
+                f"|upper={metrics.upper_bound:.2f}"
+                f"|deviation={metrics.total_deviation_ratio:.2%}"
+            )
+
+        if breach_reason is not None:
+            if self._grid_observe_state is None:
+                self._grid_observe_state = GridObserveState(
+                    symbol=metrics.symbol,
+                    lower_bound=metrics.lower_bound,
+                    upper_bound=metrics.upper_bound,
+                    reason=breach_reason,
+                    entered_at=datetime.now(timezone.utc),
+                )
+            return self._grid_observe_state.reason
+
+        if self._grid_observe_state is None:
+            return None
+        if self._grid_observe_state.symbol != metrics.symbol:
+            self._clear_grid_observe_mode("grid_symbol_changed")
+            return None
+        if self._grid_observe_state.contains(metrics.current_price):
+            self._clear_grid_observe_mode("grid_price_reentered_band")
+            return None
+
+        return (
+            self._grid_observe_state.reason
+            + f"|observe=waiting_return|band={self._grid_observe_state.lower_bound:.2f}-{self._grid_observe_state.upper_bound:.2f}"
+        )
 
     def _resolve_grid_reduction_reason(
         self,
@@ -457,6 +588,32 @@ class RiskControlManager:
             nearest_liquidation_distance_ratio=nearest_liquidation_distance_ratio,
         )
 
+    def _build_strategy_exposure_snapshot(self, account_equity: float) -> StrategyExposureSnapshot:
+        gross_long_notional = 0.0
+        gross_short_notional = 0.0
+
+        for position in self.client.fetch_positions(self.symbols) or []:
+            size = self._extract_position_size(position)
+            if size <= 0:
+                continue
+            symbol = str(position.get("symbol") or position.get("info", {}).get("instId") or self.symbols[0])
+            side = self._extract_position_side(position)
+            notional = self.client.position_notional(symbol, position)
+            if side == "short":
+                gross_short_notional += notional
+            else:
+                gross_long_notional += notional
+
+        net_long_notional = max(0.0, gross_long_notional - gross_short_notional)
+        net_short_notional = max(0.0, gross_short_notional - gross_long_notional)
+        return StrategyExposureSnapshot(
+            equity=account_equity,
+            gross_long_notional=gross_long_notional,
+            gross_short_notional=gross_short_notional,
+            net_long_notional=net_long_notional,
+            net_short_notional=net_short_notional,
+        )
+
     def _sync_daily_baseline(self, *, current_equity: float, now: datetime | None = None) -> None:
         if now is None:
             now = datetime.now(timezone.utc)
@@ -501,6 +658,23 @@ class RiskControlManager:
         self.database.upsert_system_state(
             SystemStateRecord("risk_block_reason", reason or "", timestamp)
         )
+
+    def _clear_grid_observe_mode(self, reason: str) -> None:
+        if self._grid_observe_state is None:
+            return
+        logger.info("Grid observe mode cleared | symbol=%s reason=%s", self._grid_observe_state.symbol, reason)
+        self._grid_observe_state = None
+
+    def _cap_amount_by_equity_multiple(self, symbol: str, amount: float, price: float, account_equity: float) -> float:
+        equity_multiple = float(self.config.cta_single_trade_equity_multiple)
+        if equity_multiple <= 0 or amount <= 0 or account_equity <= 0:
+            return max(0.0, float(amount))
+
+        max_notional = account_equity * equity_multiple
+        unit_notional = self.client.estimate_notional(symbol, 1.0, price)
+        if max_notional <= 0 or unit_notional <= 0:
+            return 0.0
+        return min(float(amount), max_notional / unit_notional)
 
     def _cap_amount_by_symbol_limit(self, symbol: str, amount: float, price: float) -> float:
         symbol_limit = self.config.resolve_symbol_notional_limit(symbol)
@@ -568,6 +742,17 @@ class RiskControlManager:
         for key in ("liqPx", "liquidationPrice"):
             if info.get(key) not in (None, "", 0, "0"):
                 return abs(float(info.get(key)))
+        return None
+
+    @staticmethod
+    def _normalize_opening_side(opening_side: str | None) -> str | None:
+        if opening_side is None:
+            return None
+        normalized = str(opening_side).strip().lower()
+        if normalized in {"buy", "long"}:
+            return "long"
+        if normalized in {"sell", "short"}:
+            return "short"
         return None
 
     @staticmethod

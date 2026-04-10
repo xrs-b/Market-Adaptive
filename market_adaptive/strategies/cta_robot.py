@@ -231,12 +231,14 @@ class CTARobot(BaseStrategyRobot):
                     self._publish_risk_profile(None)
                     return "cta:sentiment_blocked"
 
+        position_side = "long" if signal.direction > 0 else "short"
         if self.risk_manager is not None:
             requested_notional = self.client.estimate_notional(self.symbol, amount, signal.price)
             allowed, _reason = self.risk_manager.can_open_new_position(
                 self.symbol,
                 requested_notional,
                 strategy_name=self.strategy_name,
+                opening_side=position_side,
             )
             if not allowed:
                 self._publish_risk_profile(None)
@@ -248,10 +250,8 @@ class CTARobot(BaseStrategyRobot):
         stop_distance = atr_value * self.config.stop_loss_atr
         if signal.direction > 0:
             stop_price = signal.price - stop_distance
-            position_side = "long"
         else:
             stop_price = signal.price + stop_distance
-            position_side = "short"
 
         self.position = ManagedPosition(
             side=position_side,

@@ -89,9 +89,11 @@ risk_control:
   default_symbol_max_notional: 0
   symbol_notional_limits:
     BTC/USDT: 1500
+  cta_single_trade_equity_multiple: 1.5
+  max_directional_leverage: 8.0
   grid_margin_ratio_warning: 0.45
   grid_deviation_reduce_ratio: 0.25
-  grid_liquidation_warning_ratio: 0.08
+  grid_liquidation_warning_ratio: 0.10
   grid_reduction_step_pct: 0.25
   grid_reduction_cooldown_seconds: 300
 
@@ -174,17 +176,19 @@ notification:
 ### 策略规则
 - `CTARobot` 只在 `trend` 激活，同时读取 `15m` 与 `1h` 两个周期；只有当双周期 `SuperTrend` 方向一致且 `OBV` 相对其信号线方向一致时，才会发出 OKX 模拟盘合约市价单
 - CTA 多头开仓前会额外读取 OKX 公共 `long_short_accounts_ratio`；当零售多头情绪比值大于 `2.5` 时，默认阻止买入信号（也可配置为把多头仓位减半）
-- CTA 持仓使用 `ATR` 动态止损距离作为主风控参数：开仓与后续上移/下移止损均以 `stop_loss_atr` 为准；默认在 `+2%` 先止盈 `50%`，`+5%` 再止盈 `25%`，但一旦 ATR 风险止损被击穿，会立即对剩余仓位执行 all-out 全部退出
+- CTA 持仓使用 `ATR` 动态止损距离作为主风控参数：开仓与后续上移/下移止损均以 `stop_loss_atr` 为准；默认在 `+2%` 先止盈 `50%`，`+5%` 再止盈 `25%`；`RiskControlManager` 还会通过快速风控 worker 高频盯防 ATR 硬止损，一旦击穿立即对剩余仓位执行 all-out 全部退出
+- CTA 单笔开仓 notional 可用 `cta_single_trade_equity_multiple` 约束为账户权益倍数上限，避免趋势单笔过重
 - `GridRobot` 只在 `sideways` 激活，先显式向 OKX 同步保证金模式（`execution.td_mode`）与 3x / 5x 杠杆，然后按当前价上下各 3% 的中性区间重建双边网格限价单；在同一方向持仓过重时会补充 reduce-only 再平衡单
-- Grid 由 `RiskControlManager` 接管分层风险治理：当价格跌破网格下沿时先暂停新增网格开仓并观察；当保证金风险率、边界偏离度或强平安全缓冲触发阈值时，改为按 `grid_reduction_step_pct` 分批减仓，而不是一次性全平
-- 若数据库状态发生切换，对应机器人会先尝试撤销该 symbol 全部挂单并平掉全部持仓，再进入新周期
+- Grid 由 `RiskControlManager` 接管分层风险治理：当价格跌破下沿或突破上沿时会进入 observe 模式并暂停新增网格开仓，直到价格回到原带宽或市场状态切换；当账户风险率、边界偏离度或最近强平价安全缓冲（默认 10%）触发阈值时，会优先修剪最危险 / 最远离现价的网格敞口，再按 `grid_reduction_step_pct` 逐步减仓
+- 若数据库状态发生切换，`RiskControlManager` 会协调旧策略清理；Grid 会先撤销挂单，再对盈利持仓优先挂 reduce-only limit，其他仓位直接市价退出，为下一只机器人腾出保证金
 
 ### 总控与风控
-- `MainController` 使用 `threading` 并发启动 `MarketOracle`、`CTARobot`、`GridRobot`
-- `RiskControlManager` 每分钟检查一次账户日内起始权益、总浮盈亏、维护保证金 / 风险率，并执行仓位恢复检查
-- CTA 开仓使用 `calculate_position_size(symbol, risk_percent, stop_loss_atr)`，基于账户权益、ATR 动态止损距离与 OKX 合约面值动态换算下单张数；The Shield 还会持续校验 CTA 的实时 ATR 止损，一旦命中立即通知并触发全退
+- `MainController` 使用 `threading` 并发启动 `MarketOracle`、`CTARobot`、`GridRobot`，以及可配置的 CTA 快速风控 worker（`runtime.fast_risk_check_interval_seconds`）
+- `RiskControlManager` 每分钟检查一次账户日内起始权益、总浮盈亏、维护保证金 / 风险率，并执行仓位恢复检查；CTA 硬止损则走高频 fast-check，避免只靠分钟级轮询
+- CTA 开仓使用 `calculate_position_size(symbol, risk_percent, stop_loss_atr)`，基于账户权益、ATR 动态止损距离、单笔权益倍数上限与 OKX 合约面值动态换算下单张数
+- `RiskControlManager` 会汇总 CTA + Grid 的净多 / 净空 notional；若同方向投影杠杆超过 `max_directional_leverage`（默认 8x），会拒绝继续加同向仓
 - 当日内回撤超过 `5%` 时，会立即撤单、强平、写入数据库 `system_status=OFF`、停止机器人并触发通知
-- Grid 风控会先用 `grid_margin_ratio_warning` 与下沿突破状态阻止新增挂单；当账户风险率达到 `max_margin_ratio`、价格偏离网格边界超过 `grid_deviation_reduce_ratio`，或当前价距离最近强平价小于 `grid_liquidation_warning_ratio` 时，会按 `grid_reduction_step_pct` 分批减仓并通过通知回报
+- Grid 风控会先用 observe 模式阻止新增挂单；当账户风险率达到 `max_margin_ratio`、价格偏离网格边界超过 `grid_deviation_reduce_ratio`，或当前价距离最近强平价小于 `grid_liquidation_warning_ratio` 时，会按 `grid_reduction_step_pct` 逐步减仓并通过通知回报
 - 日志支持颜色区分、CPU 占用率输出、Ctrl/Cmd+C 优雅退出与 shutdown checkpoint 落库
 
 ## 可复用入口

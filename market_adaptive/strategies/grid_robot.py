@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from math import ceil
+from math import ceil, inf
 from typing import Callable
 
 from market_adaptive.config import ExecutionConfig, GridConfig
@@ -30,6 +30,24 @@ class GridOrderPlan:
     price: float
     amount: float
     reduce_only: bool = False
+
+
+@dataclass
+class GridPositionCandidate:
+    side: str
+    pos_side: str
+    size: float
+    notional: float
+    entry_price: float
+    current_price: float
+    price_distance_ratio: float
+    liquidation_price: float | None
+    liquidation_distance_ratio: float | None
+    profitable: bool
+
+    @property
+    def close_side(self) -> str:
+        return "sell" if self.side == "long" else "buy"
 
 
 class GridRobot(BaseStrategyRobot):
@@ -62,8 +80,52 @@ class GridRobot(BaseStrategyRobot):
         return super().should_notify_action(action)
 
     def flatten_and_cancel_all(self, reason: str) -> None:
-        super().flatten_and_cancel_all(reason)
+        coordinated_result = None
+        if self.risk_manager is not None and hasattr(self.risk_manager, "coordinate_strategy_cleanup"):
+            coordinated_result = self.risk_manager.coordinate_strategy_cleanup(self.strategy_name, reason)
+
+        if coordinated_result is None:
+            super().flatten_and_cancel_all(reason)
         self._publish_grid_risk(None)
+
+    def cleanup_for_regime_switch(self, reason: str) -> str:
+        self.client.cancel_all_orders(self.symbol)
+        current_price = float(self.client.fetch_last_price(self.symbol))
+        positions = self._load_position_candidates(current_price)
+        actions: list[str] = []
+
+        for candidate in positions:
+            close_amount = self._normalize_amount(candidate.size)
+            if close_amount <= 0:
+                continue
+            if candidate.profitable and current_price > 0:
+                self.client.place_limit_order(
+                    self.symbol,
+                    candidate.close_side,
+                    close_amount,
+                    current_price,
+                    reduce_only=True,
+                    params={"reason": reason, "posSide": candidate.pos_side},
+                )
+                actions.append(f"limit_{candidate.side}:{close_amount:.8f}@{current_price:.2f}")
+                continue
+
+            self.client.place_market_order(
+                self.symbol,
+                candidate.close_side,
+                close_amount,
+                reduce_only=True,
+                params={"reason": reason, "posSide": candidate.pos_side},
+            )
+            actions.append(f"market_{candidate.side}:{close_amount:.8f}")
+
+        result = "grid:regime_cleanup_idle" if not actions else "grid:regime_cleanup|" + "+".join(actions)
+        if self.notifier is not None:
+            self.notifier.send(
+                "Strategy Cleanup",
+                f"strategy={self.strategy_name} | symbol={self.symbol} | reason={reason} | result={result}",
+            )
+        return result
 
     def execute_active_cycle(self) -> str:
         now = self.now_provider().astimezone(timezone.utc)
@@ -131,31 +193,69 @@ class GridRobot(BaseStrategyRobot):
     def reduce_exposure_step(self, reason: str, reduction_step_pct: float) -> str:
         self.client.cancel_all_orders(self.symbol)
         reduction_ratio = min(1.0, max(0.01, float(reduction_step_pct)))
+        current_price = float(self.client.fetch_last_price(self.symbol))
+        candidates = self._load_position_candidates(current_price)
+        if not candidates:
+            return "grid:step_reduce_idle"
+
+        if str(reason).startswith("grid_liquidation_warning"):
+            protective_ratio = max(reduction_ratio, float(self.config.liquidation_protection_ratio))
+            return self._protective_trim_positions(reason, candidates, protective_ratio)
+
         actions: list[str] = []
-
-        for position in self.client.fetch_positions([self.symbol]) or []:
-            raw_size = position.get("contracts") or position.get("positionAmt") or position.get("info", {}).get("pos") or 0.0
-            size = abs(float(raw_size or 0.0))
-            if size <= 0:
-                continue
-
-            side = str(position.get("side") or position.get("info", {}).get("posSide") or "").lower()
-            if side not in {"long", "short"}:
-                side = "long" if float(raw_size or 0.0) >= 0 else "short"
-            close_side = "sell" if side == "long" else "buy"
-            pos_side = str(position.get("info", {}).get("posSide") or side)
-            reduce_amount = min(size, self._normalize_amount(size * reduction_ratio))
+        for candidate in candidates:
+            reduce_amount = min(candidate.size, self._normalize_amount(candidate.size * reduction_ratio))
             if reduce_amount <= 0:
                 continue
-
             self.client.place_market_order(
                 self.symbol,
-                close_side,
+                candidate.close_side,
                 reduce_amount,
                 reduce_only=True,
-                params={"reason": reason, "posSide": pos_side},
+                params={"reason": reason, "posSide": candidate.pos_side},
             )
-            actions.append(f"{side}:{reduce_amount:.8f}")
+            actions.append(f"{candidate.side}:{reduce_amount:.8f}")
+
+        return "grid:step_reduce_idle" if not actions else "grid:step_reduce|" + "+".join(actions)
+
+    def _protective_trim_positions(
+        self,
+        reason: str,
+        candidates: list[GridPositionCandidate],
+        reduction_ratio: float,
+    ) -> str:
+        ranked = sorted(
+            candidates,
+            key=lambda candidate: (
+                0 if candidate.liquidation_distance_ratio is not None else 1,
+                candidate.liquidation_distance_ratio if candidate.liquidation_distance_ratio is not None else inf,
+                0 if not candidate.profitable else 1,
+                -candidate.price_distance_ratio,
+                -candidate.notional,
+            ),
+        )
+        target_size = sum(candidate.size for candidate in ranked) * reduction_ratio
+        remaining_target = max(0.0, target_size)
+        actions: list[str] = []
+
+        for candidate in ranked:
+            if remaining_target <= 1e-12:
+                break
+            raw_reduce = min(candidate.size, remaining_target)
+            reduce_amount = self._normalize_amount(raw_reduce)
+            if reduce_amount <= 0:
+                continue
+            self.client.place_market_order(
+                self.symbol,
+                candidate.close_side,
+                reduce_amount,
+                reduce_only=True,
+                params={"reason": reason, "posSide": candidate.pos_side},
+            )
+            actions.append(
+                f"protective_trim:{candidate.side}:{reduce_amount:.8f}|distance={candidate.price_distance_ratio:.2%}"
+            )
+            remaining_target = max(0.0, remaining_target - reduce_amount)
 
         return "grid:step_reduce_idle" if not actions else "grid:step_reduce|" + "+".join(actions)
 
@@ -325,8 +425,15 @@ class GridRobot(BaseStrategyRobot):
 
         if self.risk_manager is not None and not order.reduce_only:
             requested_notional = reserved_notional + self._estimate_notional(amount, order.price)
-            allowed, _reason = self.risk_manager.check_symbol_notional_limit(self.symbol, requested_notional)
-            if not allowed:
+            opening_side = "long" if order.side == "buy" else "short"
+            leverage_allowed, _reason = self.risk_manager.check_directional_exposure_limit(
+                requested_notional,
+                opening_side,
+            )
+            if not leverage_allowed:
+                return 0
+            limit_allowed, _reason = self.risk_manager.check_symbol_notional_limit(self.symbol, requested_notional)
+            if not limit_allowed:
                 return 0
 
         self.client.place_limit_order(
@@ -389,6 +496,43 @@ class GridRobot(BaseStrategyRobot):
 
         return long_size - short_size
 
+    def _load_position_candidates(self, current_price: float) -> list[GridPositionCandidate]:
+        candidates: list[GridPositionCandidate] = []
+        for position in self.client.fetch_positions([self.symbol]) or []:
+            raw_size = position.get("contracts") or position.get("positionAmt") or position.get("info", {}).get("pos") or 0.0
+            size = abs(float(raw_size or 0.0))
+            if size <= 0:
+                continue
+
+            side = str(position.get("side") or position.get("info", {}).get("posSide") or "").lower()
+            if side not in {"long", "short"}:
+                side = "long" if float(raw_size or 0.0) >= 0 else "short"
+            pos_side = str(position.get("info", {}).get("posSide") or side)
+            notional = self._position_notional(position)
+            entry_price = self._extract_entry_price(position, current_price)
+            price_distance_ratio = abs(current_price - entry_price) / max(abs(current_price), 1e-12)
+            liquidation_price = self._extract_liquidation_price(position)
+            liquidation_distance_ratio = None
+            if liquidation_price is not None and liquidation_price > 0:
+                liquidation_distance_ratio = abs(current_price - liquidation_price) / liquidation_price
+
+            profitable = current_price >= entry_price if side == "long" else current_price <= entry_price
+            candidates.append(
+                GridPositionCandidate(
+                    side=side,
+                    pos_side=pos_side,
+                    size=size,
+                    notional=notional,
+                    entry_price=entry_price,
+                    current_price=current_price,
+                    price_distance_ratio=price_distance_ratio,
+                    liquidation_price=liquidation_price,
+                    liquidation_distance_ratio=liquidation_distance_ratio,
+                    profitable=profitable,
+                )
+            )
+        return candidates
+
     def _estimate_notional(self, amount: float, price: float) -> float:
         if hasattr(self.client, "estimate_notional"):
             return float(self.client.estimate_notional(self.symbol, amount, price))
@@ -396,6 +540,32 @@ class GridRobot(BaseStrategyRobot):
         if hasattr(self.client, "get_contract_value"):
             contract_value = float(self.client.get_contract_value(self.symbol))
         return abs(float(amount)) * abs(float(price)) * contract_value
+
+    def _position_notional(self, position: dict) -> float:
+        if hasattr(self.client, "position_notional"):
+            return abs(float(self.client.position_notional(self.symbol, position)))
+        contracts = position.get("contracts") or position.get("positionAmt") or position.get("info", {}).get("pos") or 0.0
+        return self._estimate_notional(float(contracts or 0.0), self._extract_entry_price(position, self.client.fetch_last_price(self.symbol)))
+
+    def _extract_entry_price(self, position: dict, fallback_price: float) -> float:
+        raw = (
+            position.get("entryPrice")
+            or position.get("avgPrice")
+            or position.get("markPrice")
+            or position.get("info", {}).get("avgPx")
+            or position.get("info", {}).get("avgPrice")
+            or position.get("info", {}).get("markPx")
+            or fallback_price
+        )
+        return abs(float(raw or fallback_price or 0.0))
+
+    def _extract_liquidation_price(self, position: dict) -> float | None:
+        if hasattr(self.client, "get_position_liquidation_price"):
+            return self.client.get_position_liquidation_price(position)
+        liquidation_price = position.get("liquidationPrice") or position.get("info", {}).get("liqPx")
+        if liquidation_price in (None, "", 0, "0"):
+            return None
+        return abs(float(liquidation_price))
 
     def _normalize_amount(self, amount: float) -> float:
         normalized = max(0.0, float(amount))

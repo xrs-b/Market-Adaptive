@@ -89,13 +89,14 @@ class DummyRiskManager:
         self.grid_reason = grid_reason
         self.cta_profiles = []
         self.grid_profiles = []
+        self.cleanup_requests = []
 
     def calculate_position_size(self, symbol: str, risk_percent: float, stop_loss_atr: float, *, atr_value=None, last_price=None) -> float:
         del symbol, risk_percent, stop_loss_atr, atr_value, last_price
         return 0.02
 
-    def can_open_new_position(self, symbol: str, requested_notional: float, strategy_name: str | None = None):
-        del symbol, requested_notional
+    def can_open_new_position(self, symbol: str, requested_notional: float, strategy_name: str | None = None, opening_side: str | None = None):
+        del symbol, requested_notional, opening_side
         if strategy_name == "grid" and not self.allow_grid:
             return False, self.grid_reason
         return True, None
@@ -103,6 +104,14 @@ class DummyRiskManager:
     def check_symbol_notional_limit(self, symbol: str, requested_notional: float):
         del symbol, requested_notional
         return True, None
+
+    def check_directional_exposure_limit(self, requested_notional: float, opening_side: str | None):
+        del requested_notional, opening_side
+        return True, None
+
+    def coordinate_strategy_cleanup(self, strategy_name: str, reason: str):
+        self.cleanup_requests.append((strategy_name, reason))
+        return None
 
     def update_cta_risk(self, profile) -> None:
         self.cta_profiles.append(profile)
@@ -419,6 +428,34 @@ class TheHandsTests(unittest.TestCase):
         self.assertTrue(self.client.market_orders[0]["reduce_only"])
         self.assertAlmostEqual(self.client.market_orders[0]["amount"], 0.03)
 
+    def test_grid_robot_liquidation_trim_targets_worst_farthest_position_first(self) -> None:
+        self.client.last_price = 100.0
+        self.client.positions = [
+            {"contracts": 0.08, "side": "long", "entryPrice": 98.0, "liquidationPrice": 70.0, "info": {"posSide": "long"}},
+            {"contracts": 0.16, "side": "long", "entryPrice": 120.0, "liquidationPrice": 104.0, "info": {"posSide": "long"}},
+        ]
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution)
+
+        result = robot.reduce_exposure_step("grid_liquidation_warning", 0.25)
+
+        self.assertIn("protective_trim", result)
+        self.assertEqual(len(self.client.market_orders), 1)
+        self.assertAlmostEqual(self.client.market_orders[0]["amount"], 0.06)
+        self.assertEqual(self.client.market_orders[0]["params"]["posSide"], "long")
+
+    def test_grid_robot_regime_cleanup_uses_limit_for_profitable_positions(self) -> None:
+        self.client.last_price = 105.0
+        self.client.positions = [{"contracts": 0.1, "side": "long", "entryPrice": 100.0, "info": {"posSide": "long"}}]
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution)
+
+        result = robot.cleanup_for_regime_switch("status_switch:sideways->trend")
+
+        self.assertIn("grid:regime_cleanup", result)
+        self.assertEqual(self.client.cancel_all_calls, ["BTC/USDT"])
+        self.assertEqual(len(self.client.limit_orders), 1)
+        self.assertEqual(self.client.limit_orders[0]["side"], "sell")
+        self.assertTrue(self.client.limit_orders[0]["reduce_only"])
+
     def test_status_switch_triggers_flatten_before_inactive_cycle(self) -> None:
         self._insert_status("trend", "2026-04-10T03:00:00+00:00")
         cta = CTARobot(self.client, self.database, self.cta_config, self.execution)
@@ -433,6 +470,17 @@ class TheHandsTests(unittest.TestCase):
         self.assertIn("BTC/USDT", self.client.cancel_all_calls)
         self.assertIn("BTC/USDT", self.client.close_all_calls)
         self.assertIsNone(cta.position)
+
+    def test_grid_status_switch_uses_risk_manager_cleanup_coordinator(self) -> None:
+        self._insert_status("trend", "2026-04-10T03:00:00+00:00")
+        risk_manager = DummyRiskManager()
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, risk_manager=risk_manager)
+        robot.run()
+
+        self._insert_status("sideways", "2026-04-10T03:05:00+00:00")
+        robot.run()
+
+        self.assertEqual(risk_manager.cleanup_requests, [("grid", "status_switch:trend->sideways")])
 
     def test_hands_coordinator_runs_both_robots(self) -> None:
         self._insert_status("sideways")
