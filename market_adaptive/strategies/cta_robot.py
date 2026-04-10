@@ -8,21 +8,25 @@ from market_adaptive.indicators import (
     compute_atr,
     compute_obv,
     compute_obv_slope_angle,
-    compute_supertrend,
     compute_volume_profile,
-    ohlcv_to_dataframe,
 )
 from market_adaptive.risk import CTARiskProfile, LogicalPositionSnapshot
 from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies.base import BaseStrategyRobot
+from market_adaptive.strategies.mtf_engine import MTFSignal, MultiTimeframeSignalEngine
 
 
 @dataclass
 class TrendSignal:
     direction: int
     raw_direction: int
-    lower_direction: int
-    higher_direction: int
+    major_direction: int
+    swing_rsi: float
+    bullish_ready: bool
+    execution_golden_cross: bool
+    execution_breakout: bool
+    execution_trigger_reason: str
+    mtf_aligned: bool
     obv_bias: int
     obv_slope_angle: float
     obv_slope_passed: bool
@@ -32,6 +36,7 @@ class TrendSignal:
     long_setup_reason: str
     price: float
     atr: float
+    risk_percent: float
 
 
 @dataclass
@@ -44,6 +49,7 @@ class ManagedPosition:
     best_price: float
     atr_value: float
     stop_distance: float
+    risk_percent: float = 0.0
     first_target_hit: bool = False
     second_target_hit: bool = False
 
@@ -100,6 +106,7 @@ class CTARobot(BaseStrategyRobot):
         self.risk_manager = risk_manager
         self.sentiment_analyst = sentiment_analyst
         self.position: ManagedPosition | None = None
+        self.mtf_engine = MultiTimeframeSignalEngine(client, config)
 
     def should_notify_action(self, action: str) -> bool:
         if action in {
@@ -108,6 +115,7 @@ class CTARobot(BaseStrategyRobot):
             "cta:insufficient_data",
             "cta:risk_blocked",
             "cta:range_filter_blocked",
+            "cta:bullish_ready",
             "skip:inactive",
         }:
             return False
@@ -167,61 +175,33 @@ class CTARobot(BaseStrategyRobot):
         self._publish_risk_profile(signal)
         if self.position is None and signal.long_setup_blocked:
             return "cta:range_filter_blocked"
+        if self.position is None and signal.bullish_ready and signal.raw_direction == 0:
+            return "cta:bullish_ready"
         return "cta:no_signal" if self.position is None else "cta:hold"
 
     def _build_trend_signal(self) -> TrendSignal | None:
-        minimum_bars = max(
-            self.config.supertrend_period * 3,
-            self.config.atr_period * 3,
-            self.config.obv_signal_period + 2,
-            self.config.obv_slope_window + 2,
-        )
-        lower_ohlcv = self.client.fetch_ohlcv(
-            symbol=self.config.symbol,
-            timeframe=self.config.lower_timeframe,
-            limit=self.config.lookback_limit,
-        )
-        higher_ohlcv = self.client.fetch_ohlcv(
-            symbol=self.config.symbol,
-            timeframe=self.config.higher_timeframe,
-            limit=self.config.lookback_limit,
-        )
-        if len(lower_ohlcv) < minimum_bars or len(higher_ohlcv) < minimum_bars:
+        mtf_signal = self.mtf_engine.build_signal()
+        if mtf_signal is None:
             return None
 
-        lower_frame = ohlcv_to_dataframe(lower_ohlcv)
-        higher_frame = ohlcv_to_dataframe(higher_ohlcv)
+        execution_frame = mtf_signal.execution_frame
+        execution_obv = compute_obv(execution_frame)
+        execution_obv_signal = execution_obv.ewm(span=self.config.obv_signal_period, adjust=False).mean()
+        atr_series = compute_atr(execution_frame, length=self.config.atr_period)
 
-        lower_supertrend = compute_supertrend(
-            lower_frame,
-            length=self.config.supertrend_period,
-            multiplier=self.config.supertrend_multiplier,
-        )
-        higher_supertrend = compute_supertrend(
-            higher_frame,
-            length=self.config.supertrend_period,
-            multiplier=self.config.supertrend_multiplier,
-        )
-        lower_obv = compute_obv(lower_frame)
-        lower_obv_signal = lower_obv.ewm(span=self.config.obv_signal_period, adjust=False).mean()
-        atr_series = compute_atr(lower_frame, length=self.config.atr_period)
-
-        lower_direction = int(lower_supertrend["direction"].iloc[-1])
-        higher_direction = int(higher_supertrend["direction"].iloc[-1])
-        obv_value = float(lower_obv.iloc[-1])
-        obv_signal_value = float(lower_obv_signal.iloc[-1])
+        obv_value = float(execution_obv.iloc[-1])
+        obv_signal_value = float(execution_obv_signal.iloc[-1])
         obv_bias = 1 if obv_value > obv_signal_value else -1 if obv_value < obv_signal_value else 0
-        aligned_direction = lower_direction if lower_direction == higher_direction else 0
-        volume_filter_passed = aligned_direction != 0 and obv_bias == aligned_direction
-        raw_direction = aligned_direction if volume_filter_passed else 0
-        current_price = float(lower_frame["close"].iloc[-1])
+        raw_direction = 1 if mtf_signal.fully_aligned else 0
+        volume_filter_passed = raw_direction > 0 and obv_bias > 0
+        current_price = float(execution_frame["close"].iloc[-1])
         obv_slope_angle = compute_obv_slope_angle(
-            lower_frame,
+            execution_frame,
             window=self.config.obv_slope_window,
-            obv=lower_obv,
+            obv=execution_obv,
         )
         volume_profile = compute_volume_profile(
-            lower_frame,
+            execution_frame,
             lookback_hours=self.config.volume_profile_lookback_hours,
             value_area_pct=self.config.volume_profile_value_area_pct,
             bin_count=self.config.volume_profile_bin_count,
@@ -233,22 +213,26 @@ class CTARobot(BaseStrategyRobot):
         obv_slope_passed = True
 
         if raw_direction > 0:
-            obv_slope_passed = obv_slope_angle >= float(self.config.obv_slope_threshold_degrees)
-            if volume_profile is None:
+            if not volume_filter_passed:
                 long_setup_blocked = True
-                long_setup_reason = "missing_volume_profile"
-            elif not volume_profile.above_poc(current_price):
-                long_setup_blocked = True
-                long_setup_reason = "below_poc"
-            elif volume_profile.contains_price(current_price):
-                long_setup_blocked = True
-                long_setup_reason = "inside_value_area"
-            elif not volume_profile.above_value_area(current_price):
-                long_setup_blocked = True
-                long_setup_reason = "below_value_area_high"
-            elif not obv_slope_passed:
-                long_setup_blocked = True
-                long_setup_reason = "obv_slope_too_flat"
+                long_setup_reason = "obv_not_confirmed"
+            else:
+                obv_slope_passed = obv_slope_angle >= float(self.config.obv_slope_threshold_degrees)
+                if volume_profile is None:
+                    long_setup_blocked = True
+                    long_setup_reason = "missing_volume_profile"
+                elif not volume_profile.above_poc(current_price):
+                    long_setup_blocked = True
+                    long_setup_reason = "below_poc"
+                elif volume_profile.contains_price(current_price):
+                    long_setup_blocked = True
+                    long_setup_reason = "inside_value_area"
+                elif not volume_profile.above_value_area(current_price):
+                    long_setup_blocked = True
+                    long_setup_reason = "below_value_area_high"
+                elif not obv_slope_passed:
+                    long_setup_blocked = True
+                    long_setup_reason = "obv_slope_too_flat"
 
             if long_setup_blocked:
                 final_direction = 0
@@ -256,8 +240,13 @@ class CTARobot(BaseStrategyRobot):
         return TrendSignal(
             direction=final_direction,
             raw_direction=raw_direction,
-            lower_direction=lower_direction,
-            higher_direction=higher_direction,
+            major_direction=mtf_signal.major_direction,
+            swing_rsi=mtf_signal.swing_rsi,
+            bullish_ready=mtf_signal.bullish_ready,
+            execution_golden_cross=mtf_signal.execution_trigger.kdj_golden_cross,
+            execution_breakout=mtf_signal.execution_trigger.prior_high_break,
+            execution_trigger_reason=mtf_signal.execution_trigger.reason,
+            mtf_aligned=mtf_signal.fully_aligned,
             obv_bias=obv_bias,
             obv_slope_angle=obv_slope_angle,
             obv_slope_passed=obv_slope_passed,
@@ -267,6 +256,7 @@ class CTARobot(BaseStrategyRobot):
             long_setup_reason=long_setup_reason,
             price=current_price,
             atr=float(atr_series.iloc[-1]),
+            risk_percent=self._resolve_risk_percent(mtf_signal),
         )
 
     def _open_position(self, signal: TrendSignal) -> str:
@@ -277,7 +267,7 @@ class CTARobot(BaseStrategyRobot):
         if self.risk_manager is not None:
             amount = self.risk_manager.calculate_position_size(
                 self.symbol,
-                self.config.risk_percent_per_trade,
+                signal.risk_percent,
                 self.config.stop_loss_atr,
                 atr_value=signal.atr,
                 last_price=signal.price,
@@ -331,6 +321,7 @@ class CTARobot(BaseStrategyRobot):
             best_price=signal.price,
             atr_value=atr_value,
             stop_distance=stop_distance,
+            risk_percent=signal.risk_percent,
         )
         self._publish_risk_profile(signal)
         action = f"cta:open_{position_side}"
@@ -450,6 +441,12 @@ class CTARobot(BaseStrategyRobot):
 
     def _normalized_atr(self, price: float, atr: float) -> float:
         return max(float(atr), float(price) * 0.001)
+
+    def _resolve_risk_percent(self, mtf_signal: MTFSignal) -> float:
+        boosted_risk = max(float(self.config.risk_percent_per_trade), float(self.config.boosted_risk_percent_per_trade))
+        if mtf_signal.fully_aligned:
+            return boosted_risk
+        return float(self.config.risk_percent_per_trade)
 
     @staticmethod
     def _round_size(size: float) -> float:

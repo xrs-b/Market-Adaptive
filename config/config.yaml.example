@@ -72,18 +72,29 @@ notification:
 
 cta:
   symbol: "BTC/USDT"
+  major_timeframe: "4h"
+  swing_timeframe: "1h"
+  execution_timeframe: "15m"
+  # 兼容旧配置：execution_timeframe = lower_timeframe，swing_timeframe = higher_timeframe
   lower_timeframe: "15m"
   higher_timeframe: "1h"
   lookback_limit: 200
   supertrend_period: 10
   supertrend_multiplier: 3.0
+  swing_rsi_period: 14
+  swing_rsi_ready_threshold: 50.0
+  kdj_length: 9
+  kdj_k_smoothing: 3
+  kdj_d_smoothing: 3
+  execution_breakout_lookback: 3
   obv_signal_period: 8
   obv_slope_window: 8
   obv_slope_threshold_degrees: 30.0
   atr_period: 14
   atr_trailing_multiplier: 2.5
   stop_loss_atr: 2.0
-  risk_percent_per_trade: 0.01
+  risk_percent_per_trade: 0.02
+  boosted_risk_percent_per_trade: 0.03
   first_take_profit_pct: 0.02
   first_take_profit_size: 0.50
   second_take_profit_pct: 0.05

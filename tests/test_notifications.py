@@ -77,6 +77,7 @@ class NotificationTests(unittest.TestCase):
             ]
         )
         higher_closes = [140 - 1.0 * (59 - index) for index in range(60)]
+        major_closes = [220 - 2.0 * (59 - index) for index in range(60)]
         client.ohlcv_by_timeframe["15m"] = [
             [base + index * 900_000, close - 0.3, close + 0.4, close - 0.5, close, 100 + index * 3]
             for index, close in enumerate(lower_closes)
@@ -84,6 +85,10 @@ class NotificationTests(unittest.TestCase):
         client.ohlcv_by_timeframe["1h"] = [
             [base + index * 3_600_000, close - 0.5, close + 0.8, close - 0.7, close, 200 + index * 5]
             for index, close in enumerate(higher_closes)
+        ]
+        client.ohlcv_by_timeframe["4h"] = [
+            [base + index * 14_400_000, close - 0.8, close + 1.0, close - 1.1, close, 260 + index * 7]
+            for index, close in enumerate(major_closes)
         ]
 
     def test_market_oracle_notifies_on_status_change(self) -> None:

@@ -81,6 +81,51 @@ def compute_atr(frame: pd.DataFrame, length: int = 14) -> pd.Series:
     return _manual_atr(frame, length)
 
 
+def compute_rsi(frame: pd.DataFrame, length: int = 14) -> pd.Series:
+    close = frame["close"].astype(float)
+    delta = close.diff().fillna(0.0)
+    gains = delta.clip(lower=0.0)
+    losses = (-delta).clip(lower=0.0)
+    average_gain = gains.ewm(alpha=1 / max(1, int(length)), adjust=False).mean()
+    average_loss = losses.ewm(alpha=1 / max(1, int(length)), adjust=False).mean()
+
+    relative_strength = average_gain / average_loss.replace(0.0, float("nan"))
+    rsi = 100.0 - (100.0 / (1.0 + relative_strength))
+    rsi = rsi.where(average_loss > 0.0, 100.0)
+    rsi = rsi.where((average_gain > 0.0) | (average_loss > 0.0), 50.0)
+    return rsi.astype(float).fillna(50.0)
+
+
+def compute_kdj(
+    frame: pd.DataFrame,
+    *,
+    length: int = 9,
+    k_smoothing: int = 3,
+    d_smoothing: int = 3,
+) -> pd.DataFrame:
+    effective_length = max(2, int(length))
+    lowest_low = frame["low"].rolling(effective_length, min_periods=1).min()
+    highest_high = frame["high"].rolling(effective_length, min_periods=1).max()
+    denominator = (highest_high - lowest_low).replace(0.0, float("nan"))
+    rsv = ((frame["close"] - lowest_low) / denominator) * 100.0
+    rsv = rsv.clip(lower=0.0, upper=100.0).fillna(50.0)
+
+    k_alpha = 1 / max(1, int(k_smoothing))
+    d_alpha = 1 / max(1, int(d_smoothing))
+    k_value = rsv.ewm(alpha=k_alpha, adjust=False).mean().fillna(50.0)
+    d_value = k_value.ewm(alpha=d_alpha, adjust=False).mean().fillna(50.0)
+    j_value = (3.0 * k_value - 2.0 * d_value).astype(float)
+
+    return pd.DataFrame(
+        {
+            "k": k_value.astype(float),
+            "d": d_value.astype(float),
+            "j": j_value.astype(float),
+            "rsv": rsv.astype(float),
+        }
+    )
+
+
 def compute_obv(frame: pd.DataFrame) -> pd.Series:
     close = frame["close"]
     volume = frame["volume"].fillna(0.0)

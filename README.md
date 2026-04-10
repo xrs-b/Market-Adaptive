@@ -107,18 +107,29 @@ sentiment:
 
 cta:
   symbol: "BTC/USDT"
+  major_timeframe: "4h"
+  swing_timeframe: "1h"
+  execution_timeframe: "15m"
+  # 兼容旧配置：execution_timeframe = lower_timeframe，swing_timeframe = higher_timeframe
   lower_timeframe: "15m"
   higher_timeframe: "1h"
   lookback_limit: 200
   supertrend_period: 10
   supertrend_multiplier: 3.0
+  swing_rsi_period: 14
+  swing_rsi_ready_threshold: 50.0
+  kdj_length: 9
+  kdj_k_smoothing: 3
+  kdj_d_smoothing: 3
+  execution_breakout_lookback: 3
   obv_signal_period: 8
   obv_slope_window: 8
   obv_slope_threshold_degrees: 30.0
   atr_period: 14
   atr_trailing_multiplier: 2.5
   stop_loss_atr: 2.0
-  risk_percent_per_trade: 0.01
+  risk_percent_per_trade: 0.02
+  boosted_risk_percent_per_trade: 0.03
   first_take_profit_pct: 0.02
   first_take_profit_size: 0.50
   second_take_profit_pct: 0.05
@@ -147,7 +158,7 @@ grid:
 
 > Grid 保证金模式沿用 `execution.td_mode`，可配置为 `isolated` 或 `cross`。
 
-> 兼容旧配置中的 `timeframe` / `fast_ema` / `slow_ema` 字段，但新版本 CTA 已改为 SuperTrend + OBV + ATR + Volume Profile breakout 模型。
+> 兼容旧配置中的 `timeframe` / `lower_timeframe` / `higher_timeframe` / `fast_ema` / `slow_ema` 字段；新版本 CTA 已升级为 `4h SuperTrend + 1h RSI + 15m KDJ/Breakout` 的 MTF Engine，并继续串接 `OBV + ATR + Volume Profile + Sentiment + Hybrid Shield`。
 
 ## Discord 通知配置
 
@@ -179,8 +190,10 @@ notification:
 - 中间模糊区间则沿用上一条数据库状态；若无历史，则默认 `sideways`
 
 ### 策略规则
-- `CTARobot` 只在 `trend` 激活，同时读取 `15m` 与 `1h` 两个周期；基础方向仍由双周期 `SuperTrend` + `OBV` 信号线确认，但多头必须再通过基于最近约 24 小时 intraday OHLCV 构造的 Volume Profile 过滤
-- CTA 多头只有在当前价已经突破 `POC`、站上 `Value Area High`，并且 `OBV` 归一化斜率角度高于 `obv_slope_threshold_degrees`（默认约等于 `30°`）时，才会被视为 high-quality breakout；若价格仍在 value area 内或低于 POC，则当作区间震荡直接跳过多头开仓
+- `CTARobot` 只在 `trend` 激活，并改为走三周期 `MTF Engine`：`4h` 用 `SuperTrend` 识别 major trend，`1h` 用 `RSI` 判定 swing readiness，`15m` 只负责 execution trigger（`KDJ` 金叉或突破最近 `execution_breakout_lookback` 根 K 线前高）
+- 当 `4h SuperTrend` 看多且 `1h RSI > swing_rsi_ready_threshold`（默认 `50`）时，CTA 进入 `bullish ready`；只有 `15m` 执行触发成立后，才允许进入后续多头过滤链路
+- 即使 MTF 已 ready / trigger，多头仍必须继续通过现有 CTA stack：`OBV` 信号线偏多、`OBV` 归一化斜率角度高于 `obv_slope_threshold_degrees`（默认约等于 `30°`），以及基于最近约 24 小时 intraday OHLCV 构造的 `Volume Profile` breakout 条件（突破 `POC` 并站上 `Value Area High`）；若价格仍在 value area 内或低于 POC，则直接跳过开仓
+- 当 `4h`、`1h` 与 `15m` 三层信号 fully aligned 时，CTA 会把单笔风险从基线 `risk_percent_per_trade`（默认 `2%`）提升到 `boosted_risk_percent_per_trade`（默认 `3%`），再交给 `RiskControlManager` / Hybrid Shield 做最终仓位约束
 - CTA 多头开仓前会额外读取 OKX 公共 `long_short_accounts_ratio`；当零售多头情绪比值大于 `2.5` 时，默认阻止买入信号（也可配置为把多头仓位减半）
 - CTA 持仓使用 `ATR` 动态止损距离作为主风控参数：开仓与后续上移/下移止损均以 `stop_loss_atr` 为准；默认在 `+2%` 先止盈 `50%`，`+5%` 再止盈 `25%`；`RiskControlManager` 还会通过快速风控 worker 高频盯防 ATR 硬止损，一旦击穿立即对剩余仓位执行 all-out 全部退出
 - CTA 单笔开仓 notional 可用 `cta_single_trade_equity_multiple` 约束为账户权益倍数上限，避免趋势单笔过重

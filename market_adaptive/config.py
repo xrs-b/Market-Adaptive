@@ -120,19 +120,29 @@ class ExecutionConfig:
 @dataclass
 class CTAConfig:
     symbol: str = "BTC/USDT"
-    timeframe: str = "15m"  # legacy alias for lower_timeframe
-    lower_timeframe: str = "15m"
-    higher_timeframe: str = "1h"
+    timeframe: str = "15m"  # legacy alias for execution_timeframe
+    lower_timeframe: str = "15m"  # legacy alias for execution_timeframe
+    higher_timeframe: str = "1h"  # legacy alias for swing_timeframe
+    major_timeframe: str = "4h"
+    swing_timeframe: str = "1h"
+    execution_timeframe: str = "15m"
     lookback_limit: int = 200
     supertrend_period: int = 10
     supertrend_multiplier: float = 3.0
+    swing_rsi_period: int = 14
+    swing_rsi_ready_threshold: float = 50.0
+    kdj_length: int = 9
+    kdj_k_smoothing: int = 3
+    kdj_d_smoothing: int = 3
+    execution_breakout_lookback: int = 3
     obv_signal_period: int = 8
     obv_slope_window: int = 8
     obv_slope_threshold_degrees: float = 30.0
     atr_period: int = 14
     atr_trailing_multiplier: float = 2.5
     stop_loss_atr: float = 2.0
-    risk_percent_per_trade: float = 0.01
+    risk_percent_per_trade: float = 0.02
+    boosted_risk_percent_per_trade: float = 0.03
     first_take_profit_pct: float = 0.02
     first_take_profit_size: float = 0.50
     second_take_profit_pct: float = 0.05
@@ -143,6 +153,34 @@ class CTAConfig:
     fast_ema: int = 7  # legacy compatibility
     slow_ema: int = 21  # legacy compatibility
     polling_interval_seconds: int = 60
+
+    def __post_init__(self) -> None:
+        default_execution = "15m"
+        default_swing = "1h"
+        default_timeframe = "15m"
+
+        if self.execution_timeframe == default_execution and self.lower_timeframe != default_execution:
+            self.execution_timeframe = self.lower_timeframe
+        if self.execution_timeframe == default_execution and self.timeframe != default_timeframe:
+            self.execution_timeframe = self.timeframe
+        if self.lower_timeframe == default_execution and self.execution_timeframe != default_execution:
+            self.lower_timeframe = self.execution_timeframe
+        if self.timeframe == default_timeframe and self.execution_timeframe != default_execution:
+            self.timeframe = self.execution_timeframe
+
+        if self.swing_timeframe == default_swing and self.higher_timeframe != default_swing:
+            self.swing_timeframe = self.higher_timeframe
+        if self.higher_timeframe == default_swing and self.swing_timeframe != default_swing:
+            self.higher_timeframe = self.swing_timeframe
+
+        self.major_timeframe = str(self.major_timeframe or "4h")
+        self.swing_timeframe = str(self.swing_timeframe or self.higher_timeframe or default_swing)
+        self.execution_timeframe = str(self.execution_timeframe or self.lower_timeframe or self.timeframe or default_execution)
+        self.lower_timeframe = self.execution_timeframe
+        self.higher_timeframe = self.swing_timeframe
+        self.timeframe = self.execution_timeframe
+        if self.boosted_risk_percent_per_trade <= 0:
+            self.boosted_risk_percent_per_trade = self.risk_percent_per_trade
 
 
 @dataclass
@@ -285,21 +323,41 @@ def load_config(config_path: str | Path) -> AppConfig:
         grid_order_size=float(execution_payload.get("grid_order_size", 0.01)),
     )
     cta_timeframe = str(cta_payload.get("timeframe", "15m"))
+    cta_execution_timeframe = str(
+        cta_payload.get("execution_timeframe", cta_payload.get("lower_timeframe", cta_timeframe))
+    )
+    cta_swing_timeframe = str(
+        cta_payload.get("swing_timeframe", cta_payload.get("higher_timeframe", "1h"))
+    )
+    cta_base_risk_percent = float(cta_payload.get("risk_percent_per_trade", 0.02))
+    cta_boosted_risk_percent = float(
+        cta_payload.get("boosted_risk_percent_per_trade", max(cta_base_risk_percent, 0.03))
+    )
     cta = CTAConfig(
         symbol=str(cta_payload.get("symbol", "BTC/USDT")),
         timeframe=cta_timeframe,
-        lower_timeframe=str(cta_payload.get("lower_timeframe", cta_timeframe)),
-        higher_timeframe=str(cta_payload.get("higher_timeframe", "1h")),
+        lower_timeframe=cta_execution_timeframe,
+        higher_timeframe=cta_swing_timeframe,
+        major_timeframe=str(cta_payload.get("major_timeframe", "4h")),
+        swing_timeframe=cta_swing_timeframe,
+        execution_timeframe=cta_execution_timeframe,
         lookback_limit=int(cta_payload.get("lookback_limit", 200)),
         supertrend_period=int(cta_payload.get("supertrend_period", 10)),
         supertrend_multiplier=float(cta_payload.get("supertrend_multiplier", 3.0)),
+        swing_rsi_period=int(cta_payload.get("swing_rsi_period", 14)),
+        swing_rsi_ready_threshold=float(cta_payload.get("swing_rsi_ready_threshold", 50.0)),
+        kdj_length=int(cta_payload.get("kdj_length", 9)),
+        kdj_k_smoothing=int(cta_payload.get("kdj_k_smoothing", 3)),
+        kdj_d_smoothing=int(cta_payload.get("kdj_d_smoothing", 3)),
+        execution_breakout_lookback=int(cta_payload.get("execution_breakout_lookback", 3)),
         obv_signal_period=int(cta_payload.get("obv_signal_period", 8)),
         obv_slope_window=int(cta_payload.get("obv_slope_window", 8)),
         obv_slope_threshold_degrees=float(cta_payload.get("obv_slope_threshold_degrees", 30.0)),
         atr_period=int(cta_payload.get("atr_period", 14)),
         atr_trailing_multiplier=float(cta_payload.get("atr_trailing_multiplier", 2.5)),
         stop_loss_atr=float(cta_payload.get("stop_loss_atr", 2.0)),
-        risk_percent_per_trade=float(cta_payload.get("risk_percent_per_trade", 0.01)),
+        risk_percent_per_trade=cta_base_risk_percent,
+        boosted_risk_percent_per_trade=cta_boosted_risk_percent,
         first_take_profit_pct=float(cta_payload.get("first_take_profit_pct", 0.02)),
         first_take_profit_size=float(cta_payload.get("first_take_profit_size", 0.50)),
         second_take_profit_pct=float(cta_payload.get("second_take_profit_pct", 0.05)),
