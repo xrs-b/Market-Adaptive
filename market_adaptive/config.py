@@ -117,9 +117,17 @@ class CTAConfig:
 @dataclass
 class GridConfig:
     symbol: str = "BTC/USDT"
-    range_percent: float = 0.02
+    timeframe: str = "1h"
+    lookback_limit: int = 120
+    bollinger_period: int = 20
+    bollinger_std: float = 2.0
     levels: int = 10
+    martingale_factor: float = 1.1
+    trigger_window_seconds: int = 300
+    trigger_limit_per_layer: int = 3
+    rebalance_threshold_ratio: float = 0.65
     polling_interval_seconds: int = 60
+    range_percent: float = 0.02  # legacy fallback
 
 
 @dataclass
@@ -246,9 +254,17 @@ def load_config(config_path: str | Path) -> AppConfig:
     )
     grid = GridConfig(
         symbol=str(grid_payload.get("symbol", "BTC/USDT")),
-        range_percent=float(grid_payload.get("range_percent", 0.02)),
+        timeframe=str(grid_payload.get("timeframe", "1h")),
+        lookback_limit=int(grid_payload.get("lookback_limit", 120)),
+        bollinger_period=int(grid_payload.get("bollinger_period", 20)),
+        bollinger_std=float(grid_payload.get("bollinger_std", 2.0)),
         levels=int(grid_payload.get("levels", 10)),
+        martingale_factor=float(grid_payload.get("martingale_factor", 1.1)),
+        trigger_window_seconds=int(grid_payload.get("trigger_window_seconds", 300)),
+        trigger_limit_per_layer=int(grid_payload.get("trigger_limit_per_layer", 3)),
+        rebalance_threshold_ratio=float(grid_payload.get("rebalance_threshold_ratio", 0.65)),
         polling_interval_seconds=int(grid_payload.get("polling_interval_seconds", 60)),
+        range_percent=float(grid_payload.get("range_percent", 0.02)),
     )
     return AppConfig(
         okx=okx,

@@ -18,6 +18,7 @@ class DummyClient:
         self.last_price = 100.0
         self.ohlcv = []
         self.ohlcv_by_timeframe = {}
+        self.positions = []
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 200, since=None):
         payload = self.ohlcv_by_timeframe.get(timeframe, self.ohlcv)
@@ -44,6 +45,9 @@ class DummyClient:
         self.close_all_calls.append(symbol)
         return []
 
+    def fetch_positions(self, symbols=None):
+        return list(self.positions)
+
 
 class TheHandsTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -60,7 +64,7 @@ class TheHandsTests(unittest.TestCase):
             first_take_profit_size=0.5,
             second_take_profit_size=0.25,
         )
-        self.grid_config = GridConfig(symbol="BTC/USDT", range_percent=0.02, levels=10)
+        self.grid_config = GridConfig(symbol="BTC/USDT", levels=10, martingale_factor=1.1)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -94,6 +98,10 @@ class TheHandsTests(unittest.TestCase):
         self._set_ohlcv("15m", closes, 900_000)
         higher_closes = [140 - 1.0 * (59 - index) for index in range(60)]
         self._set_ohlcv("1h", higher_closes, 3_600_000)
+
+    def _load_grid_hourly_band_data(self) -> None:
+        closes = [100 + ((index % 6) - 3) * 1.4 + index * 0.08 for index in range(80)]
+        self._set_ohlcv("1h", closes, 3_600_000)
 
     def test_cta_robot_opens_long_only_in_trend(self) -> None:
         self._insert_status("trend")
@@ -135,16 +143,45 @@ class TheHandsTests(unittest.TestCase):
         self.assertAlmostEqual(self.client.market_orders[3]["amount"], 0.005)
         self.assertIsNone(robot.position)
 
-    def test_grid_robot_places_ten_orders_only_in_sideways(self) -> None:
+    def test_grid_robot_places_dynamic_bollinger_grid_orders(self) -> None:
         self._insert_status("sideways")
+        self._load_grid_hourly_band_data()
         robot = GridRobot(self.client, self.database, self.grid_config, self.execution)
 
         result = robot.run()
 
         self.assertTrue(result.active)
-        self.assertEqual(result.action, "grid:placed_10_orders@100.00")
-        self.assertEqual(len(self.client.limit_orders), 10)
-        self.assertEqual(self.client.cancel_all_calls, ["BTC/USDT"])
+        self.assertIn("grid:placed_", result.action)
+        self.assertGreaterEqual(len(self.client.limit_orders), 10)
+        buy_amounts = [order["amount"] for order in self.client.limit_orders if order["side"] == "buy"]
+        self.assertGreater(buy_amounts[-1], buy_amounts[0])
+
+    def test_grid_robot_cools_down_repeatedly_triggered_layer(self) -> None:
+        self._insert_status("sideways")
+        self._load_grid_hourly_band_data()
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution)
+        robot.last_price = 100.0
+        now = 1_700_000_000.0
+        robot.layer_triggers[0].extend([now - 200, now - 100, now])
+        self.client.last_price = 99.0
+
+        result = robot.run()
+
+        self.assertIn("cooldown=", result.action)
+
+    def test_grid_robot_places_rebalance_order_when_long_heavy(self) -> None:
+        self._insert_status("sideways")
+        self._load_grid_hourly_band_data()
+        self.client.positions = [
+            {"side": "long", "contracts": 9.0, "info": {"posSide": "long", "pos": "9"}},
+            {"side": "short", "contracts": 1.0, "info": {"posSide": "short", "pos": "1"}},
+        ]
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution)
+
+        robot.run()
+
+        reduce_orders = [o for o in self.client.limit_orders if o["side"] == "sell" and o.get("reduce_only")]
+        self.assertTrue(reduce_orders)
 
     def test_status_switch_triggers_flatten_before_inactive_cycle(self) -> None:
         self._insert_status("trend", "2026-04-10T03:00:00+00:00")
@@ -163,6 +200,7 @@ class TheHandsTests(unittest.TestCase):
 
     def test_hands_coordinator_runs_both_robots(self) -> None:
         self._insert_status("sideways")
+        self._load_grid_hourly_band_data()
         coordinator = HandsCoordinator(
             cta_robot=CTARobot(self.client, self.database, self.cta_config, self.execution),
             grid_robot=GridRobot(self.client, self.database, self.grid_config, self.execution),

@@ -78,6 +78,14 @@ cta:
 
 grid:
   symbol: "BTC/USDT"
-  range_percent: 0.02
+  timeframe: "1h"
+  lookback_limit: 120
+  bollinger_period: 20
+  bollinger_std: 2.0
   levels: 10
+  martingale_factor: 1.1
+  trigger_window_seconds: 300
+  trigger_limit_per_layer: 3
+  rebalance_threshold_ratio: 0.65
   polling_interval_seconds: 60
+  range_percent: 0.02

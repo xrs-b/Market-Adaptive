@@ -154,14 +154,25 @@ def _adx(frame: pd.DataFrame, length: int) -> pd.Series:
     return _manual_adx(frame, length)
 
 
-def _bollinger_width(frame: pd.DataFrame, length: int, std: float) -> pd.Series:
+def compute_bollinger_bands(frame: pd.DataFrame, length: int = 20, std: float = 2.0) -> pd.DataFrame:
     close = frame["close"]
     basis = close.rolling(length).mean()
     deviation = close.rolling(length).std(ddof=0)
     upper = basis + deviation * std
     lower = basis - deviation * std
     width = (upper - lower) / basis.replace(0, float("nan"))
-    return width.astype(float).fillna(0.0)
+    return pd.DataFrame(
+        {
+            "basis": basis.astype(float).fillna(0.0),
+            "upper": upper.astype(float).fillna(0.0),
+            "lower": lower.astype(float).fillna(0.0),
+            "width": width.astype(float).fillna(0.0),
+        }
+    )
+
+
+def _bollinger_width(frame: pd.DataFrame, length: int, std: float) -> pd.Series:
+    return compute_bollinger_bands(frame, length=length, std=std)["width"]
 
 
 def _realized_volatility(frame: pd.DataFrame, length: int) -> pd.Series:

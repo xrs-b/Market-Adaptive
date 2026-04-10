@@ -3,7 +3,14 @@ from __future__ import annotations
 import math
 import unittest
 
-from market_adaptive.indicators import compute_atr, compute_indicator_snapshot, compute_obv, compute_supertrend, ohlcv_to_dataframe
+from market_adaptive.indicators import (
+    compute_atr,
+    compute_bollinger_bands,
+    compute_indicator_snapshot,
+    compute_obv,
+    compute_supertrend,
+    ohlcv_to_dataframe,
+)
 
 
 class IndicatorTests(unittest.TestCase):
@@ -51,6 +58,12 @@ class IndicatorTests(unittest.TestCase):
 
         self.assertLess(float(obv.iloc[-1]), 0.0)
         self.assertEqual(int(supertrend["direction"].iloc[-1]), -1)
+
+    def test_compute_bollinger_bands_returns_valid_bounds(self) -> None:
+        frame = ohlcv_to_dataframe(self._build_ohlcv(start_price=100.0, step=0.5, length=40))
+        bands = compute_bollinger_bands(frame, length=20, std=2.0)
+        self.assertGreater(float(bands["upper"].iloc[-1]), float(bands["lower"].iloc[-1]))
+        self.assertGreaterEqual(float(bands["width"].iloc[-1]), 0.0)
 
 
 if __name__ == "__main__":
