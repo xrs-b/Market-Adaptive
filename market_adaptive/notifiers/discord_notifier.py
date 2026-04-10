@@ -46,7 +46,11 @@ class DiscordNotifier:
         req = request.Request(
             self.config.webhook_url,
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Market-Adaptive/1.0",
+            },
             method="POST",
         )
         with request.urlopen(req, timeout=10) as response:
@@ -62,7 +66,9 @@ class DiscordNotifier:
             data=data,
             headers={
                 "Content-Type": "application/json",
+                "Accept": "application/json",
                 "Authorization": f"Bot {self.config.bot_token}",
+                "User-Agent": "Market-Adaptive/1.0",
             },
             method="POST",
         )
