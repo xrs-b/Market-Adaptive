@@ -51,6 +51,12 @@ python3 scripts/run_market_oracle.py --config config/config.yaml
 python3 scripts/run_the_hands.py --config config/config.yaml
 ```
 
+运行主程序总控模块：
+
+```bash
+python3 scripts/run_main_controller.py --config config/config.yaml
+```
+
 判定规则：
 - 任一周期 `ADX > 25` 且布林带带宽较上一根 K 线放大 => `trend`
 - 两个周期 `ADX < 20` => `sideways`
@@ -65,6 +71,13 @@ python3 scripts/run_the_hands.py --config config/config.yaml
 - `market_adaptive.config.load_config`
 - `market_adaptive.db.DatabaseInitializer`
 - `market_adaptive.clients.OKXClient`
+- `market_adaptive.oracles.MarketOracle`
+- `market_adaptive.strategies.CTARobot`
+- `market_adaptive.strategies.GridRobot`
+- `market_adaptive.strategies.HandsCoordinator`
+- `market_adaptive.bootstrap.MarketAdaptiveBootstrap`
+rap`
+aptive.clients.OKXClient`
 - `market_adaptive.oracles.MarketOracle`
 - `market_adaptive.strategies.CTARobot`
 - `market_adaptive.strategies.GridRobot`

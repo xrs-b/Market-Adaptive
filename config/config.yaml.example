@@ -15,6 +15,9 @@ runtime:
   timezone: "Asia/Shanghai"
   default_timeframe: "1h"
   default_ohlcv_limit: 200
+  account_check_interval_seconds: 60
+  risk_check_interval_seconds: 60
+  shutdown_cancel_open_orders: true
 
 market_oracle:
   symbol: "BTC/USDT"

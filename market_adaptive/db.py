@@ -27,6 +27,14 @@ CREATE TABLE IF NOT EXISTS strategy_runtime_state (
 );
 """
 
+SYSTEM_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS system_state (
+    state_key TEXT PRIMARY KEY,
+    state_value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
 MARKET_STATUS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_market_status_symbol ON market_status(symbol);",
     "CREATE INDEX IF NOT EXISTS idx_market_status_status ON market_status(status);",
@@ -50,6 +58,13 @@ class StrategyRuntimeState:
     updated_at: str
 
 
+@dataclass
+class SystemStateRecord:
+    state_key: str
+    state_value: str
+    updated_at: str
+
+
 class DatabaseInitializer:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path).expanduser().resolve()
@@ -59,6 +74,7 @@ class DatabaseInitializer:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(MARKET_STATUS_SCHEMA)
             conn.execute(STRATEGY_RUNTIME_STATE_SCHEMA)
+            conn.execute(SYSTEM_STATE_SCHEMA)
             for statement in MARKET_STATUS_INDEXES:
                 conn.execute(statement)
             conn.commit()
@@ -150,3 +166,39 @@ class DatabaseInitializer:
                 (state.strategy_name, state.symbol, state.last_status, state.updated_at),
             )
             conn.commit()
+
+    def upsert_system_state(self, state: SystemStateRecord) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO system_state (state_key, state_value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(state_key)
+                DO UPDATE SET
+                    state_value=excluded.state_value,
+                    updated_at=excluded.updated_at
+                """,
+                (state.state_key, state.state_value, state.updated_at),
+            )
+            conn.commit()
+
+    def get_system_state(self, state_key: str) -> SystemStateRecord | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT state_key, state_value, updated_at
+                FROM system_state
+                WHERE state_key = ?
+                LIMIT 1
+                """,
+                (state_key,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return SystemStateRecord(
+            state_key=str(row["state_key"]),
+            state_value=str(row["state_value"]),
+            updated_at=str(row["updated_at"]),
+        )

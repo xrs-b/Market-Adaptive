@@ -36,6 +36,9 @@ class RuntimeConfig:
     timezone: str = "Asia/Shanghai"
     default_timeframe: str = "1h"
     default_ohlcv_limit: int = 200
+    account_check_interval_seconds: int = 60
+    risk_check_interval_seconds: int = 60
+    shutdown_cancel_open_orders: bool = True
 
 
 @dataclass
@@ -66,6 +69,7 @@ class CTAConfig:
     lookback_limit: int = 200
     fast_ema: int = 7
     slow_ema: int = 21
+    polling_interval_seconds: int = 60
 
 
 @dataclass
@@ -73,6 +77,7 @@ class GridConfig:
     symbol: str = "BTC/USDT"
     range_percent: float = 0.02
     levels: int = 10
+    polling_interval_seconds: int = 60
 
 
 @dataclass
@@ -129,6 +134,9 @@ def load_config(config_path: str | Path) -> AppConfig:
         timezone=str(runtime_payload.get("timezone", "Asia/Shanghai")),
         default_timeframe=str(runtime_payload.get("default_timeframe", "1h")),
         default_ohlcv_limit=int(runtime_payload.get("default_ohlcv_limit", 200)),
+        account_check_interval_seconds=int(runtime_payload.get("account_check_interval_seconds", 60)),
+        risk_check_interval_seconds=int(runtime_payload.get("risk_check_interval_seconds", 60)),
+        shutdown_cancel_open_orders=bool(runtime_payload.get("shutdown_cancel_open_orders", True)),
     )
     market_oracle = MarketOracleConfig(
         symbol=str(market_oracle_payload.get("symbol", "BTC/USDT")),
@@ -153,11 +161,13 @@ def load_config(config_path: str | Path) -> AppConfig:
         lookback_limit=int(cta_payload.get("lookback_limit", 200)),
         fast_ema=int(cta_payload.get("fast_ema", 7)),
         slow_ema=int(cta_payload.get("slow_ema", 21)),
+        polling_interval_seconds=int(cta_payload.get("polling_interval_seconds", 60)),
     )
     grid = GridConfig(
         symbol=str(grid_payload.get("symbol", "BTC/USDT")),
         range_percent=float(grid_payload.get("range_percent", 0.02)),
         levels=int(grid_payload.get("levels", 10)),
+        polling_interval_seconds=int(grid_payload.get("polling_interval_seconds", 60)),
     )
     return AppConfig(
         okx=okx,

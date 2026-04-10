@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable
 
 import ccxt
 
@@ -35,6 +35,23 @@ class OKXClient:
 
     def fetch_balance(self) -> dict[str, Any]:
         return self.exchange.fetch_balance()
+
+    def fetch_total_equity(self, quote_currency: str = "USDT") -> float:
+        balance = self.fetch_balance()
+        total = balance.get("total", {})
+        if isinstance(total, dict) and quote_currency in total and total[quote_currency] is not None:
+            return float(total[quote_currency])
+
+        info = balance.get("info") or {}
+        details = info.get("data") or []
+        for item in details:
+            details_list = item.get("details") or []
+            for detail in details_list:
+                ccy = detail.get("ccy")
+                eq = detail.get("eq") or detail.get("cashBal")
+                if ccy == quote_currency and eq not in (None, ""):
+                    return float(eq)
+        raise ValueError(f"Unable to determine total equity for {quote_currency}")
 
     def fetch_ohlcv(
         self,
@@ -75,11 +92,30 @@ class OKXClient:
             responses.append(self.cancel_order(str(order_id), symbol))
         return responses
 
-    def fetch_positions(self, symbol: str) -> list[dict[str, Any]]:
+    def cancel_all_orders_for_symbols(self, symbols: Iterable[str]) -> list[dict[str, Any]]:
+        responses: list[dict[str, Any]] = []
+        for symbol in sorted(set(symbols)):
+            responses.extend(self.cancel_all_orders(symbol))
+        return responses
+
+    def fetch_positions(self, symbols: list[str] | None = None) -> list[dict[str, Any]]:
+        symbols = symbols or None
         try:
-            return self.exchange.fetch_positions([symbol])
+            return self.exchange.fetch_positions(symbols)
         except TypeError:
-            return self.exchange.fetch_positions([symbol], params={"type": self.config.default_type})
+            return self.exchange.fetch_positions(symbols, params={"type": self.config.default_type})
+
+    def fetch_total_unrealized_pnl(self, symbols: list[str] | None = None) -> float:
+        total = 0.0
+        for position in self.fetch_positions(symbols):
+            unrealized = (
+                position.get("unrealizedPnl")
+                or position.get("info", {}).get("upl")
+                or position.get("info", {}).get("uplLastPx")
+                or 0.0
+            )
+            total += float(unrealized)
+        return total
 
     def place_market_order(
         self,
@@ -108,7 +144,7 @@ class OKXClient:
 
     def close_all_positions(self, symbol: str) -> list[dict[str, Any]]:
         responses: list[dict[str, Any]] = []
-        for position in self.fetch_positions(symbol):
+        for position in self.fetch_positions([symbol]):
             contracts = position.get("contracts") or position.get("positionAmt") or position.get("info", {}).get("pos")
             if contracts in (None, "", 0, "0"):
                 continue
@@ -128,6 +164,12 @@ class OKXClient:
                     reduce_only=True,
                 )
             )
+        return responses
+
+    def close_all_positions_for_symbols(self, symbols: Iterable[str]) -> list[dict[str, Any]]:
+        responses: list[dict[str, Any]] = []
+        for symbol in sorted(set(symbols)):
+            responses.extend(self.close_all_positions(symbol))
         return responses
 
     def _merge_order_params(self, params: dict[str, Any] | None, *, reduce_only: bool) -> dict[str, Any]:
