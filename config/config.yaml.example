@@ -15,3 +15,15 @@ runtime:
   timezone: "Asia/Shanghai"
   default_timeframe: "1h"
   default_ohlcv_limit: 200
+
+market_oracle:
+  symbol: "BTC/USDT"
+  polling_interval_seconds: 300
+  higher_timeframe: "1h"
+  lower_timeframe: "15m"
+  lookback_limit: 200
+  adx_length: 14
+  bb_length: 20
+  bb_std: 2.0
+  trend_adx_threshold: 25
+  sideways_adx_threshold: 20

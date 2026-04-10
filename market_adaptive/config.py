@@ -39,10 +39,25 @@ class RuntimeConfig:
 
 
 @dataclass
+class MarketOracleConfig:
+    symbol: str = "BTC/USDT"
+    polling_interval_seconds: int = 300
+    higher_timeframe: str = "1h"
+    lower_timeframe: str = "15m"
+    lookback_limit: int = 200
+    adx_length: int = 14
+    bb_length: int = 20
+    bb_std: float = 2.0
+    trend_adx_threshold: float = 25.0
+    sideways_adx_threshold: float = 20.0
+
+
+@dataclass
 class AppConfig:
     okx: OKXConfig
     database: DatabaseConfig
     runtime: RuntimeConfig
+    market_oracle: MarketOracleConfig
     config_path: Path
 
 
@@ -66,6 +81,7 @@ def load_config(config_path: str | Path) -> AppConfig:
     okx_payload = payload.get("okx") or {}
     db_payload = payload.get("database") or {}
     runtime_payload = payload.get("runtime") or {}
+    market_oracle_payload = payload.get("market_oracle") or {}
 
     okx = OKXConfig(
         api_key=str(okx_payload.get("api_key", "")),
@@ -86,4 +102,22 @@ def load_config(config_path: str | Path) -> AppConfig:
         default_timeframe=str(runtime_payload.get("default_timeframe", "1h")),
         default_ohlcv_limit=int(runtime_payload.get("default_ohlcv_limit", 200)),
     )
-    return AppConfig(okx=okx, database=database, runtime=runtime, config_path=path)
+    market_oracle = MarketOracleConfig(
+        symbol=str(market_oracle_payload.get("symbol", "BTC/USDT")),
+        polling_interval_seconds=int(market_oracle_payload.get("polling_interval_seconds", 300)),
+        higher_timeframe=str(market_oracle_payload.get("higher_timeframe", "1h")),
+        lower_timeframe=str(market_oracle_payload.get("lower_timeframe", "15m")),
+        lookback_limit=int(market_oracle_payload.get("lookback_limit", 200)),
+        adx_length=int(market_oracle_payload.get("adx_length", 14)),
+        bb_length=int(market_oracle_payload.get("bb_length", 20)),
+        bb_std=float(market_oracle_payload.get("bb_std", 2.0)),
+        trend_adx_threshold=float(market_oracle_payload.get("trend_adx_threshold", 25)),
+        sideways_adx_threshold=float(market_oracle_payload.get("sideways_adx_threshold", 20)),
+    )
+    return AppConfig(
+        okx=okx,
+        database=database,
+        runtime=runtime,
+        market_oracle=market_oracle,
+        config_path=path,
+    )

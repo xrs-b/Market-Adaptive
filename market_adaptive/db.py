@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
@@ -20,6 +21,15 @@ MARKET_STATUS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_market_status_symbol ON market_status(symbol);",
     "CREATE INDEX IF NOT EXISTS idx_market_status_status ON market_status(status);",
 ]
+
+
+@dataclass
+class MarketStatusRecord:
+    timestamp: str
+    symbol: str
+    status: str
+    adx_value: float
+    volatility: float
 
 
 class DatabaseInitializer:
@@ -43,3 +53,44 @@ class DatabaseInitializer:
             yield connection
         finally:
             connection.close()
+
+    def insert_market_status(self, record: MarketStatusRecord) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO market_status (timestamp, symbol, status, adx_value, volatility)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    record.timestamp,
+                    record.symbol,
+                    record.status,
+                    record.adx_value,
+                    record.volatility,
+                ),
+            )
+            conn.commit()
+
+    def fetch_latest_market_status(self, symbol: str) -> MarketStatusRecord | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT timestamp, symbol, status, adx_value, volatility
+                FROM market_status
+                WHERE symbol = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                (symbol,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return MarketStatusRecord(
+            timestamp=str(row["timestamp"]),
+            symbol=str(row["symbol"]),
+            status=str(row["status"]),
+            adx_value=float(row["adx_value"]),
+            volatility=float(row["volatility"]),
+        )

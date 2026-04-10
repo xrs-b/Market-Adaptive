@@ -36,10 +36,23 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp config/config.yaml.example config/config.yaml
 python3 scripts/init_app.py --config config/config.yaml
+python3 scripts/run_market_oracle.py --config config/config.yaml --once
 ```
+
+持续运行行情感知机器人：
+
+```bash
+python3 scripts/run_market_oracle.py --config config/config.yaml
+```
+
+判定规则：
+- 任一周期 `ADX > 25` 且布林带带宽较上一根 K 线放大 => `trend`
+- 两个周期 `ADX < 20` => `sideways`
+- 中间模糊区间则沿用上一条数据库状态；若无历史，则默认 `sideways`
 
 后续机器人可直接复用：
 - `market_adaptive.config.load_config`
 - `market_adaptive.db.DatabaseInitializer`
 - `market_adaptive.clients.OKXClient`
+- `market_adaptive.oracles.MarketOracle`
 - `market_adaptive.bootstrap.MarketAdaptiveBootstrap`

@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import ccxt
+
+from market_adaptive.clients.okx_client import OKXClient
+from market_adaptive.config import MarketOracleConfig
+from market_adaptive.db import DatabaseInitializer, MarketStatusRecord
+from market_adaptive.indicators import IndicatorSnapshot, compute_indicator_snapshot
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class MultiTimeframeMarketSnapshot:
+    symbol: str
+    higher_timeframe: str
+    lower_timeframe: str
+    higher: IndicatorSnapshot
+    lower: IndicatorSnapshot
+
+    @property
+    def strongest_adx(self) -> float:
+        return max(self.higher.adx_value, self.lower.adx_value)
+
+    @property
+    def strongest_volatility(self) -> float:
+        return max(self.higher.volatility, self.lower.volatility)
+
+
+class MarketOracle:
+    """Market sensing bot that classifies BTC/USDT as trend or sideways."""
+
+    def __init__(
+        self,
+        client: OKXClient,
+        database: DatabaseInitializer,
+        config: MarketOracleConfig,
+    ) -> None:
+        self.client = client
+        self.database = database
+        self.config = config
+
+    def collect_market_snapshot(self) -> MultiTimeframeMarketSnapshot:
+        higher_ohlcv = self.client.fetch_ohlcv(
+            symbol=self.config.symbol,
+            timeframe=self.config.higher_timeframe,
+            limit=self.config.lookback_limit,
+        )
+        lower_ohlcv = self.client.fetch_ohlcv(
+            symbol=self.config.symbol,
+            timeframe=self.config.lower_timeframe,
+            limit=self.config.lookback_limit,
+        )
+
+        higher_snapshot = compute_indicator_snapshot(
+            higher_ohlcv,
+            adx_length=self.config.adx_length,
+            bb_length=self.config.bb_length,
+            bb_std=self.config.bb_std,
+        )
+        lower_snapshot = compute_indicator_snapshot(
+            lower_ohlcv,
+            adx_length=self.config.adx_length,
+            bb_length=self.config.bb_length,
+            bb_std=self.config.bb_std,
+        )
+
+        return MultiTimeframeMarketSnapshot(
+            symbol=self.config.symbol,
+            higher_timeframe=self.config.higher_timeframe,
+            lower_timeframe=self.config.lower_timeframe,
+            higher=higher_snapshot,
+            lower=lower_snapshot,
+        )
+
+    def determine_status(self, snapshot: MultiTimeframeMarketSnapshot) -> str:
+        trend_detected = any(
+            indicator.adx_value > self.config.trend_adx_threshold and indicator.bb_width_expanding
+            for indicator in (snapshot.higher, snapshot.lower)
+        )
+        sideways_detected = all(
+            indicator.adx_value < self.config.sideways_adx_threshold
+            for indicator in (snapshot.higher, snapshot.lower)
+        )
+
+        if trend_detected:
+            return "trend"
+        if sideways_detected:
+            return "sideways"
+
+        previous = self.database.fetch_latest_market_status(snapshot.symbol)
+        if previous is not None:
+            return previous.status
+        return "sideways"
+
+    def run_once(self) -> MarketStatusRecord:
+        snapshot = self.collect_market_snapshot()
+        status = self.determine_status(snapshot)
+        record = MarketStatusRecord(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            symbol=snapshot.symbol,
+            status=status,
+            adx_value=snapshot.strongest_adx,
+            volatility=snapshot.strongest_volatility,
+        )
+        self.database.insert_market_status(record)
+        logger.info(
+            "Market status updated: symbol=%s status=%s adx=%.4f volatility=%.6f",
+            record.symbol,
+            record.status,
+            record.adx_value,
+            record.volatility,
+        )
+        return record
+
+    def run_forever(self) -> None:
+        logger.info(
+            "Market-Oracle started: symbol=%s interval=%ss",
+            self.config.symbol,
+            self.config.polling_interval_seconds,
+        )
+        while True:
+            try:
+                self.run_once()
+            except (ccxt.NetworkError, ccxt.ExchangeError, TimeoutError, ValueError) as exc:
+                logger.warning("Market-Oracle transient failure: %s", exc, exc_info=True)
+            except Exception as exc:  # pragma: no cover - hard runtime guard
+                logger.exception("Market-Oracle unexpected failure: %s", exc)
+            time.sleep(self.config.polling_interval_seconds)
