@@ -8,7 +8,9 @@ from market_adaptive.indicators import (
     compute_bollinger_bands,
     compute_indicator_snapshot,
     compute_obv,
+    compute_obv_slope_angle,
     compute_supertrend,
+    compute_volume_profile,
     ohlcv_to_dataframe,
 )
 
@@ -64,6 +66,35 @@ class IndicatorTests(unittest.TestCase):
         bands = compute_bollinger_bands(frame, length=20, std=2.0)
         self.assertGreater(float(bands["upper"].iloc[-1]), float(bands["lower"].iloc[-1]))
         self.assertGreaterEqual(float(bands["width"].iloc[-1]), 0.0)
+
+    def test_compute_obv_slope_angle_is_positive_for_breakout_sequence(self) -> None:
+        frame = ohlcv_to_dataframe(self._build_ohlcv(start_price=90.0, step=1.0, length=40, step_ms=900_000))
+
+        angle = compute_obv_slope_angle(frame, window=8)
+
+        self.assertGreater(angle, 30.0)
+
+    def test_compute_volume_profile_returns_poc_and_value_area(self) -> None:
+        base_timestamp = 1_700_000_000_000
+        ohlcv = []
+        for index in range(48):
+            close = 100.0 + (0.2 if index % 2 == 0 else -0.2)
+            ohlcv.append([base_timestamp + index * 900_000, 99.8, 100.4, 99.6, close, 200.0])
+        for index in range(8):
+            price = 104.0 + index * 0.5
+            ohlcv.append([base_timestamp + (48 + index) * 900_000, price - 0.3, price + 0.4, price - 0.5, price, 120.0])
+
+        frame = ohlcv_to_dataframe(ohlcv)
+        profile = compute_volume_profile(frame, lookback_hours=24, bin_count=20)
+
+        self.assertIsNotNone(profile)
+        assert profile is not None
+        self.assertGreater(profile.total_volume, 0.0)
+        self.assertLess(profile.value_area_low, profile.value_area_high)
+        self.assertGreater(profile.poc_price, 99.0)
+        self.assertLess(profile.poc_price, 101.5)
+        self.assertTrue(profile.contains_price(100.0))
+        self.assertTrue(profile.above_value_area(108.0))
 
 
 if __name__ == "__main__":

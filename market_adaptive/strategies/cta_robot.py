@@ -3,7 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from market_adaptive.config import CTAConfig, ExecutionConfig
-from market_adaptive.indicators import compute_atr, compute_obv, compute_supertrend, ohlcv_to_dataframe
+from market_adaptive.indicators import (
+    VolumeProfileSnapshot,
+    compute_atr,
+    compute_obv,
+    compute_obv_slope_angle,
+    compute_supertrend,
+    compute_volume_profile,
+    ohlcv_to_dataframe,
+)
 from market_adaptive.risk import CTARiskProfile, LogicalPositionSnapshot
 from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies.base import BaseStrategyRobot
@@ -12,10 +20,16 @@ from market_adaptive.strategies.base import BaseStrategyRobot
 @dataclass
 class TrendSignal:
     direction: int
+    raw_direction: int
     lower_direction: int
     higher_direction: int
     obv_bias: int
+    obv_slope_angle: float
+    obv_slope_passed: bool
     volume_filter_passed: bool
+    volume_profile: VolumeProfileSnapshot | None
+    long_setup_blocked: bool
+    long_setup_reason: str
     price: float
     atr: float
 
@@ -88,7 +102,14 @@ class CTARobot(BaseStrategyRobot):
         self.position: ManagedPosition | None = None
 
     def should_notify_action(self, action: str) -> bool:
-        if action in {"cta:hold", "cta:no_signal", "cta:insufficient_data", "cta:risk_blocked", "skip:inactive"}:
+        if action in {
+            "cta:hold",
+            "cta:no_signal",
+            "cta:insufficient_data",
+            "cta:risk_blocked",
+            "cta:range_filter_blocked",
+            "skip:inactive",
+        }:
             return False
         return super().should_notify_action(action)
 
@@ -144,6 +165,8 @@ class CTARobot(BaseStrategyRobot):
             return self._open_position(signal)
 
         self._publish_risk_profile(signal)
+        if self.position is None and signal.long_setup_blocked:
+            return "cta:range_filter_blocked"
         return "cta:no_signal" if self.position is None else "cta:hold"
 
     def _build_trend_signal(self) -> TrendSignal | None:
@@ -151,6 +174,7 @@ class CTARobot(BaseStrategyRobot):
             self.config.supertrend_period * 3,
             self.config.atr_period * 3,
             self.config.obv_signal_period + 2,
+            self.config.obv_slope_window + 2,
         )
         lower_ohlcv = self.client.fetch_ohlcv(
             symbol=self.config.symbol,
@@ -189,14 +213,59 @@ class CTARobot(BaseStrategyRobot):
         obv_bias = 1 if obv_value > obv_signal_value else -1 if obv_value < obv_signal_value else 0
         aligned_direction = lower_direction if lower_direction == higher_direction else 0
         volume_filter_passed = aligned_direction != 0 and obv_bias == aligned_direction
+        raw_direction = aligned_direction if volume_filter_passed else 0
+        current_price = float(lower_frame["close"].iloc[-1])
+        obv_slope_angle = compute_obv_slope_angle(
+            lower_frame,
+            window=self.config.obv_slope_window,
+            obv=lower_obv,
+        )
+        volume_profile = compute_volume_profile(
+            lower_frame,
+            lookback_hours=self.config.volume_profile_lookback_hours,
+            value_area_pct=self.config.volume_profile_value_area_pct,
+            bin_count=self.config.volume_profile_bin_count,
+        )
+
+        final_direction = raw_direction
+        long_setup_blocked = False
+        long_setup_reason = ""
+        obv_slope_passed = True
+
+        if raw_direction > 0:
+            obv_slope_passed = obv_slope_angle >= float(self.config.obv_slope_threshold_degrees)
+            if volume_profile is None:
+                long_setup_blocked = True
+                long_setup_reason = "missing_volume_profile"
+            elif not volume_profile.above_poc(current_price):
+                long_setup_blocked = True
+                long_setup_reason = "below_poc"
+            elif volume_profile.contains_price(current_price):
+                long_setup_blocked = True
+                long_setup_reason = "inside_value_area"
+            elif not volume_profile.above_value_area(current_price):
+                long_setup_blocked = True
+                long_setup_reason = "below_value_area_high"
+            elif not obv_slope_passed:
+                long_setup_blocked = True
+                long_setup_reason = "obv_slope_too_flat"
+
+            if long_setup_blocked:
+                final_direction = 0
 
         return TrendSignal(
-            direction=aligned_direction if volume_filter_passed else 0,
+            direction=final_direction,
+            raw_direction=raw_direction,
             lower_direction=lower_direction,
             higher_direction=higher_direction,
             obv_bias=obv_bias,
+            obv_slope_angle=obv_slope_angle,
+            obv_slope_passed=obv_slope_passed,
             volume_filter_passed=volume_filter_passed,
-            price=float(lower_frame["close"].iloc[-1]),
+            volume_profile=volume_profile,
+            long_setup_blocked=long_setup_blocked,
+            long_setup_reason=long_setup_reason,
+            price=current_price,
             atr=float(atr_series.iloc[-1]),
         )
 

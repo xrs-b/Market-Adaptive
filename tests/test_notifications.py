@@ -59,7 +59,23 @@ class NotificationTests(unittest.TestCase):
 
     def _set_bullish_ohlcv(self, client: DummyClient, lower_last_close: float = 100.0) -> None:
         base = 1_700_000_000_000
-        lower_closes = [lower_last_close - 0.4 * (59 - index) for index in range(60)]
+        lower_closes = []
+        base_price = lower_last_close - 8.0
+        pattern = [0.0, 0.4, -0.3, 0.5, -0.2, 0.3, -0.1, 0.2]
+        for index in range(52):
+            lower_closes.append(base_price + pattern[index % len(pattern)])
+        lower_closes.extend(
+            [
+                lower_last_close - 5.6,
+                lower_last_close - 4.8,
+                lower_last_close - 4.0,
+                lower_last_close - 3.2,
+                lower_last_close - 2.4,
+                lower_last_close - 1.6,
+                lower_last_close - 0.8,
+                lower_last_close,
+            ]
+        )
         higher_closes = [140 - 1.0 * (59 - index) for index in range(60)]
         client.ohlcv_by_timeframe["15m"] = [
             [base + index * 900_000, close - 0.3, close + 0.4, close - 0.5, close, 100 + index * 3]

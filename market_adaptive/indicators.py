@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import pandas as pd
@@ -20,6 +21,29 @@ class IndicatorSnapshot:
     @property
     def bb_width_expanding(self) -> bool:
         return self.bb_width > self.bb_width_previous
+
+
+@dataclass
+class VolumeProfileSnapshot:
+    poc_price: float
+    value_area_low: float
+    value_area_high: float
+    total_volume: float
+    value_area_volume: float
+    low_price: float
+    high_price: float
+    bin_size: float
+    bin_count: int
+
+    def contains_price(self, price: float) -> bool:
+        current_price = float(price)
+        return self.value_area_low <= current_price <= self.value_area_high
+
+    def above_poc(self, price: float) -> bool:
+        return float(price) > self.poc_price
+
+    def above_value_area(self, price: float) -> bool:
+        return float(price) > self.value_area_high
 
 
 def ohlcv_to_dataframe(ohlcv: list[list[float]]) -> pd.DataFrame:
@@ -65,6 +89,29 @@ def compute_obv(frame: pd.DataFrame) -> pd.Series:
     if not obv.empty:
         obv.iloc[0] = 0.0
     return obv
+
+
+def compute_obv_slope_angle(frame: pd.DataFrame, *, window: int = 8, obv: pd.Series | None = None) -> float:
+    if len(frame) == 0:
+        return 0.0
+
+    effective_window = max(2, min(int(window), len(frame)))
+    recent_obv = (obv if obv is not None else compute_obv(frame)).tail(effective_window).reset_index(drop=True)
+    average_volume = float(frame["volume"].tail(effective_window).mean())
+    if average_volume <= 0:
+        return 0.0
+
+    normalized_obv = recent_obv / average_volume
+    x_values = list(range(len(normalized_obv)))
+    x_mean = sum(x_values) / len(x_values)
+    y_mean = float(normalized_obv.mean())
+    numerator = sum((x - x_mean) * (float(y) - y_mean) for x, y in zip(x_values, normalized_obv))
+    denominator = sum((x - x_mean) ** 2 for x in x_values)
+    if denominator <= 0:
+        return 0.0
+
+    slope = numerator / denominator
+    return float(math.degrees(math.atan(slope)))
 
 
 def compute_supertrend(frame: pd.DataFrame, length: int = 10, multiplier: float = 3.0) -> pd.DataFrame:
@@ -178,6 +225,100 @@ def _bollinger_width(frame: pd.DataFrame, length: int, std: float) -> pd.Series:
 def _realized_volatility(frame: pd.DataFrame, length: int) -> pd.Series:
     returns = frame["close"].pct_change().fillna(0.0)
     return returns.rolling(length).std(ddof=0).fillna(0.0)
+
+
+def _clamp_ratio(value: float, *, minimum: float = 0.1, maximum: float = 1.0) -> float:
+    return max(minimum, min(maximum, float(value)))
+
+
+def recent_frame(frame: pd.DataFrame, lookback_hours: int = 24) -> pd.DataFrame:
+    if len(frame) == 0:
+        return frame
+    cutoff = frame["timestamp"].iloc[-1] - pd.Timedelta(hours=max(1, int(lookback_hours)))
+    recent = frame[frame["timestamp"] >= cutoff].copy()
+    return recent if not recent.empty else frame.copy()
+
+
+def compute_volume_profile(
+    frame: pd.DataFrame,
+    *,
+    lookback_hours: int = 24,
+    value_area_pct: float = 0.70,
+    bin_count: int = 24,
+) -> VolumeProfileSnapshot | None:
+    scoped_frame = recent_frame(frame, lookback_hours=lookback_hours)
+    if scoped_frame.empty:
+        return None
+
+    low_price = float(scoped_frame["low"].min())
+    high_price = float(scoped_frame["high"].max())
+    total_volume = float(scoped_frame["volume"].clip(lower=0.0).sum())
+    if total_volume <= 0:
+        return None
+
+    effective_bin_count = max(8, int(bin_count))
+    price_range = high_price - low_price
+    if price_range <= 0:
+        price_range = max(abs(high_price), 1.0) * 0.001
+    bin_size = price_range / effective_bin_count
+    profile = [0.0 for _ in range(effective_bin_count)]
+
+    for candle in scoped_frame.itertuples(index=False):
+        candle_low = float(min(candle.low, candle.high))
+        candle_high = float(max(candle.low, candle.high))
+        candle_volume = max(0.0, float(candle.volume))
+        if candle_volume <= 0:
+            continue
+
+        start_index = int((candle_low - low_price) / bin_size) if bin_size > 0 else 0
+        end_index = int((candle_high - low_price) / bin_size) if bin_size > 0 else 0
+        start_index = max(0, min(effective_bin_count - 1, start_index))
+        end_index = max(0, min(effective_bin_count - 1, end_index))
+        touched_bins = max(1, end_index - start_index + 1)
+        distributed_volume = candle_volume / touched_bins
+        for index in range(start_index, end_index + 1):
+            profile[index] += distributed_volume
+
+    poc_index = max(range(effective_bin_count), key=lambda index: profile[index])
+    target_volume = total_volume * _clamp_ratio(value_area_pct)
+    selected_bins = {poc_index}
+    value_area_volume = profile[poc_index]
+    left_index = poc_index - 1
+    right_index = poc_index + 1
+
+    while value_area_volume < target_volume and (left_index >= 0 or right_index < effective_bin_count):
+        left_volume = profile[left_index] if left_index >= 0 else -1.0
+        right_volume = profile[right_index] if right_index < effective_bin_count else -1.0
+        if right_volume > left_volume:
+            selected_bins.add(right_index)
+            value_area_volume += right_volume
+            right_index += 1
+        else:
+            selected_bins.add(left_index)
+            value_area_volume += left_volume
+            left_index -= 1
+
+    value_area_low_index = min(selected_bins)
+    value_area_high_index = max(selected_bins)
+
+    def _bin_left(index: int) -> float:
+        return low_price + index * bin_size
+
+    def _bin_right(index: int) -> float:
+        return low_price + (index + 1) * bin_size
+
+    poc_price = low_price + (poc_index + 0.5) * bin_size
+    return VolumeProfileSnapshot(
+        poc_price=float(poc_price),
+        value_area_low=float(_bin_left(value_area_low_index)),
+        value_area_high=float(_bin_right(value_area_high_index)),
+        total_volume=total_volume,
+        value_area_volume=float(value_area_volume),
+        low_price=low_price,
+        high_price=high_price,
+        bin_size=float(bin_size),
+        bin_count=effective_bin_count,
+    )
 
 
 def compute_indicator_snapshot(

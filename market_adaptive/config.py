@@ -127,6 +127,8 @@ class CTAConfig:
     supertrend_period: int = 10
     supertrend_multiplier: float = 3.0
     obv_signal_period: int = 8
+    obv_slope_window: int = 8
+    obv_slope_threshold_degrees: float = 30.0
     atr_period: int = 14
     atr_trailing_multiplier: float = 2.5
     stop_loss_atr: float = 2.0
@@ -135,6 +137,9 @@ class CTAConfig:
     first_take_profit_size: float = 0.50
     second_take_profit_pct: float = 0.05
     second_take_profit_size: float = 0.25
+    volume_profile_lookback_hours: int = 24
+    volume_profile_bin_count: int = 24
+    volume_profile_value_area_pct: float = 0.70
     fast_ema: int = 7  # legacy compatibility
     slow_ema: int = 21  # legacy compatibility
     polling_interval_seconds: int = 60
@@ -289,6 +294,8 @@ def load_config(config_path: str | Path) -> AppConfig:
         supertrend_period=int(cta_payload.get("supertrend_period", 10)),
         supertrend_multiplier=float(cta_payload.get("supertrend_multiplier", 3.0)),
         obv_signal_period=int(cta_payload.get("obv_signal_period", 8)),
+        obv_slope_window=int(cta_payload.get("obv_slope_window", 8)),
+        obv_slope_threshold_degrees=float(cta_payload.get("obv_slope_threshold_degrees", 30.0)),
         atr_period=int(cta_payload.get("atr_period", 14)),
         atr_trailing_multiplier=float(cta_payload.get("atr_trailing_multiplier", 2.5)),
         stop_loss_atr=float(cta_payload.get("stop_loss_atr", 2.0)),
@@ -297,6 +304,9 @@ def load_config(config_path: str | Path) -> AppConfig:
         first_take_profit_size=float(cta_payload.get("first_take_profit_size", 0.50)),
         second_take_profit_pct=float(cta_payload.get("second_take_profit_pct", 0.05)),
         second_take_profit_size=float(cta_payload.get("second_take_profit_size", 0.25)),
+        volume_profile_lookback_hours=int(cta_payload.get("volume_profile_lookback_hours", 24)),
+        volume_profile_bin_count=int(cta_payload.get("volume_profile_bin_count", 24)),
+        volume_profile_value_area_pct=float(cta_payload.get("volume_profile_value_area_pct", 0.70)),
         fast_ema=int(cta_payload.get("fast_ema", 7)),
         slow_ema=int(cta_payload.get("slow_ema", 21)),
         polling_interval_seconds=int(cta_payload.get("polling_interval_seconds", 60)),

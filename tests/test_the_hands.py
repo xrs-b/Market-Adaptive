@@ -176,13 +176,48 @@ class TheHandsTests(unittest.TestCase):
         self.client.ohlcv_by_timeframe[timeframe] = payload
 
     def _load_bullish_signal(self, lower_last_close: float = 100.0, higher_last_close: float = 140.0) -> None:
-        lower_closes = [lower_last_close - 0.4 * (59 - index) for index in range(60)]
+        lower_closes = []
+        base_price = lower_last_close - 8.0
+        pattern = [0.0, 0.4, -0.3, 0.5, -0.2, 0.3, -0.1, 0.2]
+        for index in range(52):
+            lower_closes.append(base_price + pattern[index % len(pattern)])
+        lower_closes.extend(
+            [
+                lower_last_close - 5.6,
+                lower_last_close - 4.8,
+                lower_last_close - 4.0,
+                lower_last_close - 3.2,
+                lower_last_close - 2.4,
+                lower_last_close - 1.6,
+                lower_last_close - 0.8,
+                lower_last_close,
+            ]
+        )
         higher_closes = [higher_last_close - 1.0 * (59 - index) for index in range(60)]
         self._set_ohlcv("15m", lower_closes, 900_000)
         self._set_ohlcv("1h", higher_closes, 3_600_000)
 
     def _load_pullback_after_rally(self, latest_close: float) -> None:
         closes = [80 + index * 0.45 for index in range(56)] + [103.6, 104.8, 106.0, latest_close]
+        self._set_ohlcv("15m", closes, 900_000)
+        higher_closes = [140 - 1.0 * (59 - index) for index in range(60)]
+        self._set_ohlcv("1h", higher_closes, 3_600_000)
+
+    def _load_bullish_signal_inside_value_area(self, lower_last_close: float = 100.0) -> None:
+        closes = []
+        pattern = [0.0, 0.3, -0.2, 0.2, -0.1, 0.1]
+        for index in range(54):
+            closes.append(lower_last_close + pattern[index % len(pattern)])
+        closes.extend(
+            [
+                lower_last_close - 0.2,
+                lower_last_close + 0.1,
+                lower_last_close - 0.1,
+                lower_last_close + 0.2,
+                lower_last_close,
+                lower_last_close + 0.1,
+            ]
+        )
         self._set_ohlcv("15m", closes, 900_000)
         higher_closes = [140 - 1.0 * (59 - index) for index in range(60)]
         self._set_ohlcv("1h", higher_closes, 3_600_000)
@@ -226,6 +261,38 @@ class TheHandsTests(unittest.TestCase):
         self.assertIsNotNone(robot.position)
         expected_stop = robot.position.entry_price - robot.position.atr_value * self.cta_config.stop_loss_atr
         self.assertAlmostEqual(robot.position.stop_price, expected_stop)
+
+    def test_cta_robot_skips_bullish_entry_while_price_is_still_inside_value_area(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal_inside_value_area(lower_last_close=100.0)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+
+        result = robot.run()
+
+        self.assertTrue(result.active)
+        self.assertEqual(result.action, "cta:range_filter_blocked")
+        self.assertEqual(len(self.client.market_orders), 0)
+        self.assertIsNone(robot.position)
+
+    def test_cta_robot_requires_configured_obv_slope_breakout_threshold(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        strict_config = CTAConfig(
+            symbol="BTC/USDT",
+            lower_timeframe="15m",
+            higher_timeframe="1h",
+            atr_trailing_multiplier=1.0,
+            stop_loss_atr=2.0,
+            first_take_profit_size=0.5,
+            second_take_profit_size=0.25,
+            obv_slope_threshold_degrees=80.0,
+        )
+        robot = CTARobot(self.client, self.database, strict_config, self.execution)
+
+        result = robot.run()
+
+        self.assertEqual(result.action, "cta:range_filter_blocked")
+        self.assertEqual(len(self.client.market_orders), 0)
 
     def test_cta_robot_blocks_bullish_entry_when_retail_sentiment_is_extreme(self) -> None:
         self._insert_status("trend")
