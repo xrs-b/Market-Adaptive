@@ -560,6 +560,70 @@ class TheHandsTests(unittest.TestCase):
         self.assertIn("cooldown=0", second_result.action)
         self.assertIn("cooldown=0", third_result.action)
 
+    def test_grid_robot_triggers_spike_guard_and_pauses_orders(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+        self._set_ohlcv(
+            "1m",
+            [100.0, 100.1, 99.9],
+            60_000,
+        )
+        self.client.ohlcv_by_timeframe["1m"][-1] = [
+            self.client.ohlcv_by_timeframe["1m"][-1][0],
+            100.0,
+            101.4,
+            98.6,
+            100.0,
+            120.0,
+        ]
+        now = datetime(2026, 4, 10, 3, 0, tzinfo=timezone.utc)
+        robot = GridRobot(
+            self.client,
+            self.database,
+            self.grid_config,
+            self.execution,
+            now_provider=lambda: now,
+        )
+
+        result = robot.run()
+
+        self.assertEqual(result.action.split("|")[0], "grid:spike_guard_triggered")
+        self.assertEqual(len(self.client.limit_orders), 0)
+        self.assertEqual(self.client.cancel_all_calls.count("BTC/USDT"), 2)
+
+    def test_grid_robot_keeps_pause_during_spike_guard_cooldown(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+        self._set_ohlcv(
+            "1m",
+            [100.0, 100.1, 99.9],
+            60_000,
+        )
+        self.client.ohlcv_by_timeframe["1m"][-1] = [
+            self.client.ohlcv_by_timeframe["1m"][-1][0],
+            100.0,
+            101.8,
+            98.2,
+            100.0,
+            120.0,
+        ]
+        now = datetime(2026, 4, 10, 3, 0, tzinfo=timezone.utc)
+        now_values = [now, now + timedelta(seconds=5)]
+        robot = GridRobot(
+            self.client,
+            self.database,
+            self.grid_config,
+            self.execution,
+            now_provider=lambda: now_values.pop(0),
+        )
+
+        first = robot.run()
+        second = robot.run()
+
+        self.assertEqual(first.action.split("|")[0], "grid:spike_guard_triggered")
+        self.assertEqual(second.action, "grid:spike_guard_cooldown")
+        self.assertEqual(len(self.client.limit_orders), 0)
+
     def test_grid_robot_places_reduce_only_rebalance_orders_when_long_heavy(self) -> None:
         self._insert_status("sideways")
         self._load_sideways_grid_data(center=100.0)

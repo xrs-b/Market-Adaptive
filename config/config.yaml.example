@@ -132,3 +132,7 @@ grid:
   polling_interval_seconds: 60
   price_band_ratio: 0.03
   liquidation_protection_ratio: 0.05
+  spike_guard_enabled: true
+  spike_guard_timeframe: "1m"
+  spike_guard_trigger_ratio: 0.50
+  spike_guard_pause_seconds: 10

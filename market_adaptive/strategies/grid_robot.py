@@ -73,9 +73,10 @@ class GridRobot(BaseStrategyRobot):
         self._layer_triggers: dict[str, deque[datetime]] = defaultdict(deque)
         self._layer_cooldowns: dict[str, datetime] = {}
         self._layer_reference_prices: dict[str, float] = {}
+        self._spike_guard_until: datetime | None = None
 
     def should_notify_action(self, action: str) -> bool:
-        if action in {"grid:risk_blocked", "grid:insufficient_data", "grid:no_orders"}:
+        if action in {"grid:risk_blocked", "grid:insufficient_data", "grid:no_orders", "grid:spike_guard_cooldown"}:
             return False
         return super().should_notify_action(action)
 
@@ -132,11 +133,21 @@ class GridRobot(BaseStrategyRobot):
         self._ensure_futures_settings()
         current_price = self.client.fetch_last_price(self.symbol)
 
+        if self._spike_guard_active(now):
+            self.client.cancel_all_orders(self.symbol)
+            self._publish_grid_risk(None)
+            return "grid:spike_guard_cooldown"
+
         self.client.cancel_all_orders(self.symbol)
         context = self._refresh_grid_context(current_price)
         if context is None:
             self._publish_grid_risk(None)
             return "grid:insufficient_data"
+
+        spike_guard_action = self._apply_spike_guard(context, now)
+        if spike_guard_action is not None:
+            self._publish_grid_risk(None)
+            return spike_guard_action
 
         self._publish_grid_risk(context)
         allow_new_openings = True
@@ -266,6 +277,52 @@ class GridRobot(BaseStrategyRobot):
                 leverage=self.config.leverage,
                 margin_mode=self.execution_config.td_mode,
             )
+
+    def _spike_guard_active(self, now: datetime) -> bool:
+        if self._spike_guard_until is None:
+            return False
+        if now >= self._spike_guard_until:
+            self._spike_guard_until = None
+            return False
+        return True
+
+    def _apply_spike_guard(self, context: GridContext, now: datetime) -> str | None:
+        if not bool(getattr(self.config, "spike_guard_enabled", True)):
+            return None
+
+        one_minute_range = self._latest_spike_guard_range()
+        if one_minute_range is None:
+            return None
+
+        grid_range = max(0.0, float(context.upper_bound) - float(context.lower_bound))
+        trigger_ratio = max(0.0, float(getattr(self.config, "spike_guard_trigger_ratio", 0.50)))
+        trigger_distance = grid_range * trigger_ratio
+        if grid_range <= 0 or one_minute_range < trigger_distance:
+            return None
+
+        pause_seconds = max(1, int(getattr(self.config, "spike_guard_pause_seconds", 10)))
+        self._spike_guard_until = now + timedelta(seconds=pause_seconds)
+        self.client.cancel_all_orders(self.symbol)
+        return (
+            f"grid:spike_guard_triggered|range_1m={one_minute_range:.2f}"
+            f"|grid_range={grid_range:.2f}|threshold={trigger_distance:.2f}|pause={pause_seconds}s"
+        )
+
+    def _latest_spike_guard_range(self) -> float | None:
+        timeframe = str(getattr(self.config, "spike_guard_timeframe", "1m") or "1m")
+        ohlcv = self.client.fetch_ohlcv(
+            symbol=self.symbol,
+            timeframe=timeframe,
+            limit=3,
+        )
+        if not ohlcv:
+            return None
+        latest = ohlcv[-1]
+        if len(latest) < 4:
+            return None
+        high = float(latest[2])
+        low = float(latest[3])
+        return max(0.0, high - low)
 
     def _refresh_grid_context(self, current_price: float) -> GridContext | None:
         ohlcv = self.client.fetch_ohlcv(

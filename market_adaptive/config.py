@@ -217,6 +217,10 @@ class GridConfig:
     polling_interval_seconds: int = 60
     range_percent: float = 0.03  # neutral grid orders stay within current price ±3%
     liquidation_protection_ratio: float = 0.05
+    spike_guard_enabled: bool = True
+    spike_guard_timeframe: str = "1m"
+    spike_guard_trigger_ratio: float = 0.50
+    spike_guard_pause_seconds: int = 10
 
 
 @dataclass
@@ -409,6 +413,10 @@ def load_config(config_path: str | Path) -> AppConfig:
         polling_interval_seconds=int(grid_payload.get("polling_interval_seconds", 60)),
         range_percent=float(grid_payload.get("price_band_ratio", grid_payload.get("range_percent", 0.03))),
         liquidation_protection_ratio=float(grid_payload.get("liquidation_protection_ratio", 0.05)),
+        spike_guard_enabled=bool(grid_payload.get("spike_guard_enabled", True)),
+        spike_guard_timeframe=str(grid_payload.get("spike_guard_timeframe", "1m")),
+        spike_guard_trigger_ratio=float(grid_payload.get("spike_guard_trigger_ratio", 0.50)),
+        spike_guard_pause_seconds=int(grid_payload.get("spike_guard_pause_seconds", 10)),
     )
     return AppConfig(
         okx=okx,
