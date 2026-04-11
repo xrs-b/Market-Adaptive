@@ -92,6 +92,7 @@ class GridRobot(BaseStrategyRobot):
         self._halted = False
         self._price_window: deque[tuple[datetime, float]] = deque()
         self._last_grid_placed_at: datetime | None = None
+        self._last_healthy_grid_seen_at: datetime | None = None
         self._ws_thread: threading.Thread | None = None
         self._ws_loop: asyncio.AbstractEventLoop | None = None
         self._ws_stop_event: asyncio.Event | None = None
@@ -282,7 +283,7 @@ class GridRobot(BaseStrategyRobot):
             )
 
         needs_regrid = self._should_regrid(context, current_price, now)
-        if not needs_regrid and self._has_active_grid_orders():
+        if not needs_regrid and self._has_active_grid_orders(context, now):
             return (
                 f"grid:hold_existing_grid|center={context.center_price:.2f}|atr={context.atr_value:.2f}|"
                 f"dynamic={str(self.use_dynamic_range).lower()}|regrid=false|"
@@ -596,14 +597,41 @@ class GridRobot(BaseStrategyRobot):
             trigger_distance = abs(previous.center_price) * 0.001
         return abs(current_price - previous.center_price) >= trigger_distance
 
-    def _has_active_grid_orders(self) -> bool:
+    def _has_active_grid_orders(self, context: GridContext, now: datetime) -> bool:
         if not hasattr(self.client, "fetch_open_orders"):
             return False
         try:
             orders = self.client.fetch_open_orders(self.symbol)
         except Exception:
-            return False
-        return any(not bool(order.get("reduceOnly") or order.get("info", {}).get("reduceOnly")) for order in orders)
+            orders = []
+
+        active = [order for order in orders if not bool(order.get("reduceOnly") or order.get("info", {}).get("reduceOnly"))]
+        buy_orders = [order for order in active if str(order.get("side") or "").lower() == "buy"]
+        sell_orders = [order for order in active if str(order.get("side") or "").lower() == "sell"]
+        expected_count = max(2, int(self.config.levels * 0.8))
+        reference_context = self._cached_context or context
+
+        def _price(order: dict) -> float:
+            value = order.get("price") or order.get("info", {}).get("px") or 0.0
+            return float(value or 0.0)
+
+        prices = [_price(order) for order in active if _price(order) > 0]
+        within_bounds = bool(prices) and min(prices) >= reference_context.lower_bound - 1e-9 and max(prices) <= reference_context.upper_bound + 1e-9
+        healthy = len(active) >= expected_count and bool(buy_orders) and bool(sell_orders) and within_bounds
+        if healthy:
+            self._last_healthy_grid_seen_at = now
+            return True
+
+        if self._last_healthy_grid_seen_at is not None and (now - self._last_healthy_grid_seen_at).total_seconds() <= 30:
+            logger.info(
+                "Grid order snapshot looked incomplete (count=%s buy=%s sell=%s), reusing last healthy snapshot for 30s grace.",
+                len(active),
+                len(buy_orders),
+                len(sell_orders),
+            )
+            return True
+
+        return False
 
     def _oracle_allows_dynamic_grid(self) -> bool:
         if self.market_oracle is not None and hasattr(self.market_oracle, "current_higher_adx_trend"):

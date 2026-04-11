@@ -52,12 +52,13 @@ class DummyClient:
         return payload
 
     def place_limit_order(self, symbol: str, side: str, amount: float, price: float, **kwargs):
-        payload = {"symbol": symbol, "side": side, "amount": amount, "price": price, **kwargs}
+        payload = {"symbol": symbol, "side": side, "amount": amount, "price": price, "status": "open", **kwargs}
         self.limit_orders.append(payload)
         return payload
 
     def cancel_all_orders(self, symbol: str):
         self.cancel_all_calls.append(symbol)
+        self.limit_orders = []
         return []
 
     def close_all_positions(self, symbol: str):
@@ -67,6 +68,10 @@ class DummyClient:
     def fetch_positions(self, symbols=None):
         del symbols
         return list(self.positions)
+
+    def fetch_open_orders(self, symbol: str):
+        del symbol
+        return list(self.limit_orders)
 
     def ensure_futures_settings(self, symbol: str, leverage: int, margin_mode: str | None = None) -> None:
         self.futures_settings_calls.append(
@@ -515,6 +520,31 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(len(self.client.limit_orders), 0)
         self.assertEqual(len(risk_manager.grid_profiles), 1)
 
+    def test_grid_robot_holds_existing_grid_when_snapshot_is_healthy(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
+        self.client.ohlcv_by_timeframe["1h"] = []
+        for i in range(80):
+            ts = 60_000 + i * 3_600_000
+            self.client.ohlcv_by_timeframe["1h"].append([ts, 100.0, 105.0, 95.0, 100.0, 120.0])
+        now = datetime(2026, 4, 10, 3, 0, tzinfo=timezone.utc)
+        now_values = [now, now + timedelta(seconds=60)]
+        robot = GridRobot(
+            self.client,
+            self.database,
+            self.grid_config,
+            self.execution,
+            now_provider=lambda: now_values.pop(0),
+            market_oracle=None,
+            use_dynamic_range=False,
+        )
+
+        first = robot.run()
+        second = robot.run()
+
+        self.assertTrue(first.action.startswith("grid:placed_"))
+        self.assertTrue(second.action.startswith("grid:hold_existing_grid"))
+
     def test_grid_robot_cools_down_repeatedly_triggered_buy_layer(self) -> None:
         self._insert_status("sideways")
         self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
@@ -569,13 +599,13 @@ class TheHandsTests(unittest.TestCase):
         fourth_count = len(self.client.limit_orders) - first_count - second_count - third_count
 
         self.assertEqual(first_count, 10)
-        self.assertEqual(second_count, 10)
-        self.assertEqual(third_count, 10)
-        self.assertEqual(fourth_count, 10)
-        self.assertIn("cooldown=0", fourth_result.action)
+        self.assertEqual(second_count, 0)
+        self.assertEqual(third_count, 0)
+        self.assertEqual(fourth_count, 0)
+        self.assertTrue(second_result.action.startswith("grid:hold_existing_grid"))
+        self.assertTrue(third_result.action.startswith("grid:hold_existing_grid"))
+        self.assertTrue(fourth_result.action.startswith("grid:hold_existing_grid"))
         self.assertIn("cooldown=0", first_result.action)
-        self.assertIn("cooldown=0", second_result.action)
-        self.assertIn("cooldown=0", third_result.action)
 
     def test_grid_robot_triggers_flash_crash_guard_and_pauses_orders(self) -> None:
         self._insert_status("sideways")
