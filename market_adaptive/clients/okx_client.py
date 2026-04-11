@@ -62,13 +62,17 @@ class OKXClient:
 
         balance_info = balance.get("info") or {}
         account_data = (balance_info.get("data") or [{}])[0]
-        margin_ratio = self._extract_margin_ratio(balance, positions)
+        raw_margin_ratio = self._extract_margin_ratio(balance, positions)
         maintenance_margin = self._extract_maintenance_margin(account_data, positions)
         total_notional = 0.0
         for position in positions:
             total_notional += self.position_notional(position.get("symbol") or symbols[0] if symbols else "BTC/USDT", position)
-        if margin_ratio <= 0 and equity > 0 and maintenance_margin > 0:
+
+        margin_ratio = 0.0
+        if equity > 0 and maintenance_margin > 0:
             margin_ratio = maintenance_margin / equity
+        elif 0.0 <= raw_margin_ratio <= 1.0:
+            margin_ratio = raw_margin_ratio
 
         return {
             "equity": equity,

@@ -17,6 +17,8 @@ class MockExchange:
         self.open_orders = []
         self.cancel_order_calls = []
         self.raise_on_cancel_order = None
+        self.balance = {}
+        self.positions = []
 
     def set_sandbox_mode(self, enabled: bool) -> None:
         self.sandbox_mode = enabled
@@ -32,6 +34,13 @@ class MockExchange:
     def fetch_position_mode(self, symbol: str) -> dict[str, bool]:
         del symbol
         return {"hedged": False}
+
+    def fetch_balance(self) -> dict:
+        return dict(self.balance)
+
+    def fetch_positions(self, symbols=None):
+        del symbols
+        return list(self.positions)
 
     def fetch_open_orders(self, symbol: str):
         del symbol
@@ -131,6 +140,59 @@ class OKXClientTests(unittest.TestCase):
         )
 
         self.assertEqual(client.price_to_precision("BTC/USDT", 100.126), 100.13)
+
+    def test_fetch_account_risk_snapshot_uses_maintenance_margin_over_okx_mgn_ratio(self) -> None:
+        client = DummyOKXClient(
+            OKXConfig(api_key="", api_secret="", passphrase="", default_type="swap"),
+            ExecutionConfig(),
+        )
+        client.exchange.balance = {
+            "total": {"USDT": 95_495.6007},
+            "info": {
+                "data": [
+                    {
+                        "details": [{"ccy": "USDT", "eq": "95495.6007"}],
+                    }
+                ]
+            },
+        }
+        client.exchange.positions = [
+            {
+                "symbol": "BTC/USDT:USDT",
+                "notional": 14.6181,
+                "info": {
+                    "mgnRatio": "74.0465",
+                    "mmr": "0.0584584",
+                },
+            }
+        ]
+
+        snapshot = client.fetch_account_risk_snapshot(["BTC/USDT"])
+
+        self.assertAlmostEqual(snapshot["maintenance_margin"], 0.0584584)
+        self.assertAlmostEqual(snapshot["total_notional"], 14.6181)
+        self.assertAlmostEqual(snapshot["margin_ratio"], 0.0584584 / 95_495.6007)
+
+    def test_fetch_account_risk_snapshot_falls_back_to_decimal_ratio_when_no_maintenance_margin(self) -> None:
+        client = DummyOKXClient(
+            OKXConfig(api_key="", api_secret="", passphrase="", default_type="swap"),
+            ExecutionConfig(),
+        )
+        client.exchange.balance = {
+            "total": {"USDT": 1_000.0},
+            "info": {
+                "data": [
+                    {
+                        "marginRatio": "0.42",
+                        "details": [{"ccy": "USDT", "eq": "1000"}],
+                    }
+                ]
+            },
+        }
+
+        snapshot = client.fetch_account_risk_snapshot(["BTC/USDT"])
+
+        self.assertAlmostEqual(snapshot["margin_ratio"], 0.42)
 
     def test_get_position_liquidation_price_reads_okx_info_field(self) -> None:
         client = DummyOKXClient(

@@ -205,6 +205,20 @@ class RiskControlManagerTests(unittest.TestCase):
         self.assertEqual(self.database.get_system_state("risk_new_openings").state_value, "OFF")
         self.assertEqual(self.grid_reduce_events, [])
 
+    def test_tiny_maintenance_margin_does_not_block_new_openings(self) -> None:
+        self.client.equity = 95_495.6007
+        self.client.maintenance_margin = 0.0584584
+        self.client.margin_ratio = self.client.maintenance_margin / self.client.equity
+        self.client.position_notional_value = 14.6181
+
+        snapshot = self.manager.monitor_once()
+        allowed, reason = self.manager.can_open_new_position("BTC/USDT", requested_notional=50.0)
+
+        self.assertTrue(allowed)
+        self.assertIsNone(reason)
+        self.assertFalse(snapshot.new_openings_blocked)
+        self.assertLess(snapshot.margin_ratio, 0.001)
+
     def test_cta_stop_hit_triggers_immediate_full_exit(self) -> None:
         self.client.last_price = 97.0
         self.manager.update_cta_risk(
