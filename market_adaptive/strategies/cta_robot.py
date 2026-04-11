@@ -42,7 +42,7 @@ class TrendSignal:
 
     @property
     def obv_slope_angle(self) -> float:
-        return self.obv_confirmation.roc_pct
+        return self.obv_confirmation.zscore
 
     @property
     def obv_slope_passed(self) -> bool:
@@ -205,10 +205,7 @@ class CTARobot(BaseStrategyRobot):
             execution_frame,
             obv=execution_obv,
             sma_period=self.config.obv_sma_period,
-            roc_period=self.config.obv_roc_period,
             zscore_window=self.config.obv_zscore_window,
-            roc_percentile_window=self.config.obv_roc_percentile_window,
-            extreme_percentile=self.config.obv_roc_extreme_percentile,
         )
         obv_bias = 1 if obv_confirmation.above_sma else -1 if obv_confirmation.below_sma else 0
         raw_direction = 1 if mtf_signal.fully_aligned else 0

@@ -47,9 +47,6 @@ class IndicatorSnapshot:
 class OBVConfirmationSnapshot:
     current_obv: float
     sma_value: float
-    roc_pct: float
-    roc_high_threshold: float
-    roc_low_threshold: float
     increment_value: float
     increment_mean: float
     increment_std: float
@@ -64,14 +61,10 @@ class OBVConfirmationSnapshot:
         return self.current_obv < self.sma_value
 
     def buy_confirmed(self, *, zscore_threshold: float) -> bool:
-        if not self.above_sma:
-            return False
-        return self.zscore > zscore_threshold or self.roc_pct >= self.roc_high_threshold
+        return self.above_sma and self.zscore > zscore_threshold
 
     def sell_confirmed(self, *, zscore_threshold: float) -> bool:
-        if not self.below_sma:
-            return False
-        return self.zscore < -zscore_threshold or self.roc_pct <= self.roc_low_threshold
+        return self.below_sma and self.zscore < -zscore_threshold
 
 
 @dataclass
@@ -215,41 +208,24 @@ def compute_obv_confirmation_snapshot(
     *,
     obv: pd.Series | None = None,
     sma_period: int = 50,
-    roc_period: int = 3,
     zscore_window: int = 100,
-    roc_percentile_window: int = 100,
-    extreme_percentile: float = 0.90,
 ) -> OBVConfirmationSnapshot:
     if len(frame) == 0:
-        return OBVConfirmationSnapshot(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return OBVConfirmationSnapshot(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     obv_series = (obv if obv is not None else compute_obv(frame)).astype(float)
     sma_window = max(1, int(sma_period))
-    roc_window = max(1, int(roc_period))
     z_window = max(2, int(zscore_window))
-    percentile_window = max(5, int(roc_percentile_window))
-    quantile = min(0.99, max(0.50, float(extreme_percentile)))
 
     obv_sma = obv_series.rolling(sma_window, min_periods=1).mean().astype(float)
-    prior_obv = obv_series.shift(roc_window)
-    denominator = prior_obv.abs().replace(0.0, float("nan"))
-    obv_roc = (((obv_series - prior_obv) / denominator) * 100.0).replace([float("inf"), -float("inf")], 0.0).fillna(0.0)
-
     increments = obv_series.diff().fillna(0.0).astype(float)
     increment_mean = increments.rolling(z_window, min_periods=2).mean().fillna(0.0)
     increment_std = increments.rolling(z_window, min_periods=2).std(ddof=0).fillna(0.0)
     zscore = ((increments - increment_mean) / increment_std.replace(0.0, float("nan"))).replace([float("inf"), -float("inf")], 0.0).fillna(0.0)
 
-    recent_roc = obv_roc.tail(percentile_window)
-    roc_high_threshold = float(recent_roc.quantile(quantile)) if not recent_roc.empty else 0.0
-    roc_low_threshold = float(recent_roc.quantile(1.0 - quantile)) if not recent_roc.empty else 0.0
-
     return OBVConfirmationSnapshot(
         current_obv=float(obv_series.iloc[-1]),
         sma_value=float(obv_sma.iloc[-1]),
-        roc_pct=float(obv_roc.iloc[-1]),
-        roc_high_threshold=roc_high_threshold,
-        roc_low_threshold=roc_low_threshold,
         increment_value=float(increments.iloc[-1]),
         increment_mean=float(increment_mean.iloc[-1]),
         increment_std=float(increment_std.iloc[-1]),

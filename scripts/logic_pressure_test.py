@@ -99,9 +99,6 @@ def _evaluate_at_bar(ohlcv_by_timeframe: dict[str, list[list[Any]]], cta_config:
         "obv_bias": int(signal.obv_bias),
         "obv_current": float(obv.current_obv),
         "obv_sma": float(obv.sma_value),
-        "obv_roc": float(obv.roc_pct),
-        "obv_roc_p90": float(obv.roc_high_threshold),
-        "obv_roc_p10": float(obv.roc_low_threshold),
         "obv_increment": float(obv.increment_value),
         "obv_zscore": float(obv.zscore),
         "obv_zscore_threshold": float(cta_config.obv_zscore_threshold),
@@ -178,7 +175,7 @@ def main() -> int:
         for unlocked in report["unlocked_windows"]:
             relaxed = unlocked["relaxed"]
             print(
-                "unlocked {timestamp} price={price:.4f} z={obv_zscore:.2f}>{obv_zscore_threshold:.2f} roc={obv_roc:.2f} p90={obv_roc_p90:.2f} reason={execution_trigger_reason}".format(
+                "unlocked {timestamp} price={price:.4f} z={obv_zscore:.2f}>{obv_zscore_threshold:.2f} reason={execution_trigger_reason}".format(
                     **relaxed,
                 )
             )

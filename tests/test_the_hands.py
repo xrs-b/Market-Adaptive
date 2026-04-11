@@ -219,7 +219,7 @@ class TheHandsTests(unittest.TestCase):
         lower_closes = []
         base_price = lower_last_close - 8.0
         pattern = [0.0, 0.4, -0.3, 0.5, -0.2, 0.3, -0.1, 0.2]
-        for index in range(52):
+        for index in range(112):
             lower_closes.append(base_price + pattern[index % len(pattern)])
         lower_closes.extend(
             [
@@ -233,7 +233,14 @@ class TheHandsTests(unittest.TestCase):
                 lower_last_close,
             ]
         )
-        self._set_ohlcv("15m", lower_closes, 900_000)
+        base = 1_700_000_000_000
+        payload = []
+        for index, close in enumerate(lower_closes):
+            volume = 100 + index * 2
+            if index >= len(lower_closes) - 4:
+                volume *= 8
+            payload.append([base + index * 900_000, close - 0.3, close + 0.4, close - 0.5, close, volume])
+        self.client.ohlcv_by_timeframe["15m"] = payload
         self._set_bullish_higher_timeframes(swing_last_close=higher_last_close)
 
     def _load_pullback_after_rally(self, latest_close: float) -> None:
@@ -341,8 +348,6 @@ class TheHandsTests(unittest.TestCase):
             first_take_profit_size=0.5,
             second_take_profit_size=0.25,
             obv_zscore_threshold=999.0,
-            obv_roc_period=1000,
-            obv_roc_extreme_percentile=0.999,
         )
         robot = CTARobot(self.client, self.database, strict_config, self.execution)
 

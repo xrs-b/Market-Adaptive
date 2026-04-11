@@ -140,11 +140,8 @@ class CTAConfig:
     obv_slope_window: int = 8
     obv_slope_threshold_degrees: float = 30.0
     obv_sma_period: int = 50
-    obv_roc_period: int = 3
     obv_zscore_window: int = 100
-    obv_roc_percentile_window: int = 100
-    obv_zscore_threshold: float = 2.0
-    obv_roc_extreme_percentile: float = 0.90
+    obv_zscore_threshold: float = 1.5
     atr_period: int = 14
     atr_trailing_multiplier: float = 2.5
     stop_loss_atr: float = 2.0
@@ -388,11 +385,8 @@ def load_config(config_path: str | Path) -> AppConfig:
         obv_slope_window=int(cta_payload.get("obv_slope_window", 8)),
         obv_slope_threshold_degrees=float(cta_payload.get("obv_slope_threshold_degrees", 30.0)),
         obv_sma_period=int(cta_payload.get("obv_sma_period", 50)),
-        obv_roc_period=int(cta_payload.get("obv_roc_period", 3)),
         obv_zscore_window=int(cta_payload.get("obv_zscore_window", 100)),
-        obv_roc_percentile_window=int(cta_payload.get("obv_roc_percentile_window", 100)),
-        obv_zscore_threshold=float(cta_payload.get("obv_zscore_threshold", 2.0)),
-        obv_roc_extreme_percentile=float(cta_payload.get("obv_roc_extreme_percentile", 0.90)),
+        obv_zscore_threshold=float(cta_payload.get("obv_zscore_threshold", 1.5)),
         atr_period=int(cta_payload.get("atr_period", 14)),
         atr_trailing_multiplier=float(cta_payload.get("atr_trailing_multiplier", 2.5)),
         stop_loss_atr=float(cta_payload.get("stop_loss_atr", 2.0)),

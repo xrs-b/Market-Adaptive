@@ -103,20 +103,21 @@ class IndicatorTests(unittest.TestCase):
         self.assertGreater(angle, 30.0)
 
     def test_compute_obv_confirmation_snapshot_detects_extreme_buy_flow(self) -> None:
-        frame = ohlcv_to_dataframe(self._build_ohlcv(start_price=90.0, step=1.0, length=140, step_ms=900_000))
-        snapshot = compute_obv_confirmation_snapshot(
-            frame,
-            sma_period=50,
-            roc_period=3,
-            zscore_window=100,
-            roc_percentile_window=100,
-            extreme_percentile=0.90,
-        )
+        base_timestamp = 1_700_000_000_000
+        ohlcv = []
+        close = 100.0
+        for index in range(139):
+            close += 0.05
+            volume = 100.0 + (index % 5)
+            ohlcv.append([base_timestamp + index * 900_000, close - 0.2, close + 0.3, close - 0.4, close, volume])
+        close += 2.0
+        ohlcv.append([base_timestamp + 139 * 900_000, close - 0.2, close + 0.3, close - 0.4, close, 5000.0])
+        frame = ohlcv_to_dataframe(ohlcv)
+        snapshot = compute_obv_confirmation_snapshot(frame, sma_period=50, zscore_window=100)
 
         self.assertTrue(snapshot.above_sma)
-        self.assertGreater(snapshot.roc_pct, 0.0)
-        self.assertGreaterEqual(snapshot.roc_high_threshold, snapshot.roc_low_threshold)
-        self.assertTrue(snapshot.buy_confirmed(zscore_threshold=2.0))
+        self.assertGreater(snapshot.zscore, 1.5)
+        self.assertTrue(snapshot.buy_confirmed(zscore_threshold=1.5))
 
     def test_compute_volume_profile_returns_poc_and_value_area(self) -> None:
         base_timestamp = 1_700_000_000_000
