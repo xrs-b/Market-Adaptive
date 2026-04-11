@@ -26,6 +26,8 @@ class DummyClient:
         self.latest_long_short_ratio = None
         self.raise_on_limit_order_at = None
         self._limit_order_seq = 0
+        self.fetch_order_responses = {}
+        self.fetch_order_calls = []
         self.order_book = {
             "bids": [[100.0 - index * 0.1, 1.6] for index in range(20)],
             "asks": [[100.1 + index * 0.1, 1.0] for index in range(20)],
@@ -83,6 +85,18 @@ class DummyClient:
     def fetch_open_orders(self, symbol: str):
         del symbol
         return list(self.limit_orders)
+
+    def fetch_order(self, order_id: str, symbol: str):
+        del symbol
+        self.fetch_order_calls.append(order_id)
+        responses = self.fetch_order_responses.get(order_id)
+        if isinstance(responses, list):
+            if not responses:
+                return None
+            if len(responses) == 1:
+                return responses[0]
+            return responses.pop(0)
+        return responses
 
     def ensure_futures_settings(self, symbol: str, leverage: int, margin_mode: str | None = None) -> None:
         self.futures_settings_calls.append(
@@ -463,6 +477,147 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(self.client.limit_orders[0]["params"]["timeInForce"], "IOC")
         self.assertGreater(self.client.limit_orders[0]["price"], 100.1)
         self.assertIsNotNone(robot.position)
+
+    def test_cta_robot_chases_partial_ioc_fill_with_market_order_and_uses_weighted_entry_price(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        self._set_order_book(
+            bid_size=2.4,
+            ask_size=1.0,
+            ask_levels=[
+                [100.1, 0.005],
+                [100.2, 0.005],
+                [100.3, 0.050],
+            ] + [[100.4 + index * 0.1, 1.0] for index in range(17)],
+        )
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+        self.client.fetch_order_responses["order-1"] = [
+            {
+                "id": "order-1",
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "amount": 0.02,
+                "price": 100.22,
+                "filled": 0.008,
+                "average": 100.22,
+                "remaining": 0.012,
+                "status": "canceled",
+                "info": {"accFillSz": "0.008", "avgPx": "100.22"},
+            }
+        ]
+
+        original_market_order = self.client.place_market_order
+
+        def partial_market_order(symbol: str, side: str, amount: float, **kwargs):
+            payload = original_market_order(symbol, side, amount, **kwargs)
+            payload.update({"filled": amount, "average": 100.6, "status": "closed", "remaining": 0.0})
+            return payload
+
+        self.client.place_market_order = partial_market_order
+
+        result = robot.run()
+
+        self.assertEqual(result.action, "cta:open_long_limit")
+        self.assertEqual(len(self.client.limit_orders), 1)
+        self.assertEqual(len(self.client.market_orders), 1)
+        self.assertAlmostEqual(self.client.market_orders[0]["amount"], 0.012)
+        self.assertIsNotNone(robot.position)
+        expected_price = ((0.008 * 100.22) + (0.012 * 100.6)) / 0.02
+        self.assertAlmostEqual(robot.position.entry_price, expected_price)
+        self.assertAlmostEqual(robot.position.initial_size, 0.02)
+
+    def test_extract_filled_amount_returns_zero_for_zero_fill_ioc_orders(self) -> None:
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+
+        filled = robot._extract_filled_amount(
+            {
+                "id": "order-1",
+                "amount": 0.02,
+                "filled": 0.0,
+                "remaining": 0.02,
+                "status": "open",
+            },
+            0.02,
+            used_limit_order=True,
+        )
+
+        self.assertEqual(filled, 0.0)
+
+    def test_cta_robot_returns_low_fill_ratio_when_ioc_limit_order_does_not_fill(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        self._set_order_book(
+            bid_size=2.4,
+            ask_size=1.0,
+            ask_levels=[
+                [100.1, 0.005],
+                [100.2, 0.005],
+                [100.3, 0.050],
+            ] + [[100.4 + index * 0.1, 1.0] for index in range(17)],
+        )
+        self.client.fetch_order_responses["order-1"] = [
+            {
+                "id": "order-1",
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "amount": 0.02,
+                "price": 100.22,
+                "filled": 0.0,
+                "remaining": 0.02,
+                "status": "canceled",
+                "info": {"accFillSz": "0"},
+            }
+        ]
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+
+        result = robot.run()
+
+        self.assertEqual(result.action, "cta:low_fill_ratio")
+        self.assertEqual(len(self.client.market_orders), 0)
+        self.assertIsNone(robot.position)
+
+    def test_cta_robot_returns_low_fill_ratio_when_ioc_limit_fill_stays_below_half(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        self._set_order_book(
+            bid_size=2.4,
+            ask_size=1.0,
+            ask_levels=[
+                [100.1, 0.005],
+                [100.2, 0.005],
+                [100.3, 0.050],
+            ] + [[100.4 + index * 0.1, 1.0] for index in range(17)],
+        )
+        self.client.fetch_order_responses["order-1"] = [
+            {
+                "id": "order-1",
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "amount": 0.02,
+                "price": 100.22,
+                "filled": 0.009,
+                "average": 100.22,
+                "remaining": 0.011,
+                "status": "canceled",
+                "info": {"accFillSz": "0.009", "avgPx": "100.22"},
+            }
+        ]
+
+        original_market_order = self.client.place_market_order
+
+        def partial_market_order(symbol: str, side: str, amount: float, **kwargs):
+            payload = original_market_order(symbol, side, amount, **kwargs)
+            payload.update({"filled": 0.0, "average": 100.6, "status": "open", "remaining": amount})
+            return payload
+
+        self.client.place_market_order = partial_market_order
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+
+        result = robot.run()
+
+        self.assertEqual(result.action, "cta:low_fill_ratio")
+        self.assertEqual(len(self.client.market_orders), 1)
+        self.assertIsNone(robot.position)
 
     def test_cta_robot_scales_out_and_all_outs_on_atr_stop(self) -> None:
         self._insert_status("trend")

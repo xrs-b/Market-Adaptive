@@ -54,6 +54,14 @@ class TrendSignal:
 
 
 @dataclass
+class EntryOrderResult:
+    order: dict
+    used_limit_order: bool
+    filled_amount: float
+    average_price: float | None
+
+
+@dataclass
 class ManagedPosition:
     side: str
     entry_price: float
@@ -365,24 +373,31 @@ class CTARobot(BaseStrategyRobot):
                 self._publish_risk_profile(None)
                 return "cta:risk_blocked"
 
-        order_response, used_limit_order = self._place_entry_order(
+        entry_order = self._place_entry_order(
             side=side,
             amount=amount,
             order_flow_assessment=order_flow_assessment,
         )
-        filled_amount = self._extract_filled_amount(order_response, amount, used_limit_order=used_limit_order)
-        filled_amount = self._normalize_order_amount(filled_amount)
+        filled_amount = self._normalize_order_amount(entry_order.filled_amount)
+        fill_ratio = (filled_amount / amount) if amount > 0 else 0.0
         if filled_amount <= 0:
             self._publish_risk_profile(None)
-            return "cta:slippage_blocked" if used_limit_order else "cta:risk_blocked"
+            return "cta:low_fill_ratio" if entry_order.used_limit_order else "cta:risk_blocked"
+        if entry_order.used_limit_order and fill_ratio < 0.5:
+            self._publish_risk_profile(None)
+            return "cta:low_fill_ratio"
 
-        entry_price = self._extract_order_price(
-            order_response,
-            fallback=(
-                order_flow_assessment.expected_average_price
-                if order_flow_assessment is not None and order_flow_assessment.expected_average_price is not None
-                else notional_price
-            ),
+        entry_price = (
+            float(entry_order.average_price)
+            if entry_order.average_price not in (None, 0, "0")
+            else self._extract_order_price(
+                entry_order.order,
+                fallback=(
+                    order_flow_assessment.expected_average_price
+                    if order_flow_assessment is not None and order_flow_assessment.expected_average_price is not None
+                    else notional_price
+                ),
+            )
         )
         entry_price = float(entry_price)
         atr_value = self._normalized_atr(entry_price, signal.atr)
@@ -405,7 +420,7 @@ class CTARobot(BaseStrategyRobot):
         )
         self._publish_risk_profile(signal)
         action = f"cta:open_{position_side}"
-        if used_limit_order:
+        if entry_order.used_limit_order:
             action += "_limit"
         if sentiment_halved:
             action += "_sentiment_halved"
@@ -417,7 +432,16 @@ class CTARobot(BaseStrategyRobot):
         side: str,
         amount: float,
         order_flow_assessment: OrderFlowAssessment | None,
-    ) -> tuple[dict, bool]:
+    ) -> EntryOrderResult:
+        fallback_price = (
+            order_flow_assessment.expected_average_price
+            if order_flow_assessment is not None and order_flow_assessment.expected_average_price is not None
+            else None
+        )
+        minimum_amount = 0.0
+        if hasattr(self.client, "get_min_order_amount"):
+            minimum_amount = float(self.client.get_min_order_amount(self.symbol))
+
         if (
             side == "buy"
             and order_flow_assessment is not None
@@ -434,10 +458,62 @@ class CTARobot(BaseStrategyRobot):
                     "orderFlowImbalance": round(order_flow_assessment.imbalance_ratio, 4),
                 },
             )
-            return response, True
+            limit_response = self._refresh_ioc_fill(response)
+            limit_filled = self._normalize_order_amount(
+                self._extract_filled_amount(limit_response, 0.0, used_limit_order=True)
+            )
+            limit_price = self._extract_order_price(limit_response, fallback=fallback_price or response.get("price") or 0.0)
+            unfilled_amount = self._normalize_order_amount(max(0.0, float(amount) - limit_filled))
+            self._log_entry_fill(
+                order=limit_response,
+                limit_price=response.get("price"),
+                fill_price=limit_price,
+                fill_qty=limit_filled,
+                unfilled_qty=unfilled_amount,
+            )
+            if limit_filled <= 0 or unfilled_amount <= max(minimum_amount, 0.0):
+                average_price = limit_price if limit_filled > 0 else None
+                return EntryOrderResult(limit_response, True, limit_filled, average_price)
+
+            market_response = self.client.place_market_order(self.symbol, side, unfilled_amount)
+            market_filled = self._normalize_order_amount(
+                self._extract_filled_amount(market_response, unfilled_amount, used_limit_order=False)
+            )
+            market_price = self._extract_order_price(
+                market_response,
+                fallback=fallback_price or limit_price,
+            )
+            remaining_unfilled = self._normalize_order_amount(max(0.0, unfilled_amount - market_filled))
+            self._log_entry_fill(
+                order=market_response,
+                limit_price=response.get("price"),
+                fill_price=market_price,
+                fill_qty=market_filled,
+                unfilled_qty=remaining_unfilled,
+            )
+            combined_filled = self._normalize_order_amount(limit_filled + market_filled)
+            combined_average = None
+            if combined_filled > 0:
+                combined_average = ((limit_filled * limit_price) + (market_filled * market_price)) / combined_filled
+            combined_order = {
+                **limit_response,
+                "filled": combined_filled,
+                "average": combined_average,
+                "amount": amount,
+                "remaining": self._normalize_order_amount(max(0.0, amount - combined_filled)),
+                "info": {
+                    **(limit_response.get("info") or {}),
+                    "marketChaseOrder": market_response,
+                },
+            }
+            return EntryOrderResult(combined_order, True, combined_filled, combined_average)
 
         response = self.client.place_market_order(self.symbol, side, amount)
-        return response, False
+        filled_amount = self._normalize_order_amount(
+            self._extract_filled_amount(response, amount, used_limit_order=False)
+        )
+        average_price = self._extract_order_price(response, fallback=fallback_price or 0.0) if filled_amount > 0 else None
+        return EntryOrderResult(response, False, filled_amount, average_price)
 
     def _manage_position(self, signal: TrendSignal) -> tuple[list[str], bool]:
         assert self.position is not None
@@ -537,19 +613,66 @@ class CTARobot(BaseStrategyRobot):
             )
         )
 
+    def _refresh_ioc_fill(self, order: dict) -> dict:
+        order_id = order.get("id")
+        fetch_order = getattr(self.client, "fetch_order", None)
+        if order_id in (None, "") or not callable(fetch_order):
+            return order
+
+        latest = order
+        for attempt in range(2):
+            if attempt > 0:
+                time.sleep(0.05)
+            refreshed = fetch_order(str(order_id), self.symbol)
+            if refreshed:
+                latest = refreshed
+                filled_amount = self._extract_filled_amount(latest, 0.0, used_limit_order=True)
+                remaining = latest.get("remaining")
+                if filled_amount > 0 or remaining in (0, 0.0, "0"):
+                    break
+        return latest
+
+    def _log_entry_fill(
+        self,
+        *,
+        order: dict | None,
+        limit_price: float | None,
+        fill_price: float | None,
+        fill_qty: float,
+        unfilled_qty: float,
+    ) -> None:
+        order_id = None if not order else order.get("id")
+        logger.info(
+            "CTA entry fill | order_id=%s limit_price=%s fill_price=%s fill_qty=%.12f unfilled_qty=%.12f",
+            order_id,
+            limit_price,
+            fill_price,
+            float(fill_qty),
+            float(unfilled_qty),
+        )
+
     def _extract_filled_amount(self, order: dict | None, fallback: float, *, used_limit_order: bool) -> float:
         if not order:
             return 0.0 if used_limit_order else float(fallback)
 
+        explicit_zero_fill = False
         filled = order.get("filled")
         if filled not in (None, ""):
-            return abs(float(filled))
+            filled_value = abs(float(filled))
+            if used_limit_order and filled_value <= 0:
+                explicit_zero_fill = True
+            else:
+                return filled_value
 
         info = order.get("info") or {}
         for key in ("accFillSz", "fillSz", "filledSize"):
             value = info.get(key)
             if value not in (None, ""):
-                return abs(float(value))
+                filled_value = abs(float(value))
+                if used_limit_order and filled_value <= 0:
+                    explicit_zero_fill = True
+                    continue
+                return filled_value
 
         amount = order.get("amount")
         remaining = order.get("remaining")
@@ -559,8 +682,11 @@ class CTARobot(BaseStrategyRobot):
                 return inferred_filled
 
         status = str(order.get("status") or "").lower()
-        if used_limit_order and status in {"canceled", "cancelled", "expired", "rejected"}:
-            return 0.0
+        if used_limit_order:
+            if explicit_zero_fill:
+                return 0.0
+            if status in {"canceled", "cancelled", "expired", "rejected"}:
+                return 0.0
 
         if amount not in (None, ""):
             return abs(float(amount))
