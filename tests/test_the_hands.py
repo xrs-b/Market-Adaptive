@@ -837,8 +837,10 @@ class TheHandsTests(unittest.TestCase):
         context = robot._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=int(now.timestamp() * 1000))
         assert context is not None
         robot._cached_context = context
+        attempts = []
 
         def boom(symbol: str):
+            attempts.append(symbol)
             raise RuntimeError(f"boom for {symbol}")
 
         self.client.fetch_open_orders = boom
@@ -846,9 +848,81 @@ class TheHandsTests(unittest.TestCase):
             healthy = robot._has_active_grid_orders(context, now)
 
         self.assertFalse(healthy)
+        self.assertEqual(len(attempts), 3)
         log_output = "\n".join(captured.output)
-        self.assertIn("fetch_open_orders failed during grid health check", log_output)
+        self.assertIn("fetch_open_orders failed | symbol=BTC/USDT purpose=health_check attempt=1/3", log_output)
+        self.assertIn("timestamp=2026-04-11T10:00:00+00:00", log_output)
+        self.assertIn("error_type=RuntimeError", log_output)
         self.assertIn("boom for BTC/USDT", log_output)
+
+    def test_grid_robot_enters_health_check_degraded_mode_after_repeated_sync_failures(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
+        self.client.ohlcv_by_timeframe["1h"] = []
+        for i in range(80):
+            ts = 60_000 + i * 3_600_000
+            self.client.ohlcv_by_timeframe["1h"].append([ts, 100.0, 105.0, 95.0, 100.0, 120.0])
+        now = datetime(2026, 4, 10, 3, 0, tzinfo=timezone.utc)
+        now_values = [now, now + timedelta(seconds=60)]
+        robot = GridRobot(
+            self.client,
+            self.database,
+            self.grid_config,
+            self.execution,
+            now_provider=lambda: now_values.pop(0),
+            market_oracle=None,
+            use_dynamic_range=False,
+        )
+
+        first = robot.run()
+
+        def boom(symbol: str):
+            raise RuntimeError(f"sync failed for {symbol}")
+
+        self.client.fetch_open_orders = boom
+        second = robot.run()
+
+        self.assertTrue(first.action.startswith("grid:placed_"))
+        self.assertTrue(second.action.startswith("grid:health_check_degraded"))
+        self.assertEqual(len(self.client.cancel_all_calls), 1)
+        self.assertEqual(robot._health_check_failed_streak, 3)
+        self.assertIsNotNone(robot._health_check_degraded_until)
+
+    def test_grid_robot_returns_order_sync_unavailable_before_regrid_when_validation_fails(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
+        self.client.ohlcv_by_timeframe["1h"] = []
+        for i in range(80):
+            ts = 60_000 + i * 3_600_000
+            self.client.ohlcv_by_timeframe["1h"].append([ts, 100.0, 105.0, 95.0, 100.0, 120.0])
+        now = datetime(2026, 4, 10, 3, 0, tzinfo=timezone.utc)
+        now_values = [now, now + timedelta(seconds=360)]
+        robot = GridRobot(
+            self.client,
+            self.database,
+            self.grid_config,
+            self.execution,
+            now_provider=lambda: now_values.pop(0),
+            market_oracle=None,
+            use_dynamic_range=False,
+        )
+
+        first = robot.run()
+
+        calls = []
+
+        def flaky(symbol: str):
+            calls.append(symbol)
+            if len(calls) == 1:
+                return []
+            raise RuntimeError(f"validation failed for {symbol}")
+
+        self.client.fetch_open_orders = flaky
+        second = robot.run()
+
+        self.assertTrue(first.action.startswith("grid:placed_"))
+        self.assertTrue(second.action.startswith("grid:order_sync_unavailable"))
+        self.assertEqual(len(self.client.cancel_all_calls), 1)
 
     def test_grid_robot_reduces_exposure_stepwise_instead_of_flattening(self) -> None:
         self.client.positions = [{"contracts": 0.12, "side": "long", "info": {"posSide": "long"}}]

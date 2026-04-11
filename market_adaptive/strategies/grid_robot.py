@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from collections import defaultdict, deque
 from contextlib import suppress
 from dataclasses import dataclass
@@ -93,6 +94,8 @@ class GridRobot(BaseStrategyRobot):
         self._price_window: deque[tuple[datetime, float]] = deque()
         self._last_grid_placed_at: datetime | None = None
         self._last_healthy_grid_seen_at: datetime | None = None
+        self._health_check_failed_streak = 0
+        self._health_check_degraded_until: datetime | None = None
         self._ws_thread: threading.Thread | None = None
         self._ws_loop: asyncio.AbstractEventLoop | None = None
         self._ws_stop_event: asyncio.Event | None = None
@@ -109,6 +112,10 @@ class GridRobot(BaseStrategyRobot):
         if action.startswith("grid:placed_"):
             return False
         if action.startswith("grid:hold_existing_grid"):
+            return False
+        if action.startswith("grid:health_check_degraded"):
+            return False
+        if action.startswith("grid:order_sync_unavailable"):
             return False
         if action.startswith("grid:flash_crash_cooldown"):
             return False
@@ -283,9 +290,28 @@ class GridRobot(BaseStrategyRobot):
             )
 
         needs_regrid = self._should_regrid(context, current_price, now)
+        if self._health_check_degraded_active(now):
+            return self._build_health_check_degraded_action(context, now)
         if not needs_regrid and self._has_active_grid_orders(context, now):
             return (
                 f"grid:hold_existing_grid|center={context.center_price:.2f}|atr={context.atr_value:.2f}|"
+                f"dynamic={str(self.use_dynamic_range).lower()}|regrid=false|"
+                f"bounds={context.lower_bound:.2f}-{context.upper_bound:.2f}"
+            )
+        if self._health_check_degraded_active(now):
+            return self._build_health_check_degraded_action(context, now)
+
+        order_sync_snapshot = self._fetch_open_orders_with_retry(now, purpose="pre_regrid_validation")
+        if order_sync_snapshot is None:
+            logger.warning(
+                "[grid_robot] order sync unavailable before regrid | symbol=%s failed_streak=%d degraded=%s",
+                self.symbol,
+                self._health_check_failed_streak,
+                self._health_check_degraded_active(now),
+            )
+            return (
+                f"grid:order_sync_unavailable|failed_streak={self._health_check_failed_streak}|"
+                f"center={context.center_price:.2f}|atr={context.atr_value:.2f}|"
                 f"dynamic={str(self.use_dynamic_range).lower()}|regrid=false|"
                 f"bounds={context.lower_bound:.2f}-{context.upper_bound:.2f}"
             )
@@ -612,13 +638,81 @@ class GridRobot(BaseStrategyRobot):
         logger.info("[grid_robot] _should_regrid: no trigger, returning False")
         return False
 
-    def _has_active_grid_orders(self, context: GridContext, now: datetime) -> bool:
-        if not hasattr(self.client, "fetch_open_orders"):
+    def _health_check_degraded_active(self, now: datetime) -> bool:
+        if self._health_check_degraded_until is None:
             return False
-        try:
-            orders = self.client.fetch_open_orders(self.symbol)
-        except Exception:
-            logger.exception("[grid_robot] fetch_open_orders failed during grid health check | symbol=%s", self.symbol)
+        if now >= self._health_check_degraded_until:
+            self._health_check_degraded_until = None
+            return False
+        return True
+
+    def _build_health_check_degraded_action(self, context: GridContext, now: datetime) -> str:
+        remaining_seconds = 0
+        if self._health_check_degraded_until is not None:
+            remaining_seconds = max(0, int((self._health_check_degraded_until - now).total_seconds()))
+        logger.warning(
+            "[grid_robot] health_check_degraded active | symbol=%s remaining=%ss failed_streak=%d",
+            self.symbol,
+            remaining_seconds,
+            self._health_check_failed_streak,
+        )
+        return (
+            f"grid:health_check_degraded|remaining={remaining_seconds}s|failed_streak={self._health_check_failed_streak}|"
+            f"center={context.center_price:.2f}|atr={context.atr_value:.2f}|"
+            f"dynamic={str(self.use_dynamic_range).lower()}|regrid=false|"
+            f"bounds={context.lower_bound:.2f}-{context.upper_bound:.2f}"
+        )
+
+    def _fetch_open_orders_with_retry(self, now: datetime, *, purpose: str) -> list[dict] | None:
+        if not hasattr(self.client, "fetch_open_orders"):
+            return None
+
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                orders = self.client.fetch_open_orders(self.symbol)
+                if self._health_check_failed_streak > 0:
+                    logger.info(
+                        "[grid_robot] fetch_open_orders recovered | symbol=%s purpose=%s attempt=%d failed_streak=%d",
+                        self.symbol,
+                        purpose,
+                        attempt,
+                        self._health_check_failed_streak,
+                    )
+                self._health_check_failed_streak = 0
+                self._health_check_degraded_until = None
+                return orders
+            except Exception as exc:
+                last_error = exc
+                self._health_check_failed_streak += 1
+                timestamp = now.isoformat()
+                logger.error(
+                    "[grid_robot] fetch_open_orders failed | symbol=%s purpose=%s attempt=%d/3 timestamp=%s error_type=%s error=%s",
+                    self.symbol,
+                    purpose,
+                    attempt,
+                    timestamp,
+                    type(exc).__name__,
+                    exc,
+                )
+                if self._health_check_failed_streak >= 3:
+                    self._health_check_degraded_until = now + timedelta(seconds=30)
+                if attempt < 3:
+                    time.sleep(0.1)
+
+        if last_error is not None and self._health_check_failed_streak >= 3:
+            logger.error(
+                "[grid_robot] health check degraded after repeated order sync failures | symbol=%s purpose=%s degraded_until=%s error_type=%s",
+                self.symbol,
+                purpose,
+                self._health_check_degraded_until.isoformat() if self._health_check_degraded_until else None,
+                type(last_error).__name__,
+            )
+        return None
+
+    def _has_active_grid_orders(self, context: GridContext, now: datetime) -> bool:
+        orders = self._fetch_open_orders_with_retry(now, purpose="health_check")
+        if orders is None:
             return False
 
         active = [order for order in orders if not bool(order.get("reduceOnly") or order.get("reduce_only") or order.get("info", {}).get("reduceOnly"))]
