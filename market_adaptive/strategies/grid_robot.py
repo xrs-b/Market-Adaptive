@@ -91,6 +91,7 @@ class GridRobot(BaseStrategyRobot):
         self._flash_crash_until: datetime | None = None
         self._halted = False
         self._price_window: deque[tuple[datetime, float]] = deque()
+        self._last_grid_placed_at: datetime | None = None
         self._ws_thread: threading.Thread | None = None
         self._ws_loop: asyncio.AbstractEventLoop | None = None
         self._ws_stop_event: asyncio.Event | None = None
@@ -280,7 +281,7 @@ class GridRobot(BaseStrategyRobot):
                 strategy_name=self.strategy_name,
             )
 
-        needs_regrid = self._should_regrid(context, current_price)
+        needs_regrid = self._should_regrid(context, current_price, now)
         if not needs_regrid and self._has_active_grid_orders():
             return (
                 f"grid:hold_existing_grid|center={context.center_price:.2f}|atr={context.atr_value:.2f}|"
@@ -557,15 +558,38 @@ class GridRobot(BaseStrategyRobot):
             return 0.0
         return float(atr_series.iloc[-1])
 
-    def _should_regrid(self, context: GridContext, current_price: float) -> bool:
+    def _should_regrid(self, context: GridContext, current_price: float, now: datetime) -> bool:
         previous = self._cached_context
         if previous is None:
             return True
         if previous.center_price <= 0:
             return True
-        if abs(previous.atr_value - context.atr_value) > 1e-9:
+
+        min_lifetime_seconds = max(0, int(getattr(self.config, "min_grid_lifetime_seconds", 300)))
+        if self._last_grid_placed_at is not None and min_lifetime_seconds > 0:
+            age_seconds = (now - self._last_grid_placed_at).total_seconds()
+            if age_seconds < min_lifetime_seconds:
+                previous_atr = max(abs(float(previous.atr_value)), 1e-12)
+                atr_diff_ratio = abs(float(context.atr_value) - float(previous.atr_value)) / previous_atr
+                if atr_diff_ratio > 0:
+                    logger.info(
+                        "ATR fluctuated slightly (diff: %.1f%%), skipping regrid to maintain stability.",
+                        atr_diff_ratio * 100.0,
+                    )
+                return False
+
+        previous_atr = max(abs(float(previous.atr_value)), 1e-12)
+        atr_diff_ratio = abs(float(context.atr_value) - float(previous.atr_value)) / previous_atr
+        atr_regrid_change_ratio = float(getattr(self.config, "atr_regrid_change_ratio", 0.10))
+        if atr_diff_ratio > atr_regrid_change_ratio:
             return True
-        trigger_ratio = float(getattr(self.config, "regrid_trigger_atr_ratio", 0.50))
+        if atr_diff_ratio > 0:
+            logger.info(
+                "ATR fluctuated slightly (diff: %.1f%%), skipping regrid to maintain stability.",
+                atr_diff_ratio * 100.0,
+            )
+
+        trigger_ratio = float(getattr(self.config, "regrid_trigger_atr_ratio", 0.30))
         trigger_distance = max(0.0, context.atr_value * trigger_ratio)
         if trigger_distance <= 0:
             trigger_distance = abs(previous.center_price) * 0.001

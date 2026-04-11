@@ -225,7 +225,9 @@ class GridConfig:
     atr_timeframe: str = "1h"
     atr_period: int = 14
     atr_multiplier: float = 2.5
-    regrid_trigger_atr_ratio: float = 0.50
+    atr_regrid_change_ratio: float = 0.10
+    regrid_trigger_atr_ratio: float = 0.30
+    min_grid_lifetime_seconds: int = 300
     flash_crash_enabled: bool = True
     flash_crash_timeframe: str = "1m"
     flash_crash_atr_multiplier: float = 1.5
@@ -433,7 +435,9 @@ def load_config(config_path: str | Path) -> AppConfig:
         atr_timeframe=str(grid_payload.get("atr_timeframe", "1h")),
         atr_period=int(grid_payload.get("atr_period", 14)),
         atr_multiplier=float(grid_payload.get("atr_multiplier", 2.5)),
-        regrid_trigger_atr_ratio=float(grid_payload.get("regrid_trigger_atr_ratio", 0.50)),
+        atr_regrid_change_ratio=float(grid_payload.get("atr_regrid_change_ratio", 0.10)),
+        regrid_trigger_atr_ratio=float(grid_payload.get("regrid_trigger_atr_ratio", 0.30)),
+        min_grid_lifetime_seconds=int(grid_payload.get("min_grid_lifetime_seconds", 300)),
         flash_crash_enabled=bool(grid_payload.get("flash_crash_enabled", True)),
         flash_crash_timeframe=str(grid_payload.get("flash_crash_timeframe", "1m")),
         flash_crash_atr_multiplier=float(grid_payload.get("flash_crash_atr_multiplier", 1.5)),

@@ -140,7 +140,9 @@ grid:
   atr_timeframe: "1h"
   atr_period: 14
   atr_multiplier: 2.5
-  regrid_trigger_atr_ratio: 0.50
+  atr_regrid_change_ratio: 0.10
+  regrid_trigger_atr_ratio: 0.30
+  min_grid_lifetime_seconds: 300
   flash_crash_enabled: true
   flash_crash_timeframe: "1m"
   flash_crash_atr_multiplier: 1.5
