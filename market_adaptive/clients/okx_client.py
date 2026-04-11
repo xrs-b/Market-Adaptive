@@ -159,7 +159,7 @@ class OKXClient:
         total = 0.0
         last_price = None
         for order in self.fetch_open_orders(symbol):
-            reduce_only = bool(order.get("reduceOnly") or order.get("info", {}).get("reduceOnly"))
+            reduce_only = bool(order.get("reduceOnly") or order.get("reduce_only") or order.get("info", {}).get("reduceOnly"))
             if reduce_only:
                 continue
             amount = order.get("remaining") or order.get("amount") or order.get("info", {}).get("sz") or 0.0

@@ -736,7 +736,7 @@ class TheHandsTests(unittest.TestCase):
 
         self.assertTrue(robot._has_active_grid_orders(context, now))
 
-    def test_grid_robot_health_check_rejects_missing_or_shifted_ladder_orders(self) -> None:
+    def test_grid_robot_health_check_accepts_partial_openings_with_reduce_only_hedge(self) -> None:
         self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
         robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
         now = datetime(2026, 4, 11, 10, 0, tzinfo=timezone.utc)
@@ -744,6 +744,9 @@ class TheHandsTests(unittest.TestCase):
         assert context is not None
         robot._cached_context = context
         opening_orders = robot._build_opening_orders(context, self.client.last_price, now)
+
+        surviving_openings = opening_orders[1:]
+        filled_opening = opening_orders[0]
         self.client.limit_orders = [
             {
                 "side": order.side,
@@ -751,10 +754,27 @@ class TheHandsTests(unittest.TestCase):
                 "reduceOnly": False,
                 "status": "open",
             }
-            for order in opening_orders[:-1]
+            for order in surviving_openings
         ]
+        self.client.limit_orders.append(
+            {
+                "side": "sell" if filled_opening.side == "buy" else "buy",
+                "price": context.sell_prices[0],
+                "reduceOnly": True,
+                "status": "open",
+            }
+        )
 
-        self.assertFalse(robot._has_active_grid_orders(context, now))
+        self.assertTrue(robot._has_active_grid_orders(context, now))
+
+    def test_grid_robot_health_check_rejects_shifted_ladder_orders(self) -> None:
+        self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
+        now = datetime(2026, 4, 11, 10, 0, tzinfo=timezone.utc)
+        context = robot._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=int(now.timestamp() * 1000))
+        assert context is not None
+        robot._cached_context = context
+        opening_orders = robot._build_opening_orders(context, self.client.last_price, now)
 
         shifted_orders = [
             {
@@ -769,6 +789,66 @@ class TheHandsTests(unittest.TestCase):
         self.client.limit_orders = shifted_orders
 
         self.assertFalse(robot._has_active_grid_orders(context, now))
+
+    def test_grid_robot_run_holds_partial_grid_with_reduce_only_hedge_instead_of_regridding(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
+        self.client.ohlcv_by_timeframe["1h"] = []
+        for i in range(80):
+            ts = 60_000 + i * 3_600_000
+            self.client.ohlcv_by_timeframe["1h"].append([ts, 100.0, 105.0, 95.0, 100.0, 120.0])
+        now = datetime(2026, 4, 10, 3, 0, tzinfo=timezone.utc)
+        now_values = [now, now + timedelta(seconds=60)]
+        robot = GridRobot(
+            self.client,
+            self.database,
+            self.grid_config,
+            self.execution,
+            now_provider=lambda: now_values.pop(0),
+            market_oracle=None,
+            use_dynamic_range=False,
+        )
+
+        first = robot.run()
+        surviving_openings = self.client.limit_orders[1:]
+        self.client.limit_orders = list(surviving_openings)
+        self.client.limit_orders.append(
+            {
+                "symbol": "BTC/USDT",
+                "side": "sell",
+                "amount": self.execution.grid_order_size,
+                "price": surviving_openings[-1]["price"],
+                "reduce_only": True,
+                "reduceOnly": True,
+                "status": "open",
+            }
+        )
+
+        second = robot.run()
+
+        self.assertTrue(first.action.startswith("grid:placed_"))
+        self.assertTrue(second.action.startswith("grid:hold_existing_grid"))
+        self.assertEqual(len(self.client.cancel_all_calls), 1)
+
+    def test_grid_robot_logs_fetch_open_orders_failure_in_health_check(self) -> None:
+        self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
+        now = datetime(2026, 4, 11, 10, 0, tzinfo=timezone.utc)
+        context = robot._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=int(now.timestamp() * 1000))
+        assert context is not None
+        robot._cached_context = context
+
+        def boom(symbol: str):
+            raise RuntimeError(f"boom for {symbol}")
+
+        self.client.fetch_open_orders = boom
+        with self.assertLogs("market_adaptive.strategies.grid_robot", level="ERROR") as captured:
+            healthy = robot._has_active_grid_orders(context, now)
+
+        self.assertFalse(healthy)
+        log_output = "\n".join(captured.output)
+        self.assertIn("fetch_open_orders failed during grid health check", log_output)
+        self.assertIn("boom for BTC/USDT", log_output)
 
     def test_grid_robot_reduces_exposure_stepwise_instead_of_flattening(self) -> None:
         self.client.positions = [{"contracts": 0.12, "side": "long", "info": {"posSide": "long"}}]

@@ -618,9 +618,11 @@ class GridRobot(BaseStrategyRobot):
         try:
             orders = self.client.fetch_open_orders(self.symbol)
         except Exception:
-            orders = []
+            logger.exception("[grid_robot] fetch_open_orders failed during grid health check | symbol=%s", self.symbol)
+            return False
 
-        active = [order for order in orders if not bool(order.get("reduceOnly") or order.get("info", {}).get("reduceOnly"))]
+        active = [order for order in orders if not bool(order.get("reduceOnly") or order.get("reduce_only") or order.get("info", {}).get("reduceOnly"))]
+        reduce_only_orders = [order for order in orders if bool(order.get("reduceOnly") or order.get("reduce_only") or order.get("info", {}).get("reduceOnly"))]
         buy_orders = [order for order in active if str(order.get("side") or "").lower() == "buy"]
         sell_orders = [order for order in active if str(order.get("side") or "").lower() == "sell"]
         reference_context = self._cached_context or context
@@ -630,34 +632,38 @@ class GridRobot(BaseStrategyRobot):
 
         actual_buy_prices = [self._extract_order_price(order) for order in buy_orders]
         actual_sell_prices = [self._extract_order_price(order) for order in sell_orders]
-        all_prices = [price for price in actual_buy_prices + actual_sell_prices if price > 0]
-        within_bounds = bool(all_prices) and all(
+        all_opening_prices = [price for price in actual_buy_prices + actual_sell_prices if price > 0]
+        within_bounds = bool(all_opening_prices) and all(
             reference_context.lower_bound - 1e-9 <= price <= reference_context.upper_bound + 1e-9
-            for price in all_prices
+            for price in all_opening_prices
         )
         price_tolerance = self._grid_health_price_tolerance(reference_context)
         buy_missing, buy_unexpected = self._grid_price_mismatches(expected_buy_prices, actual_buy_prices, price_tolerance)
         sell_missing, sell_unexpected = self._grid_price_mismatches(expected_sell_prices, actual_sell_prices, price_tolerance)
 
         reasons: list[str] = []
-        if len(active) != expected_count:
-            reasons.append(f"count {len(active)}/{expected_count}")
-        if len(buy_orders) != len(expected_buy_prices):
-            reasons.append(f"buy {len(buy_orders)}/{len(expected_buy_prices)}")
-        if len(sell_orders) != len(expected_sell_prices):
-            reasons.append(f"sell {len(sell_orders)}/{len(expected_sell_prices)}")
+        if not active:
+            reasons.append("no_opening_orders")
         if not within_bounds:
             reasons.append("out_of_bounds")
-        if buy_missing or buy_unexpected:
-            reasons.append(f"buy_ladder missing={buy_missing} unexpected={buy_unexpected}")
-        if sell_missing or sell_unexpected:
-            reasons.append(f"sell_ladder missing={sell_missing} unexpected={sell_unexpected}")
+        if buy_unexpected:
+            reasons.append(f"buy_ladder unexpected={buy_unexpected}")
+        if sell_unexpected:
+            reasons.append(f"sell_ladder unexpected={sell_unexpected}")
 
-        logger.warning(
-            "[grid_robot] _has_active_grid_orders check: active=%d buy=%d sell=%d expected=%d bounds=[%.2f, %.2f] tol=%.8f reasons=%s",
+        missing_buy = buy_missing
+        missing_sell = sell_missing
+        if missing_buy or missing_sell:
+            reasons.append(f"partial_openings buy_missing={missing_buy} sell_missing={missing_sell}")
+
+        log_level = logging.INFO if not reasons or reasons == [f"partial_openings buy_missing={missing_buy} sell_missing={missing_sell}"] else logging.WARNING
+        logger.log(
+            log_level,
+            "[grid_robot] _has_active_grid_orders check: active=%d buy=%d sell=%d reduce_only=%d expected=%d bounds=[%.2f, %.2f] tol=%.8f reasons=%s",
             len(active),
             len(buy_orders),
             len(sell_orders),
+            len(reduce_only_orders),
             expected_count,
             reference_context.lower_bound,
             reference_context.upper_bound,
@@ -665,7 +671,8 @@ class GridRobot(BaseStrategyRobot):
             ", ".join(reasons) if reasons else "healthy",
         )
 
-        healthy = not reasons
+        only_partial_openings = reasons == [f"partial_openings buy_missing={missing_buy} sell_missing={missing_sell}"]
+        healthy = not reasons or only_partial_openings
         if healthy:
             self._last_healthy_grid_seen_at = now
             return True
@@ -801,7 +808,7 @@ class GridRobot(BaseStrategyRobot):
             filled = float(order.get("filled") or order.get("info", {}).get("fillSz") or 0.0)
             if status not in {"closed", "filled"} or filled <= 0:
                 continue
-            reduce_only = bool(order.get("reduceOnly") or order.get("info", {}).get("reduceOnly"))
+            reduce_only = bool(order.get("reduceOnly") or order.get("reduce_only") or order.get("info", {}).get("reduceOnly"))
             if reduce_only:
                 continue
             side = str(order.get("side") or "").lower()
