@@ -717,6 +717,59 @@ class TheHandsTests(unittest.TestCase):
         self.assertTrue(all(order["amount"] > self.execution.grid_order_size for order in reduce_only_buys))
         self.assertIn("rebalances=2", result.action)
 
+    def test_grid_robot_health_check_requires_complete_expected_ladder(self) -> None:
+        self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
+        now = datetime(2026, 4, 11, 10, 0, tzinfo=timezone.utc)
+        context = robot._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=int(now.timestamp() * 1000))
+        assert context is not None
+        robot._cached_context = context
+        self.client.limit_orders = [
+            {
+                "side": order.side,
+                "price": order.price,
+                "reduceOnly": False,
+                "status": "open",
+            }
+            for order in robot._build_opening_orders(context, self.client.last_price, now)
+        ]
+
+        self.assertTrue(robot._has_active_grid_orders(context, now))
+
+    def test_grid_robot_health_check_rejects_missing_or_shifted_ladder_orders(self) -> None:
+        self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
+        now = datetime(2026, 4, 11, 10, 0, tzinfo=timezone.utc)
+        context = robot._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=int(now.timestamp() * 1000))
+        assert context is not None
+        robot._cached_context = context
+        opening_orders = robot._build_opening_orders(context, self.client.last_price, now)
+        self.client.limit_orders = [
+            {
+                "side": order.side,
+                "price": order.price,
+                "reduceOnly": False,
+                "status": "open",
+            }
+            for order in opening_orders[:-1]
+        ]
+
+        self.assertFalse(robot._has_active_grid_orders(context, now))
+
+        shifted_orders = [
+            {
+                "side": order.side,
+                "price": order.price,
+                "reduceOnly": False,
+                "status": "open",
+            }
+            for order in opening_orders
+        ]
+        shifted_orders[0]["price"] = context.center_price - 0.01
+        self.client.limit_orders = shifted_orders
+
+        self.assertFalse(robot._has_active_grid_orders(context, now))
+
     def test_grid_robot_reduces_exposure_stepwise_instead_of_flattening(self) -> None:
         self.client.positions = [{"contracts": 0.12, "side": "long", "info": {"posSide": "long"}}]
         robot = GridRobot(self.client, self.database, self.grid_config, self.execution)

@@ -608,30 +608,113 @@ class GridRobot(BaseStrategyRobot):
         active = [order for order in orders if not bool(order.get("reduceOnly") or order.get("info", {}).get("reduceOnly"))]
         buy_orders = [order for order in active if str(order.get("side") or "").lower() == "buy"]
         sell_orders = [order for order in active if str(order.get("side") or "").lower() == "sell"]
-        expected_count = max(2, int(self.config.levels * 0.8))
         reference_context = self._cached_context or context
+        expected_buy_prices = [self._normalize_grid_price(price) for price in reference_context.buy_prices]
+        expected_sell_prices = [self._normalize_grid_price(price) for price in reference_context.sell_prices]
+        expected_count = len(expected_buy_prices) + len(expected_sell_prices)
 
-        def _price(order: dict) -> float:
-            value = order.get("price") or order.get("info", {}).get("px") or 0.0
-            return float(value or 0.0)
+        actual_buy_prices = [self._extract_order_price(order) for order in buy_orders]
+        actual_sell_prices = [self._extract_order_price(order) for order in sell_orders]
+        all_prices = [price for price in actual_buy_prices + actual_sell_prices if price > 0]
+        within_bounds = bool(all_prices) and all(
+            reference_context.lower_bound - 1e-9 <= price <= reference_context.upper_bound + 1e-9
+            for price in all_prices
+        )
+        price_tolerance = self._grid_health_price_tolerance(reference_context)
+        buy_missing, buy_unexpected = self._grid_price_mismatches(expected_buy_prices, actual_buy_prices, price_tolerance)
+        sell_missing, sell_unexpected = self._grid_price_mismatches(expected_sell_prices, actual_sell_prices, price_tolerance)
 
-        prices = [_price(order) for order in active if _price(order) > 0]
-        within_bounds = bool(prices) and min(prices) >= reference_context.lower_bound - 1e-9 and max(prices) <= reference_context.upper_bound + 1e-9
-        healthy = len(active) >= expected_count and bool(buy_orders) and bool(sell_orders) and within_bounds
+        reasons: list[str] = []
+        if len(active) != expected_count:
+            reasons.append(f"count {len(active)}/{expected_count}")
+        if len(buy_orders) != len(expected_buy_prices):
+            reasons.append(f"buy {len(buy_orders)}/{len(expected_buy_prices)}")
+        if len(sell_orders) != len(expected_sell_prices):
+            reasons.append(f"sell {len(sell_orders)}/{len(expected_sell_prices)}")
+        if not within_bounds:
+            reasons.append("out_of_bounds")
+        if buy_missing or buy_unexpected:
+            reasons.append(f"buy_ladder missing={buy_missing} unexpected={buy_unexpected}")
+        if sell_missing or sell_unexpected:
+            reasons.append(f"sell_ladder missing={sell_missing} unexpected={sell_unexpected}")
+
+        logger.warning(
+            "[grid_robot] _has_active_grid_orders check: active=%d buy=%d sell=%d expected=%d bounds=[%.2f, %.2f] tol=%.8f reasons=%s",
+            len(active),
+            len(buy_orders),
+            len(sell_orders),
+            expected_count,
+            reference_context.lower_bound,
+            reference_context.upper_bound,
+            price_tolerance,
+            ", ".join(reasons) if reasons else "healthy",
+        )
+
+        healthy = not reasons
         if healthy:
             self._last_healthy_grid_seen_at = now
             return True
 
         if self._last_healthy_grid_seen_at is not None and (now - self._last_healthy_grid_seen_at).total_seconds() <= 30:
             logger.info(
-                "Grid order snapshot looked incomplete (count=%s buy=%s sell=%s), reusing last healthy snapshot for 30s grace.",
-                len(active),
-                len(buy_orders),
-                len(sell_orders),
+                "Grid order snapshot failed health check (%s), reusing last healthy snapshot for 30s grace.",
+                ", ".join(reasons),
             )
             return True
 
         return False
+
+    def _extract_order_price(self, order: dict) -> float:
+        value = order.get("price") or order.get("info", {}).get("px") or 0.0
+        return self._normalize_grid_price(value)
+
+    def _normalize_grid_price(self, price: float) -> float:
+        raw_price = float(price or 0.0)
+        if raw_price <= 0:
+            return 0.0
+        if hasattr(self.client, "price_to_precision"):
+            try:
+                return float(self.client.price_to_precision(self.symbol, raw_price))
+            except Exception:
+                pass
+        return raw_price
+
+    def _grid_health_price_tolerance(self, context: GridContext) -> float:
+        expected_prices = sorted(
+            price
+            for price in [*context.buy_prices, *context.sell_prices]
+            if float(price or 0.0) > 0
+        )
+        if len(expected_prices) >= 2:
+            min_gap = min(
+                max(0.0, expected_prices[index + 1] - expected_prices[index])
+                for index in range(len(expected_prices) - 1)
+            )
+            if min_gap > 0:
+                return max(1e-8, min_gap * 0.35)
+        span = max(0.0, float(context.upper_bound) - float(context.lower_bound))
+        return max(1e-8, span / max(1, self.config.levels) * 0.35)
+
+    def _grid_price_mismatches(self, expected_prices: list[float], actual_prices: list[float], tolerance: float) -> tuple[int, int]:
+        remaining_actual = sorted(price for price in actual_prices if price > 0)
+        missing = 0
+
+        for expected in sorted(price for price in expected_prices if price > 0):
+            match_index = next(
+                (
+                    index
+                    for index, actual in enumerate(remaining_actual)
+                    if abs(actual - expected) <= tolerance
+                ),
+                None,
+            )
+            if match_index is None:
+                missing += 1
+                continue
+            remaining_actual.pop(match_index)
+
+        unexpected = len(remaining_actual)
+        return missing, unexpected
 
     def _oracle_allows_dynamic_grid(self) -> bool:
         if self.market_oracle is not None and hasattr(self.market_oracle, "current_higher_adx_trend"):
