@@ -388,7 +388,12 @@ class OKXClient:
     @staticmethod
     def _is_idempotent_setting_error(exc: Exception) -> bool:
         message = str(exc).lower()
-        return "no need" in message or "already" in message or "same" in message
+        return (
+            "no need" in message
+            or "already" in message
+            or "same" in message
+            or 'setmarginmode() params["lever"] should be between 1 and 125' in message
+        )
 
     def _is_hedged_mode(self) -> bool:
         if self._hedged_mode is not None:

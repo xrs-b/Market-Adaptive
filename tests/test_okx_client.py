@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 
+import ccxt
+
 from market_adaptive.clients.okx_client import OKXClient
 from market_adaptive.config import ExecutionConfig, OKXConfig
 
@@ -11,12 +13,15 @@ class MockExchange:
         self.margin_mode_calls = []
         self.leverage_calls = []
         self.order_book_calls = []
+        self.raise_on_set_margin_mode = None
 
     def set_sandbox_mode(self, enabled: bool) -> None:
         self.sandbox_mode = enabled
 
     def set_margin_mode(self, margin_mode: str, symbol: str) -> None:
         self.margin_mode_calls.append((margin_mode, symbol))
+        if self.raise_on_set_margin_mode is not None:
+            raise self.raise_on_set_margin_mode
 
     def set_leverage(self, leverage: int, symbol: str, params=None) -> None:
         self.leverage_calls.append((leverage, symbol, params or {}))
@@ -61,6 +66,23 @@ class OKXClientTests(unittest.TestCase):
         self.assertEqual(
             client.exchange.leverage_calls,
             [(5, "BTC/USDT:USDT", {"mgnMode": "cross"})],
+        )
+
+    def test_ensure_futures_settings_ignores_okx_margin_mode_lever_validation_and_still_sets_leverage(self) -> None:
+        client = DummyOKXClient(
+            OKXConfig(api_key="", api_secret="", passphrase="", default_type="swap"),
+            ExecutionConfig(td_mode="isolated"),
+        )
+        client.exchange.raise_on_set_margin_mode = ccxt.BadRequest(
+            'okx setMarginMode() params["lever"] should be between 1 and 125'
+        )
+
+        client.ensure_futures_settings("BTC/USDT", leverage=3, margin_mode="isolated")
+
+        self.assertEqual(client.exchange.margin_mode_calls, [("isolated", "BTC/USDT:USDT")])
+        self.assertEqual(
+            client.exchange.leverage_calls,
+            [(3, "BTC/USDT:USDT", {"mgnMode": "isolated"})],
         )
 
     def test_fetch_order_book_normalizes_swap_symbol(self) -> None:
