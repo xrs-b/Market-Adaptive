@@ -424,13 +424,27 @@ class CTARobot(BaseStrategyRobot):
             return 0.0
 
         if not hasattr(self.client, "fetch_total_equity"):
-            return float(self.execution_config.cta_order_size)
+            fallback_amount = float(self.execution_config.cta_order_size)
+            logger.info(
+                "CTA sizing fallback | symbol=%s reason=no_equity_api amount=%.8f price=%.2f",
+                self.symbol,
+                fallback_amount,
+                reference_price,
+            )
+            return fallback_amount
 
         try:
             equity = float(self.client.fetch_total_equity("USDT"))
         except Exception:
             logger.exception("CTA sizing failed to fetch account equity; falling back to configured order size")
-            return float(self.execution_config.cta_order_size)
+            fallback_amount = float(self.execution_config.cta_order_size)
+            logger.info(
+                "CTA sizing fallback | symbol=%s reason=equity_fetch_failed amount=%.8f price=%.2f",
+                self.symbol,
+                fallback_amount,
+                reference_price,
+            )
+            return fallback_amount
 
         target_notional = equity * target_margin * target_leverage
         if target_notional <= 0:
@@ -439,7 +453,18 @@ class CTARobot(BaseStrategyRobot):
         unit_notional = self.client.estimate_notional(self.symbol, 1.0, reference_price)
         if unit_notional <= 0:
             return 0.0
-        return target_notional / unit_notional
+        amount = target_notional / unit_notional
+        logger.info(
+            "CTA sizing | symbol=%s equity=%.4f margin_fraction=%.4f leverage=%.2f target_notional=%.4f ref_price=%.2f raw_amount=%.8f",
+            self.symbol,
+            equity,
+            target_margin,
+            target_leverage,
+            target_notional,
+            reference_price,
+            amount,
+        )
+        return amount
 
     def _place_entry_order(
         self,

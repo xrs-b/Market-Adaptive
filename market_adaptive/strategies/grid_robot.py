@@ -1100,19 +1100,46 @@ class GridRobot(BaseStrategyRobot):
         if reference_price <= 0:
             return 0.0
         if not hasattr(self.client, "fetch_total_equity"):
-            return float(self.execution_config.grid_order_size)
+            fallback_amount = float(self.execution_config.grid_order_size)
+            logger.info(
+                "Grid sizing fallback | symbol=%s reason=no_equity_api amount=%.8f price=%.2f",
+                self.symbol,
+                fallback_amount,
+                reference_price,
+            )
+            return fallback_amount
         try:
             equity = float(self.client.fetch_total_equity("USDT"))
         except Exception:
             logger.exception("Grid sizing failed to fetch account equity; falling back to configured order size")
-            return float(self.execution_config.grid_order_size)
+            fallback_amount = float(self.execution_config.grid_order_size)
+            logger.info(
+                "Grid sizing fallback | symbol=%s reason=equity_fetch_failed amount=%.8f price=%.2f",
+                self.symbol,
+                fallback_amount,
+                reference_price,
+            )
+            return fallback_amount
 
-        total_grid_notional = equity * max(0.0, float(self.config.equity_allocation_ratio))
+        allocation_ratio = max(0.0, float(self.config.equity_allocation_ratio))
+        total_grid_notional = equity * allocation_ratio
         per_level_notional = total_grid_notional / max(1, int(self.config.levels))
         unit_notional = self._estimate_notional(1.0, reference_price)
         if per_level_notional <= 0 or unit_notional <= 0:
             return 0.0
-        return per_level_notional / unit_notional
+        amount = per_level_notional / unit_notional
+        logger.info(
+            "Grid sizing | symbol=%s equity=%.4f allocation_ratio=%.4f levels=%d total_grid_notional=%.4f per_level_notional=%.4f ref_price=%.2f raw_amount=%.8f",
+            self.symbol,
+            equity,
+            allocation_ratio,
+            int(self.config.levels),
+            total_grid_notional,
+            per_level_notional,
+            reference_price,
+            amount,
+        )
+        return amount
 
     def _cancel_pending_grid_orders(self, orders: list[dict]) -> None:
         cancel_order = getattr(self.client, "cancel_order", None)
