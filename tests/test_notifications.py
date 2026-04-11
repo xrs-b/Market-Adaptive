@@ -161,6 +161,27 @@ class NotificationTests(unittest.TestCase):
 
         self.assertTrue(any(title == 'Strategy Cleanup' for title, _ in notifier.messages))
 
+    def test_grid_robot_notifies_on_flash_crash_trigger(self) -> None:
+        client = DummyClient()
+        notifier = self.notifier
+        db = self.database
+        db.insert_market_status(MarketStatusRecord('2026-04-10T00:00:00+00:00', 'BTC/USDT', 'sideways', 10.0, 0.01))
+        client.ohlcv_by_timeframe['1h'] = [
+            [1_700_000_000_000 + i * 3_600_000, 100.0, 105.0, 95.0, 100.0, 120.0]
+            for i in range(80)
+        ]
+        client.ohlcv_by_timeframe['1m'] = [
+            [1_700_000_000_000, 100.0, 100.1, 99.9, 100.0, 100.0],
+            [1_700_000_060_000, 100.0, 118.0, 98.0, 100.0, 120.0],
+        ]
+        robot = GridRobot(client, db, GridConfig(), ExecutionConfig(), notifier=notifier, market_oracle=None, use_dynamic_range=False)
+
+        result = robot.run()
+
+        self.assertEqual(result.action.split('|')[0], 'grid:flash_crash_triggered')
+        self.assertTrue(any(title == 'Grid Risk Alert' for title, _ in notifier.messages))
+        self.assertTrue(any('flash_crash_triggered' in body for _, body in notifier.messages))
+
 
 if __name__ == '__main__':
     unittest.main()

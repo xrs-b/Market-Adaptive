@@ -445,11 +445,21 @@ class GridRobot(BaseStrategyRobot):
             threshold,
             cooldown_seconds,
         )
-        return (
+        action = (
             f"grid:flash_crash_triggered|range_1m={one_minute_range:.2f}|atr={context.atr_value:.2f}"
             f"|threshold={threshold:.2f}|cooldown={cooldown_seconds}s|dynamic={str(self.use_dynamic_range).lower()}"
             f"|regrid=false|center={context.center_price:.2f}|bounds={context.lower_bound:.2f}-{context.upper_bound:.2f}"
         )
+        if self.notifier is not None:
+            self.notifier.send(
+                "Grid Risk Alert",
+                (
+                    f"symbol={self.symbol} | action=flash_crash_triggered | range_1m={one_minute_range:.2f} | "
+                    f"atr={context.atr_value:.2f} | threshold={threshold:.2f} | cooldown={cooldown_seconds}s | "
+                    f"center={context.center_price:.2f} | bounds={context.lower_bound:.2f}-{context.upper_bound:.2f}"
+                ),
+            )
+        return action
 
     def _latest_flash_crash_range(self, now: datetime) -> float:
         self._prune_price_window(now)
@@ -535,8 +545,12 @@ class GridRobot(BaseStrategyRobot):
                 pass
         timeframe = str(getattr(self.config, "atr_timeframe", "1h") or "1h")
         ohlcv = self.client.fetch_ohlcv(self.symbol, timeframe=timeframe, limit=max(self.config.atr_period * 4, 80))
+        if not ohlcv:
+            return 0.0
         frame = ohlcv_to_dataframe(ohlcv)
         atr_series = compute_atr(frame, length=self.config.atr_period)
+        if atr_series.empty:
+            return 0.0
         return float(atr_series.iloc[-1])
 
     def _should_regrid(self, context: GridContext, current_price: float) -> bool:
