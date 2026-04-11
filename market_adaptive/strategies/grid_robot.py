@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 from collections import defaultdict, deque
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import ceil, inf
 from typing import Callable
 
+from market_adaptive.clients.okx_ws_client import CCXTProUnavailableError, build_okx_websocket_client
 from market_adaptive.config import ExecutionConfig, GridConfig
-from market_adaptive.indicators import compute_bollinger_bands, ohlcv_to_dataframe
+from market_adaptive.indicators import compute_atr, compute_bollinger_bands, ohlcv_to_dataframe
 from market_adaptive.risk import GridRiskProfile
-from market_adaptive.strategies.base import BaseStrategyRobot
+from market_adaptive.strategies.base import BaseStrategyRobot, StrategyRunResult
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +27,8 @@ class GridContext:
     upper_bound: float
     buy_prices: list[float]
     sell_prices: list[float]
+    center_price: float = 0.0
+    atr_value: float = 0.0
 
 
 @dataclass
@@ -66,22 +72,103 @@ class GridRobot(BaseStrategyRobot):
         notifier=None,
         risk_manager=None,
         now_provider: Callable[[], datetime] | None = None,
+        market_oracle=None,
+        use_dynamic_range: bool | None = None,
+        atr_multiplier: float | None = None,
     ) -> None:
         super().__init__(client=client, database=database, symbol=config.symbol, notifier=notifier)
         self.config = config
         self.execution_config = execution_config
         self.risk_manager = risk_manager
+        self.market_oracle = market_oracle
+        self.use_dynamic_range = bool(config.use_dynamic_range if use_dynamic_range is None else use_dynamic_range)
+        self.atr_multiplier = float(config.atr_multiplier if atr_multiplier is None else atr_multiplier)
         self.now_provider = now_provider or (lambda: datetime.now(timezone.utc))
         self._cached_context: GridContext | None = None
         self._layer_triggers: dict[str, deque[datetime]] = defaultdict(deque)
         self._layer_cooldowns: dict[str, datetime] = {}
         self._layer_reference_prices: dict[str, float] = {}
-        self._spike_guard_until: datetime | None = None
+        self._flash_crash_until: datetime | None = None
+        self._halted = False
+        self._price_window: deque[tuple[datetime, float]] = deque()
+        self._ws_thread: threading.Thread | None = None
+        self._ws_loop: asyncio.AbstractEventLoop | None = None
+        self._ws_stop_event: asyncio.Event | None = None
 
     def should_notify_action(self, action: str) -> bool:
-        if action in {"grid:risk_blocked", "grid:insufficient_data", "grid:no_orders", "grid:spike_guard_cooldown"}:
+        if action in {
+            "grid:risk_blocked",
+            "grid:insufficient_data",
+            "grid:no_orders",
+            "grid:flash_crash_cooldown",
+            "grid:hold_existing_grid",
+            "grid:adx_trend_not_ready",
+            "grid:halted",
+        }:
             return False
         return super().should_notify_action(action)
+
+    def start_background_websocket(self) -> None:
+        if not bool(getattr(self.config, "websocket_order_sync_enabled", True)):
+            return
+        if self._ws_thread is not None and self._ws_thread.is_alive():
+            return
+
+        def runner() -> None:
+            loop = asyncio.new_event_loop()
+            self._ws_loop = loop
+            self._ws_stop_event = asyncio.Event()
+            asyncio.set_event_loop(loop)
+            with suppress(asyncio.CancelledError):
+                loop.run_until_complete(self._ws_main())
+            loop.close()
+            self._ws_loop = None
+            self._ws_stop_event = None
+
+        self._ws_thread = threading.Thread(target=runner, daemon=True, name="grid-ws")
+        self._ws_thread.start()
+
+    def stop_background_websocket(self, timeout: float = 5.0) -> None:
+        if self._ws_loop is not None and self._ws_stop_event is not None:
+            self._ws_loop.call_soon_threadsafe(self._ws_stop_event.set)
+        if self._ws_thread is not None:
+            self._ws_thread.join(timeout=timeout)
+            if not self._ws_thread.is_alive():
+                self._ws_thread = None
+
+    async def _ws_main(self) -> None:
+        try:
+            ticker_client = build_okx_websocket_client(self.client.config if hasattr(self.client, 'config') else self.market_oracle.client.config)
+            orders_client = build_okx_websocket_client(self.client.config if hasattr(self.client, 'config') else self.market_oracle.client.config)
+        except CCXTProUnavailableError as exc:
+            logger.warning("Grid websocket sync disabled: %s", exc)
+            return
+
+        try:
+            assert self._ws_stop_event is not None
+            while not self._ws_stop_event.is_set():
+                ticker_task = asyncio.create_task(ticker_client.watch_ticker(self.symbol))
+                orders_task = asyncio.create_task(orders_client.watch_orders(self.symbol))
+                stop_task = asyncio.create_task(self._ws_stop_event.wait())
+                done, pending = await asyncio.wait(
+                    {ticker_task, orders_task, stop_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                if stop_task in done:
+                    break
+                if ticker_task in done and not ticker_task.cancelled():
+                    with suppress(Exception):
+                        self._on_ws_ticker(ticker_task.result())
+                if orders_task in done and not orders_task.cancelled():
+                    with suppress(Exception):
+                        self._on_ws_orders(orders_task.result())
+        finally:
+            with suppress(Exception):
+                await ticker_client.close()
+            with suppress(Exception):
+                await orders_client.close()
 
     def flatten_and_cancel_all(self, reason: str) -> None:
         coordinated_result = None
@@ -134,29 +221,43 @@ class GridRobot(BaseStrategyRobot):
     def execute_active_cycle(self) -> str:
         now = self.now_provider().astimezone(timezone.utc)
         self._ensure_futures_settings()
-        current_price = self.client.fetch_last_price(self.symbol)
+        current_price = float(self.client.fetch_last_price(self.symbol))
+        self._push_price_point(now, current_price)
 
-        if self._spike_guard_active(now):
+        if self._halted:
+            return "grid:halted"
+        if not self._oracle_allows_dynamic_grid():
+            return "grid:adx_trend_not_ready"
+        if self._flash_crash_active(now):
             self.client.cancel_all_orders(self.symbol)
             self._publish_grid_risk(None)
-            remaining_seconds = max(0, int((self._spike_guard_until - now).total_seconds())) if self._spike_guard_until else 0
-            logger.warning(
-                "Grid spike guard cooldown | symbol=%s remaining=%ss",
-                self.symbol,
-                remaining_seconds,
-            )
-            return f"grid:spike_guard_cooldown|remaining={remaining_seconds}s"
+            remaining_seconds = max(0, int((self._flash_crash_until - now).total_seconds())) if self._flash_crash_until else 0
+            logger.warning("Grid flash crash cooldown | symbol=%s remaining=%ss", self.symbol, remaining_seconds)
+            return f"grid:flash_crash_cooldown|remaining={remaining_seconds}s"
 
-        self.client.cancel_all_orders(self.symbol)
-        context = self._refresh_grid_context(current_price)
+        context = self._refresh_grid_context(current_price, anchor_timestamp_ms=int(now.timestamp() * 1000))
         if context is None:
             self._publish_grid_risk(None)
             return "grid:insufficient_data"
 
-        spike_guard_action = self._apply_spike_guard(context, now)
-        if spike_guard_action is not None:
+        if self._hard_stop_triggered(current_price, context):
+            self.client.cancel_all_orders(self.symbol)
+            self.client.close_all_positions(self.symbol)
+            self._halted = True
             self._publish_grid_risk(None)
-            return spike_guard_action
+            logger.error(
+                "Grid hard stop triggered | symbol=%s price=%.2f bounds=%.2f-%.2f",
+                self.symbol,
+                current_price,
+                context.lower_bound,
+                context.upper_bound,
+            )
+            return "grid:hard_stop_triggered"
+
+        flash_crash_action = self._apply_flash_crash_guard(context, now)
+        if flash_crash_action is not None:
+            self._publish_grid_risk(None)
+            return flash_crash_action
 
         self._publish_grid_risk(context)
         allow_new_openings = True
@@ -168,6 +269,14 @@ class GridRobot(BaseStrategyRobot):
                 strategy_name=self.strategy_name,
             )
 
+        needs_regrid = self._should_regrid(context, current_price)
+        if not needs_regrid and self._has_active_grid_orders():
+            return (
+                f"grid:hold_existing_grid|center={context.center_price:.2f}|atr={context.atr_value:.2f}|"
+                f"bounds={context.lower_bound:.2f}-{context.upper_bound:.2f}"
+            )
+
+        self.client.cancel_all_orders(self.symbol)
         net_position_size = self._fetch_net_position_size()
         opening_orders = self._build_opening_orders(context, current_price, now)
         rebalance_orders = self._build_rebalance_orders(context, net_position_size)
@@ -184,6 +293,8 @@ class GridRobot(BaseStrategyRobot):
                 continue
             if not allow_new_openings:
                 continue
+            if not self._directional_opening_allowed(order.side, order.price, order.amount):
+                continue
             if self._try_place_limit_order(order, reserved_notional=reserved_notional):
                 placed_orders += 1
                 opening_orders_placed += 1
@@ -199,11 +310,14 @@ class GridRobot(BaseStrategyRobot):
                 return "grid:risk_blocked"
             return "grid:no_orders"
 
+        self._cached_context = context
         action_parts = [
             f"grid:placed_{placed_orders}_orders@{current_price:.2f}",
             f"openings={opening_orders_placed}",
             f"rebalances={rebalance_orders_placed}",
             f"cooldown={cooled_layers}",
+            f"atr={context.atr_value:.2f}",
+            f"dynamic={str(self.use_dynamic_range).lower()}",
             f"bounds={context.lower_bound:.2f}-{context.upper_bound:.2f}",
         ]
         if risk_blocked_reason is not None:
@@ -287,101 +401,89 @@ class GridRobot(BaseStrategyRobot):
                 margin_mode=self.execution_config.td_mode,
             )
 
-    def _spike_guard_active(self, now: datetime) -> bool:
-        if self._spike_guard_until is None:
+    def _flash_crash_active(self, now: datetime) -> bool:
+        if self._flash_crash_until is None:
             return False
-        if now >= self._spike_guard_until:
-            self._spike_guard_until = None
+        if now >= self._flash_crash_until:
+            self._flash_crash_until = None
             return False
         return True
 
-    def _apply_spike_guard(self, context: GridContext, now: datetime) -> str | None:
-        if not bool(getattr(self.config, "spike_guard_enabled", True)):
+    def _apply_flash_crash_guard(self, context: GridContext, now: datetime) -> str | None:
+        if not bool(getattr(self.config, "flash_crash_enabled", True)):
             return None
-
-        one_minute_range = self._latest_spike_guard_range()
-        if one_minute_range is None:
-            return None
-
-        grid_range = max(0.0, float(context.upper_bound) - float(context.lower_bound))
-        trigger_ratio = max(0.0, float(getattr(self.config, "spike_guard_trigger_ratio", 0.50)))
-        trigger_distance = grid_range * trigger_ratio
-        if grid_range <= 0 or one_minute_range < trigger_distance:
-            return None
-
-        pause_seconds = max(1, int(getattr(self.config, "spike_guard_pause_seconds", 10)))
-        self._spike_guard_until = now + timedelta(seconds=pause_seconds)
-        self.client.cancel_all_orders(self.symbol)
+        one_minute_range = self._latest_flash_crash_range(now)
+        atr_multiplier = float(getattr(self.config, "flash_crash_atr_multiplier", 1.5))
+        threshold = float(context.atr_value) * atr_multiplier
         logger.warning(
-            "Grid spike guard triggered | symbol=%s range_1m=%.2f grid_range=%.2f threshold=%.2f pause=%ss",
+            "Grid flash crash check | symbol=%s range_1m=%.2f atr=%.2f threshold=%.2f",
             self.symbol,
             one_minute_range,
-            grid_range,
-            trigger_distance,
-            pause_seconds,
+            context.atr_value,
+            threshold,
+        )
+        if one_minute_range <= 0 or threshold <= 0 or one_minute_range < threshold:
+            return None
+        cooldown_seconds = max(1, int(getattr(self.config, "flash_crash_cooldown_seconds", 300)))
+        self._flash_crash_until = now + timedelta(seconds=cooldown_seconds)
+        self.client.cancel_all_orders(self.symbol)
+        logger.error(
+            "Grid flash crash protection triggered | symbol=%s range_1m=%.2f atr=%.2f threshold=%.2f cooldown=%ss",
+            self.symbol,
+            one_minute_range,
+            context.atr_value,
+            threshold,
+            cooldown_seconds,
         )
         return (
-            f"grid:spike_guard_triggered|range_1m={one_minute_range:.2f}"
-            f"|grid_range={grid_range:.2f}|threshold={trigger_distance:.2f}|pause={pause_seconds}s"
+            f"grid:flash_crash_triggered|range_1m={one_minute_range:.2f}|atr={context.atr_value:.2f}"
+            f"|threshold={threshold:.2f}|cooldown={cooldown_seconds}s"
         )
 
-    def _latest_spike_guard_range(self) -> float | None:
-        timeframe = str(getattr(self.config, "spike_guard_timeframe", "1m") or "1m")
-        ohlcv = self.client.fetch_ohlcv(
-            symbol=self.symbol,
-            timeframe=timeframe,
-            limit=3,
-        )
+    def _latest_flash_crash_range(self, now: datetime) -> float:
+        self._prune_price_window(now)
+        observed_range = self._window_range()
+        if observed_range > 0:
+            return observed_range
+        timeframe = str(getattr(self.config, "flash_crash_timeframe", "1m") or "1m")
+        ohlcv = self.client.fetch_ohlcv(symbol=self.symbol, timeframe=timeframe, limit=3)
         if not ohlcv:
-            return None
+            return 0.0
         latest = ohlcv[-1]
         if len(latest) < 4:
-            return None
-        high = float(latest[2])
-        low = float(latest[3])
-        return max(0.0, high - low)
+            return 0.0
+        return max(0.0, float(latest[2]) - float(latest[3]))
 
-    def _refresh_grid_context(self, current_price: float) -> GridContext | None:
-        ohlcv = self.client.fetch_ohlcv(
-            symbol=self.symbol,
-            timeframe=self.config.timeframe,
-            limit=self.config.lookback_limit,
-        )
-        minimum_bars = max(self.config.bollinger_period + 2, 22)
-        if len(ohlcv) < minimum_bars:
-            return self._fallback_context(current_price)
+    def _refresh_grid_context(self, current_price: float, anchor_timestamp_ms: int | None = None) -> GridContext | None:
+        atr_value = self._resolve_atr_value()
+        anchor_timestamp_ms = int(anchor_timestamp_ms if anchor_timestamp_ms is not None else self.now_provider().timestamp() * 1000)
 
-        anchor_timestamp_ms = int(ohlcv[-1][0])
+        if self.use_dynamic_range and atr_value > 0:
+            lower_bound = current_price - self.atr_multiplier * atr_value
+            upper_bound = current_price + self.atr_multiplier * atr_value
+            center_price = current_price
+        else:
+            lower_bound, upper_bound = self._resolve_active_bounds(current_price=current_price)
+            center_price = current_price
 
-        frame = ohlcv_to_dataframe(ohlcv)
-        bands = compute_bollinger_bands(frame, length=self.config.bollinger_period, std=self.config.bollinger_std)
-        latest = bands.iloc[-1]
-        lower_bound = float(latest["lower"])
-        middle_band = float(latest["basis"])
-        upper_bound = float(latest["upper"])
+        if lower_bound <= 0 or upper_bound <= 0 or lower_bound >= upper_bound:
+            return self._fallback_context(current_price, atr_value)
 
-        if lower_bound <= 0 or middle_band <= 0 or upper_bound <= 0 or not (lower_bound < middle_band < upper_bound):
-            return self._fallback_context(current_price)
-
-        active_lower_bound, active_upper_bound = self._resolve_active_bounds(
-            current_price=current_price,
-            bollinger_lower=lower_bound,
-            bollinger_upper=upper_bound,
-        )
-        buy_prices, sell_prices = self._derive_layer_prices(active_lower_bound, current_price, active_upper_bound)
+        buy_prices, sell_prices = self._derive_layer_prices(lower_bound, center_price, upper_bound)
         context = GridContext(
             anchor_timestamp_ms=anchor_timestamp_ms,
-            lower_bound=active_lower_bound,
-            middle_band=current_price,
-            upper_bound=active_upper_bound,
+            lower_bound=lower_bound,
+            middle_band=center_price,
+            upper_bound=upper_bound,
             buy_prices=buy_prices,
             sell_prices=sell_prices,
+            center_price=center_price,
+            atr_value=atr_value,
         )
-        self._cached_context = context
         self._prune_layer_state(anchor_timestamp_ms)
         return context
 
-    def _fallback_context(self, current_price: float) -> GridContext:
+    def _fallback_context(self, current_price: float, atr_value: float = 0.0) -> GridContext:
         lower_bound, upper_bound = self._resolve_active_bounds(current_price=current_price)
         buy_prices, sell_prices = self._derive_layer_prices(lower_bound, current_price, upper_bound)
         return GridContext(
@@ -391,6 +493,8 @@ class GridRobot(BaseStrategyRobot):
             upper_bound=upper_bound,
             buy_prices=buy_prices,
             sell_prices=sell_prices,
+            center_price=current_price,
+            atr_value=atr_value,
         )
 
     def _resolve_active_bounds(
@@ -411,6 +515,140 @@ class GridRobot(BaseStrategyRobot):
         if upper_bound <= current_price:
             upper_bound = price_ceiling
         return lower_bound, upper_bound
+
+    def _resolve_atr_value(self) -> float:
+        if self.market_oracle is not None and hasattr(self.market_oracle, "get_hourly_atr"):
+            try:
+                return float(self.market_oracle.get_hourly_atr(self.symbol))
+            except Exception:
+                pass
+        timeframe = str(getattr(self.config, "atr_timeframe", "1h") or "1h")
+        ohlcv = self.client.fetch_ohlcv(self.symbol, timeframe=timeframe, limit=max(self.config.atr_period * 4, 80))
+        frame = ohlcv_to_dataframe(ohlcv)
+        atr_series = compute_atr(frame, length=self.config.atr_period)
+        return float(atr_series.iloc[-1])
+
+    def _should_regrid(self, context: GridContext, current_price: float) -> bool:
+        previous = self._cached_context
+        if previous is None:
+            return True
+        if previous.center_price <= 0:
+            return True
+        if abs(previous.atr_value - context.atr_value) > 1e-9:
+            return True
+        trigger_ratio = float(getattr(self.config, "regrid_trigger_atr_ratio", 0.50))
+        trigger_distance = max(0.0, context.atr_value * trigger_ratio)
+        if trigger_distance <= 0:
+            trigger_distance = abs(previous.center_price) * 0.001
+        return abs(current_price - previous.center_price) >= trigger_distance
+
+    def _has_active_grid_orders(self) -> bool:
+        if not hasattr(self.client, "fetch_open_orders"):
+            return False
+        try:
+            orders = self.client.fetch_open_orders(self.symbol)
+        except Exception:
+            return False
+        return any(not bool(order.get("reduceOnly") or order.get("info", {}).get("reduceOnly")) for order in orders)
+
+    def _oracle_allows_dynamic_grid(self) -> bool:
+        if self.market_oracle is not None and hasattr(self.market_oracle, "current_higher_adx_trend"):
+            try:
+                return self.market_oracle.current_higher_adx_trend() in {"flat", "falling"}
+            except Exception:
+                return True
+        return True
+
+    def _hard_stop_triggered(self, current_price: float, context: GridContext) -> bool:
+        buffer_ratio = float(getattr(self.config, "hard_stop_buffer_ratio", 0.01))
+        lower_stop = context.lower_bound * (1.0 - buffer_ratio)
+        upper_stop = context.upper_bound * (1.0 + buffer_ratio)
+        return current_price <= lower_stop or current_price >= upper_stop
+
+    def _directional_opening_allowed(self, side: str, price: float, amount: float) -> bool:
+        max_ratio = float(getattr(self.config, "max_directional_exposure_ratio", 0.50))
+        if max_ratio <= 0 or not hasattr(self.client, "fetch_total_equity"):
+            return True
+        try:
+            equity = float(self.client.fetch_total_equity("USDT"))
+        except Exception:
+            return True
+        if equity <= 0:
+            return True
+        long_notional = 0.0
+        short_notional = 0.0
+        for position in self.client.fetch_positions([self.symbol]) or []:
+            notional = self._position_notional(position)
+            position_side = str(position.get("side") or position.get("info", {}).get("posSide") or "").lower()
+            if position_side == "short":
+                short_notional += notional
+            else:
+                long_notional += notional
+        requested = self._estimate_notional(amount, price)
+        current = long_notional if side == "buy" else short_notional
+        return current + requested <= equity * max_ratio + 1e-12
+
+    def _push_price_point(self, now: datetime, current_price: float) -> None:
+        self._price_window.append((now, float(current_price)))
+        self._prune_price_window(now)
+
+    def _prune_price_window(self, now: datetime) -> None:
+        window = timedelta(seconds=60)
+        while self._price_window and now - self._price_window[0][0] > window:
+            self._price_window.popleft()
+
+    def _window_range(self) -> float:
+        if not self._price_window:
+            return 0.0
+        prices = [price for _, price in self._price_window]
+        return max(prices) - min(prices)
+
+    def _on_ws_ticker(self, payload: dict) -> None:
+        mark = payload.get("mark") or payload.get("last") or payload.get("close") or payload.get("info", {}).get("markPx")
+        if mark in (None, ""):
+            return
+        now = self.now_provider().astimezone(timezone.utc)
+        self._push_price_point(now, float(mark))
+
+    def _on_ws_orders(self, payload: list[dict] | dict) -> None:
+        events = payload if isinstance(payload, list) else [payload]
+        context = self._cached_context
+        if context is None or context.atr_value <= 0:
+            return
+        step_size = max(1e-12, (context.upper_bound - context.lower_bound) / max(1, self.config.levels))
+        for order in events:
+            status = str(order.get("status") or order.get("info", {}).get("state") or "").lower()
+            filled = float(order.get("filled") or order.get("info", {}).get("fillSz") or 0.0)
+            if status not in {"closed", "filled"} or filled <= 0:
+                continue
+            reduce_only = bool(order.get("reduceOnly") or order.get("info", {}).get("reduceOnly"))
+            if reduce_only:
+                continue
+            side = str(order.get("side") or "").lower()
+            fill_price = float(order.get("average") or order.get("price") or order.get("info", {}).get("fillPx") or 0.0)
+            if side not in {"buy", "sell"} or fill_price <= 0:
+                continue
+            counter_side = "sell" if side == "buy" else "buy"
+            counter_price = fill_price + step_size if side == "buy" else fill_price - step_size
+            counter_price = self.client.price_to_precision(self.symbol, counter_price)
+            counter_amount = self._normalize_amount(filled)
+            if counter_price <= 0 or counter_amount <= 0:
+                continue
+            self.client.place_limit_order(
+                self.symbol,
+                counter_side,
+                counter_amount,
+                counter_price,
+                reduce_only=True,
+            )
+            logger.info(
+                "Grid websocket hedge order | fill_side=%s fill_price=%.2f counter_side=%s counter_price=%.2f amount=%.8f",
+                side,
+                fill_price,
+                counter_side,
+                counter_price,
+                counter_amount,
+            )
 
     def _derive_layer_prices(self, lower_bound: float, anchor_price: float, upper_bound: float) -> tuple[list[float], list[float]]:
         buy_levels = max(1, self.config.levels // 2)

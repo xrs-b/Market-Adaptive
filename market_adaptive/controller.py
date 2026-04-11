@@ -58,7 +58,14 @@ class MainController:
             notifier=self.notifier,
             sentiment_analyst=self.sentiment_analyst,
         )
-        self.grid_robot = GridRobot(self.grid_client, database, config.grid, config.execution, notifier=self.notifier)
+        self.grid_robot = GridRobot(
+            self.grid_client,
+            database,
+            config.grid,
+            config.execution,
+            notifier=self.notifier,
+            market_oracle=self.market_oracle,
+        )
         self.risk_control = RiskControlManager(
             config=config.risk_control,
             runtime_config=config.runtime,

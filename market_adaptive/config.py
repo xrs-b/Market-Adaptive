@@ -215,12 +215,20 @@ class GridConfig:
     max_rebalance_orders: int = 2
     rebalance_threshold_ratio: float = 0.65  # legacy compatibility
     polling_interval_seconds: int = 60
-    range_percent: float = 0.03  # neutral grid orders stay within current price ±3%
+    range_percent: float = 0.03  # fixed fallback range: current price ±3%
     liquidation_protection_ratio: float = 0.05
-    spike_guard_enabled: bool = True
-    spike_guard_timeframe: str = "1m"
-    spike_guard_trigger_ratio: float = 0.50
-    spike_guard_pause_seconds: int = 10
+    use_dynamic_range: bool = True
+    atr_timeframe: str = "1h"
+    atr_period: int = 14
+    atr_multiplier: float = 2.5
+    regrid_trigger_atr_ratio: float = 0.50
+    flash_crash_enabled: bool = True
+    flash_crash_timeframe: str = "1m"
+    flash_crash_atr_multiplier: float = 1.5
+    flash_crash_cooldown_seconds: int = 300
+    hard_stop_buffer_ratio: float = 0.01
+    max_directional_exposure_ratio: float = 0.50
+    websocket_order_sync_enabled: bool = True
 
 
 @dataclass
@@ -413,10 +421,18 @@ def load_config(config_path: str | Path) -> AppConfig:
         polling_interval_seconds=int(grid_payload.get("polling_interval_seconds", 60)),
         range_percent=float(grid_payload.get("price_band_ratio", grid_payload.get("range_percent", 0.03))),
         liquidation_protection_ratio=float(grid_payload.get("liquidation_protection_ratio", 0.05)),
-        spike_guard_enabled=bool(grid_payload.get("spike_guard_enabled", True)),
-        spike_guard_timeframe=str(grid_payload.get("spike_guard_timeframe", "1m")),
-        spike_guard_trigger_ratio=float(grid_payload.get("spike_guard_trigger_ratio", 0.50)),
-        spike_guard_pause_seconds=int(grid_payload.get("spike_guard_pause_seconds", 10)),
+        use_dynamic_range=bool(grid_payload.get("use_dynamic_range", True)),
+        atr_timeframe=str(grid_payload.get("atr_timeframe", "1h")),
+        atr_period=int(grid_payload.get("atr_period", 14)),
+        atr_multiplier=float(grid_payload.get("atr_multiplier", 2.5)),
+        regrid_trigger_atr_ratio=float(grid_payload.get("regrid_trigger_atr_ratio", 0.50)),
+        flash_crash_enabled=bool(grid_payload.get("flash_crash_enabled", True)),
+        flash_crash_timeframe=str(grid_payload.get("flash_crash_timeframe", "1m")),
+        flash_crash_atr_multiplier=float(grid_payload.get("flash_crash_atr_multiplier", 1.5)),
+        flash_crash_cooldown_seconds=int(grid_payload.get("flash_crash_cooldown_seconds", 300)),
+        hard_stop_buffer_ratio=float(grid_payload.get("hard_stop_buffer_ratio", 0.01)),
+        max_directional_exposure_ratio=float(grid_payload.get("max_directional_exposure_ratio", 0.50)),
+        websocket_order_sync_enabled=bool(grid_payload.get("websocket_order_sync_enabled", True)),
     )
     return AppConfig(
         okx=okx,

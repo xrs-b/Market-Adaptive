@@ -11,7 +11,7 @@ import ccxt
 from market_adaptive.clients.okx_client import OKXClient
 from market_adaptive.config import MarketOracleConfig
 from market_adaptive.db import DatabaseInitializer, MarketStatusRecord
-from market_adaptive.indicators import IndicatorSnapshot, compute_indicator_snapshot
+from market_adaptive.indicators import IndicatorSnapshot, compute_atr, compute_indicator_snapshot, ohlcv_to_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +147,24 @@ class MarketOracle:
         if previous is None or previous.status != record.status:
             self._notify_status_change(previous.status if previous else None, record)
         return record
+
+    def get_hourly_atr(self, symbol: str | None = None) -> float:
+        target_symbol = symbol or self.config.symbol
+        ohlcv = self.client.fetch_ohlcv(
+            symbol=target_symbol,
+            timeframe=self.config.higher_timeframe,
+            limit=max(self.config.adx_length * 4, 80),
+        )
+        frame = ohlcv_to_dataframe(ohlcv)
+        atr_series = compute_atr(frame, length=self.config.adx_length)
+        return float(atr_series.iloc[-1])
+
+    def current_higher_adx_trend(self) -> str:
+        if self._last_snapshot is None:
+            snapshot = self.collect_market_snapshot()
+            self._last_snapshot = snapshot
+        assert self._last_snapshot is not None
+        return self._last_snapshot.higher.adx_trend_label
 
     def run_forever(self) -> None:
         logger.info(

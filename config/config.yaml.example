@@ -122,7 +122,7 @@ grid:
   bollinger_length: 20
   bollinger_std: 2.0
   levels: 10
-  leverage: 3  # 可选: 3 / 5
+  leverage: 3
   martingale_factor: 1.25
   layer_trigger_window_seconds: 300
   layer_trigger_limit: 3
@@ -132,7 +132,15 @@ grid:
   polling_interval_seconds: 60
   price_band_ratio: 0.03
   liquidation_protection_ratio: 0.05
-  spike_guard_enabled: true
-  spike_guard_timeframe: "1m"
-  spike_guard_trigger_ratio: 0.50
-  spike_guard_pause_seconds: 10
+  use_dynamic_range: true
+  atr_timeframe: "1h"
+  atr_period: 14
+  atr_multiplier: 2.5
+  regrid_trigger_atr_ratio: 0.50
+  flash_crash_enabled: true
+  flash_crash_timeframe: "1m"
+  flash_crash_atr_multiplier: 1.5
+  flash_crash_cooldown_seconds: 300
+  hard_stop_buffer_ratio: 0.01
+  max_directional_exposure_ratio: 0.50
+  websocket_order_sync_enabled: true
