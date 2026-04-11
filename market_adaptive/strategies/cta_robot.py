@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 
 from market_adaptive.config import CTAConfig, ExecutionConfig
@@ -16,6 +18,8 @@ from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies.base import BaseStrategyRobot
 from market_adaptive.strategies.mtf_engine import MTFSignal, MultiTimeframeSignalEngine
 from market_adaptive.strategies.order_flow_sentinel import OrderFlowAssessment, OrderFlowSentinel
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -118,6 +122,7 @@ class CTARobot(BaseStrategyRobot):
         self.position: ManagedPosition | None = None
         self.mtf_engine = MultiTimeframeSignalEngine(client, config)
         self.order_flow_sentinel = OrderFlowSentinel(client, config)
+        self._last_signal_heartbeat_at = 0.0
 
     def should_notify_action(self, action: str) -> bool:
         if action in {
@@ -170,6 +175,8 @@ class CTARobot(BaseStrategyRobot):
         if signal is None:
             self._publish_risk_profile(None)
             return "cta:insufficient_data"
+
+        self._maybe_log_signal_heartbeat(signal)
 
         actions: list[str] = []
         closed_position = False
@@ -270,6 +277,39 @@ class CTARobot(BaseStrategyRobot):
             atr=float(atr_series.iloc[-1]),
             risk_percent=self._resolve_risk_percent(mtf_signal),
         )
+
+    def _build_signal_heartbeat_payload(self, signal: TrendSignal) -> dict[str, float | str | bool]:
+        obv = signal.obv_confirmation
+        return {
+            "symbol": self.symbol,
+            "bullish_ready": bool(signal.bullish_ready),
+            "raw_direction": int(signal.raw_direction),
+            "direction": int(signal.direction),
+            "execution_trigger_reason": str(signal.execution_trigger_reason),
+            "obv_current": float(obv.current_obv),
+            "obv_sma": float(obv.sma_value),
+            "obv_above_sma": bool(obv.above_sma),
+            "obv_increment": float(obv.increment_value),
+            "obv_increment_mean": float(obv.increment_mean),
+            "obv_increment_std": float(obv.increment_std),
+            "obv_zscore": float(obv.zscore),
+            "obv_zscore_threshold": float(self.config.obv_zscore_threshold),
+            "obv_zscore_gap": float(obv.zscore - float(self.config.obv_zscore_threshold)),
+            "obv_confirmation_passed": bool(signal.obv_confirmation_passed),
+            "long_setup_reason": str(signal.long_setup_reason),
+            "price": float(signal.price),
+            "atr": float(signal.atr),
+        }
+
+    def _maybe_log_signal_heartbeat(self, signal: TrendSignal) -> None:
+        interval = float(getattr(self.config, "heartbeat_interval_seconds", 300.0) or 0.0)
+        if interval <= 0:
+            return
+        now = time.time()
+        if now - float(self._last_signal_heartbeat_at) < interval:
+            return
+        self._last_signal_heartbeat_at = now
+        logger.info("CTA signal heartbeat | %s", self._build_signal_heartbeat_payload(signal))
 
     def _open_position(self, signal: TrendSignal) -> str:
         side = "buy" if signal.direction > 0 else "sell"

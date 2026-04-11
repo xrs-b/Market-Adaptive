@@ -75,7 +75,7 @@ class NotificationTests(unittest.TestCase):
         lower_closes = []
         base_price = lower_last_close - 8.0
         pattern = [0.0, 0.4, -0.3, 0.5, -0.2, 0.3, -0.1, 0.2]
-        for index in range(52):
+        for index in range(112):
             lower_closes.append(base_price + pattern[index % len(pattern)])
         lower_closes.extend(
             [
@@ -91,10 +91,14 @@ class NotificationTests(unittest.TestCase):
         )
         higher_closes = [140 - 1.0 * (59 - index) for index in range(60)]
         major_closes = [220 - 2.0 * (59 - index) for index in range(60)]
-        client.ohlcv_by_timeframe["15m"] = [
-            [base + index * 900_000, close - 0.3, close + 0.4, close - 0.5, close, 100 + index * 3]
-            for index, close in enumerate(lower_closes)
-        ]
+        client.ohlcv_by_timeframe["15m"] = []
+        for index, close in enumerate(lower_closes):
+            volume = 100 + index * 3
+            if index >= len(lower_closes) - 4:
+                volume *= 8
+            client.ohlcv_by_timeframe["15m"].append(
+                [base + index * 900_000, close - 0.3, close + 0.4, close - 0.5, close, volume]
+            )
         client.ohlcv_by_timeframe["1h"] = [
             [base + index * 3_600_000, close - 0.5, close + 0.8, close - 0.7, close, 200 + index * 5]
             for index, close in enumerate(higher_closes)

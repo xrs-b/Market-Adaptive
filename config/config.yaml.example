@@ -112,6 +112,7 @@ cta:
   order_flow_high_conviction_ratio: 2.0
   order_flow_limit_buffer_bps: 3.0
   order_flow_max_slippage_bps: 12.0
+  heartbeat_interval_seconds: 300.0
   polling_interval_seconds: 60
   # 兼容旧配置，留空即可
   timeframe: "15m"
