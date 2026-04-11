@@ -14,6 +14,10 @@ except ImportError:  # pragma: no cover - optional dependency fallback
 @dataclass
 class IndicatorSnapshot:
     adx_value: float
+    adx_previous: float
+    adx_pre_previous: float
+    plus_di_value: float
+    minus_di_value: float
     bb_width: float
     bb_width_previous: float
     volatility: float
@@ -21,6 +25,22 @@ class IndicatorSnapshot:
     @property
     def bb_width_expanding(self) -> bool:
         return self.bb_width > self.bb_width_previous
+
+    @property
+    def di_gap(self) -> float:
+        return abs(self.plus_di_value - self.minus_di_value)
+
+    @property
+    def adx_rising(self) -> bool:
+        return self.adx_value > self.adx_previous > self.adx_pre_previous
+
+    @property
+    def adx_trend_label(self) -> str:
+        if self.adx_rising:
+            return "rising"
+        if self.adx_value < self.adx_previous < self.adx_pre_previous:
+            return "falling"
+        return "flat"
 
 
 @dataclass
@@ -216,10 +236,9 @@ def compute_supertrend(frame: pd.DataFrame, length: int = 10, multiplier: float 
     )
 
 
-def _manual_adx(frame: pd.DataFrame, length: int) -> pd.Series:
+def _manual_dmi(frame: pd.DataFrame, length: int) -> pd.DataFrame:
     high = frame["high"]
     low = frame["low"]
-    close = frame["close"]
 
     up_move = high.diff()
     down_move = -low.diff()
@@ -227,23 +246,45 @@ def _manual_adx(frame: pd.DataFrame, length: int) -> pd.Series:
     plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
     minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
 
-    atr = _manual_atr(frame, length)
+    atr = _manual_atr(frame, length).replace(0.0, float("nan"))
 
-    plus_di = 100 * plus_dm.ewm(alpha=1 / length, adjust=False).mean() / atr
-    minus_di = 100 * minus_dm.ewm(alpha=1 / length, adjust=False).mean() / atr
+    plus_di = (100 * plus_dm.ewm(alpha=1 / length, adjust=False).mean() / atr).fillna(0.0)
+    minus_di = (100 * minus_dm.ewm(alpha=1 / length, adjust=False).mean() / atr).fillna(0.0)
     denominator = (plus_di + minus_di).replace(0, float("nan"))
-    dx = ((plus_di - minus_di).abs() / denominator) * 100
-    dx = dx.astype(float)
-    return dx.ewm(alpha=1 / length, adjust=False).mean().fillna(0.0)
+    dx = (((plus_di - minus_di).abs() / denominator) * 100).astype(float).fillna(0.0)
+    adx = dx.ewm(alpha=1 / length, adjust=False).mean().fillna(0.0)
+    return pd.DataFrame(
+        {
+            "adx": adx.astype(float),
+            "plus_di": plus_di.astype(float),
+            "minus_di": minus_di.astype(float),
+        }
+    )
+
+
+def _dmi(frame: pd.DataFrame, length: int) -> pd.DataFrame:
+    if ta is not None:
+        adx_frame = ta.adx(frame["high"], frame["low"], frame["close"], length=length)
+        adx_column = f"ADX_{length}"
+        plus_column = f"DMP_{length}"
+        minus_column = f"DMN_{length}"
+        if adx_frame is not None and adx_column in adx_frame and plus_column in adx_frame and minus_column in adx_frame:
+            return pd.DataFrame(
+                {
+                    "adx": adx_frame[adx_column].fillna(0.0).astype(float),
+                    "plus_di": adx_frame[plus_column].fillna(0.0).astype(float),
+                    "minus_di": adx_frame[minus_column].fillna(0.0).astype(float),
+                }
+            )
+    return _manual_dmi(frame, length)
+
+
+def _manual_adx(frame: pd.DataFrame, length: int) -> pd.Series:
+    return _manual_dmi(frame, length)["adx"]
 
 
 def _adx(frame: pd.DataFrame, length: int) -> pd.Series:
-    if ta is not None:
-        adx_frame = ta.adx(frame["high"], frame["low"], frame["close"], length=length)
-        column_name = f"ADX_{length}"
-        if adx_frame is not None and column_name in adx_frame:
-            return adx_frame[column_name].fillna(0.0)
-    return _manual_adx(frame, length)
+    return _dmi(frame, length)["adx"]
 
 
 def compute_bollinger_bands(frame: pd.DataFrame, length: int = 20, std: float = 2.0) -> pd.DataFrame:
@@ -376,12 +417,17 @@ def compute_indicator_snapshot(
     if len(frame) < max(adx_length * 3, bb_length + 2):
         raise ValueError("Not enough OHLCV data to compute indicators reliably")
 
-    adx_series = _adx(frame, adx_length)
+    dmi_frame = _dmi(frame, adx_length)
+    adx_series = dmi_frame["adx"]
     bb_width_series = _bollinger_width(frame, bb_length, bb_std)
     volatility_series = _realized_volatility(frame, bb_length)
 
     return IndicatorSnapshot(
         adx_value=float(adx_series.iloc[-1]),
+        adx_previous=float(adx_series.iloc[-2]),
+        adx_pre_previous=float(adx_series.iloc[-3]),
+        plus_di_value=float(dmi_frame["plus_di"].iloc[-1]),
+        minus_di_value=float(dmi_frame["minus_di"].iloc[-1]),
         bb_width=float(bb_width_series.iloc[-1]),
         bb_width_previous=float(bb_width_series.iloc[-2]),
         volatility=float(volatility_series.iloc[-1]),

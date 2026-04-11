@@ -109,8 +109,26 @@ class NotificationTests(unittest.TestCase):
         oracle = MarketOracle(client, self.database, MarketOracleConfig(), notifier=self.notifier)
         oracle.collect_market_snapshot = lambda: type('Snapshot', (), {
             'symbol': 'BTC/USDT', 'strongest_adx': 30.0, 'strongest_volatility': 0.02,
-            'higher': type('I', (), {'adx_value': 30.0, 'bb_width_expanding': True})(),
-            'lower': type('I', (), {'adx_value': 18.0, 'bb_width_expanding': False})(),
+            'higher_timeframe': '1h',
+            'lower_timeframe': '15m',
+            'higher': type('I', (), {
+                'adx_value': 30.0,
+                'adx_rising': True,
+                'adx_trend_label': 'rising',
+                'di_gap': 14.0,
+                'plus_di_value': 32.0,
+                'minus_di_value': 18.0,
+                'bb_width_expanding': True,
+            })(),
+            'lower': type('I', (), {
+                'adx_value': 18.0,
+                'adx_rising': False,
+                'adx_trend_label': 'flat',
+                'di_gap': 3.0,
+                'plus_di_value': 21.0,
+                'minus_di_value': 18.0,
+                'bb_width_expanding': False,
+            })(),
         })()
 
         oracle.run_once()

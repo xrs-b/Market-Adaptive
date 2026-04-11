@@ -108,6 +108,7 @@ class MarketOracleConfig:
     bb_std: float = 2.0
     trend_adx_threshold: float = 25.0
     sideways_adx_threshold: float = 20.0
+    trend_di_gap_threshold: float = 8.0
 
 
 @dataclass
@@ -330,6 +331,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         bb_std=float(market_oracle_payload.get("bb_std", 2.0)),
         trend_adx_threshold=float(market_oracle_payload.get("trend_adx_threshold", 25)),
         sideways_adx_threshold=float(market_oracle_payload.get("sideways_adx_threshold", 20)),
+        trend_di_gap_threshold=float(market_oracle_payload.get("trend_di_gap_threshold", 8)),
     )
     execution = ExecutionConfig(
         td_mode=str(execution_payload.get("td_mode", "isolated")),

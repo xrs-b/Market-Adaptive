@@ -36,6 +36,21 @@ class MultiTimeframeMarketSnapshot:
 class MarketOracle:
     """Market sensing bot that classifies BTC/USDT as trend or sideways."""
 
+    def _indicator_confirms_trend(self, indicator: IndicatorSnapshot) -> bool:
+        return bool(
+            indicator.adx_value > float(self.config.trend_adx_threshold)
+            and indicator.adx_rising
+            and indicator.di_gap >= float(self.config.trend_di_gap_threshold)
+            and indicator.bb_width_expanding
+        )
+
+    def _indicator_summary(self, label: str, indicator: IndicatorSnapshot) -> str:
+        return (
+            f"{label}: adx={indicator.adx_value:.2f} adx_trend={indicator.adx_trend_label} "
+            f"di_gap={indicator.di_gap:.2f} (+di={indicator.plus_di_value:.2f} -di={indicator.minus_di_value:.2f}) "
+            f"bb_expand={indicator.bb_width_expanding}"
+        )
+
     def __init__(
         self,
         client: OKXClient,
@@ -83,11 +98,15 @@ class MarketOracle:
 
     def determine_status(self, snapshot: MultiTimeframeMarketSnapshot) -> str:
         trend_detected = any(
-            indicator.adx_value > self.config.trend_adx_threshold and indicator.bb_width_expanding
+            self._indicator_confirms_trend(indicator)
             for indicator in (snapshot.higher, snapshot.lower)
         )
         sideways_detected = all(
-            indicator.adx_value < self.config.sideways_adx_threshold
+            (
+                indicator.adx_value < float(self.config.sideways_adx_threshold)
+                or not indicator.adx_rising
+                or indicator.di_gap < float(self.config.trend_di_gap_threshold)
+            )
             for indicator in (snapshot.higher, snapshot.lower)
         )
 
@@ -113,6 +132,11 @@ class MarketOracle:
             volatility=snapshot.strongest_volatility,
         )
         self.database.insert_market_status(record)
+        logger.info(
+            "Market regime diagnostics | %s | %s",
+            self._indicator_summary(snapshot.higher_timeframe, snapshot.higher),
+            self._indicator_summary(snapshot.lower_timeframe, snapshot.lower),
+        )
         logger.info(
             "Market status updated: symbol=%s status=%s adx=%.4f volatility=%.6f",
             record.symbol,

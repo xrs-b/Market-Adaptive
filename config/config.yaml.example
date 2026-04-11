@@ -56,6 +56,7 @@ market_oracle:
   bb_std: 2.0
   trend_adx_threshold: 25
   sideways_adx_threshold: 20
+  trend_di_gap_threshold: 8
 
 execution:
   td_mode: "isolated"

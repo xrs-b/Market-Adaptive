@@ -37,9 +37,12 @@ class IndicatorTests(unittest.TestCase):
 
         snapshot = compute_indicator_snapshot(ohlcv)
         self.assertTrue(math.isfinite(snapshot.adx_value))
+        self.assertTrue(math.isfinite(snapshot.plus_di_value))
+        self.assertTrue(math.isfinite(snapshot.minus_di_value))
         self.assertTrue(math.isfinite(snapshot.bb_width))
         self.assertTrue(math.isfinite(snapshot.volatility))
         self.assertGreaterEqual(snapshot.adx_value, 0.0)
+        self.assertGreaterEqual(snapshot.di_gap, 0.0)
         self.assertGreaterEqual(snapshot.bb_width, 0.0)
         self.assertGreaterEqual(snapshot.volatility, 0.0)
 
