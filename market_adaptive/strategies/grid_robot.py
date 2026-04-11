@@ -100,11 +100,15 @@ class GridRobot(BaseStrategyRobot):
             "grid:risk_blocked",
             "grid:insufficient_data",
             "grid:no_orders",
-            "grid:flash_crash_cooldown",
-            "grid:hold_existing_grid",
             "grid:adx_trend_not_ready",
             "grid:halted",
         }:
+            return False
+        if action.startswith("grid:placed_"):
+            return False
+        if action.startswith("grid:hold_existing_grid"):
+            return False
+        if action.startswith("grid:flash_crash_cooldown"):
             return False
         return super().should_notify_action(action)
 

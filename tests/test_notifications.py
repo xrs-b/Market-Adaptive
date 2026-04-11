@@ -149,6 +149,22 @@ class NotificationTests(unittest.TestCase):
         self.assertTrue(any(title == 'Strategy Action' for title, _ in notifier.messages))
         self.assertTrue(any('cta:open_long' in body for _, body in notifier.messages))
 
+    def test_grid_robot_does_not_notify_on_regular_grid_placement(self) -> None:
+        client = DummyClient()
+        notifier = self.notifier
+        db = self.database
+        db.insert_market_status(MarketStatusRecord('2026-04-10T00:00:00+00:00', 'BTC/USDT', 'sideways', 10.0, 0.01))
+        client.ohlcv_by_timeframe['1h'] = [
+            [1_700_000_000_000 + i * 3_600_000, 100.0, 101.0, 99.0, 100.0, 120.0]
+            for i in range(80)
+        ]
+        robot = GridRobot(client, db, GridConfig(), ExecutionConfig(), notifier=notifier, market_oracle=None, use_dynamic_range=False)
+
+        result = robot.run()
+
+        self.assertTrue(result.action.startswith('grid:placed_'))
+        self.assertFalse(any(title == 'Strategy Action' for title, _ in notifier.messages))
+
     def test_grid_robot_notifies_on_cleanup(self) -> None:
         client = DummyClient()
         notifier = self.notifier
