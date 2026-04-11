@@ -621,7 +621,8 @@ class TheHandsTests(unittest.TestCase):
         second = robot.run()
 
         self.assertEqual(first.action.split("|")[0], "grid:spike_guard_triggered")
-        self.assertEqual(second.action, "grid:spike_guard_cooldown")
+        self.assertEqual(second.action.split("|")[0], "grid:spike_guard_cooldown")
+        self.assertIn("remaining=", second.action)
         self.assertEqual(len(self.client.limit_orders), 0)
 
     def test_grid_robot_places_reduce_only_rebalance_orders_when_long_heavy(self) -> None:

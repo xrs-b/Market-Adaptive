@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,8 @@ from market_adaptive.config import ExecutionConfig, GridConfig
 from market_adaptive.indicators import compute_bollinger_bands, ohlcv_to_dataframe
 from market_adaptive.risk import GridRiskProfile
 from market_adaptive.strategies.base import BaseStrategyRobot
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -136,7 +139,13 @@ class GridRobot(BaseStrategyRobot):
         if self._spike_guard_active(now):
             self.client.cancel_all_orders(self.symbol)
             self._publish_grid_risk(None)
-            return "grid:spike_guard_cooldown"
+            remaining_seconds = max(0, int((self._spike_guard_until - now).total_seconds())) if self._spike_guard_until else 0
+            logger.warning(
+                "Grid spike guard cooldown | symbol=%s remaining=%ss",
+                self.symbol,
+                remaining_seconds,
+            )
+            return f"grid:spike_guard_cooldown|remaining={remaining_seconds}s"
 
         self.client.cancel_all_orders(self.symbol)
         context = self._refresh_grid_context(current_price)
@@ -303,6 +312,14 @@ class GridRobot(BaseStrategyRobot):
         pause_seconds = max(1, int(getattr(self.config, "spike_guard_pause_seconds", 10)))
         self._spike_guard_until = now + timedelta(seconds=pause_seconds)
         self.client.cancel_all_orders(self.symbol)
+        logger.warning(
+            "Grid spike guard triggered | symbol=%s range_1m=%.2f grid_range=%.2f threshold=%.2f pause=%ss",
+            self.symbol,
+            one_minute_range,
+            grid_range,
+            trigger_distance,
+            pause_seconds,
+        )
         return (
             f"grid:spike_guard_triggered|range_1m={one_minute_range:.2f}"
             f"|grid_range={grid_range:.2f}|threshold={trigger_distance:.2f}|pause={pause_seconds}s"
