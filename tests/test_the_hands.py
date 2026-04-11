@@ -715,6 +715,28 @@ class TheHandsTests(unittest.TestCase):
         self.assertAlmostEqual(self.client.market_orders[0]["amount"], 0.06)
         self.assertEqual(self.client.market_orders[0]["params"]["posSide"], "long")
 
+    def test_grid_robot_websocket_fill_places_reduce_only_counter_order_with_pos_side(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False, market_oracle=None)
+        context = robot._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=1)
+        assert context is not None
+        robot._cached_context = context
+
+        robot._on_ws_orders({
+            "status": "closed",
+            "filled": 0.01,
+            "side": "buy",
+            "price": 99.0,
+            "reduceOnly": False,
+            "info": {"state": "filled", "fillSz": "0.01", "fillPx": "99.0"},
+        })
+
+        self.assertEqual(len(self.client.limit_orders), 1)
+        self.assertTrue(self.client.limit_orders[0]["reduce_only"])
+        self.assertEqual(self.client.limit_orders[0]["params"]["posSide"], "long")
+        self.assertEqual(self.client.limit_orders[0]["side"], "sell")
+
     def test_grid_robot_regime_cleanup_uses_limit_for_profitable_positions(self) -> None:
         self.client.last_price = 105.0
         self.client.positions = [{"contracts": 0.1, "side": "long", "entryPrice": 100.0, "info": {"posSide": "long"}}]

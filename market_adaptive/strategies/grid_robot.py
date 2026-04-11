@@ -663,12 +663,14 @@ class GridRobot(BaseStrategyRobot):
             counter_amount = self._normalize_amount(filled)
             if counter_price <= 0 or counter_amount <= 0:
                 continue
+            close_pos_side = "long" if side == "buy" else "short"
             self.client.place_limit_order(
                 self.symbol,
                 counter_side,
                 counter_amount,
                 counter_price,
                 reduce_only=True,
+                params={"posSide": close_pos_side},
             )
             logger.info(
                 "Grid websocket hedge order | fill_side=%s fill_price=%.2f counter_side=%s counter_price=%.2f amount=%.8f",
