@@ -321,17 +321,8 @@ class CTARobot(BaseStrategyRobot):
 
     def _open_position(self, signal: TrendSignal) -> str:
         side = "buy" if signal.direction > 0 else "sell"
-        amount = self.execution_config.cta_order_size
+        amount = self._calculate_entry_amount(signal.price)
         sentiment_halved = False
-
-        if self.risk_manager is not None:
-            amount = self.risk_manager.calculate_position_size(
-                self.symbol,
-                signal.risk_percent,
-                self.config.stop_loss_atr,
-                atr_value=signal.atr,
-                last_price=signal.price,
-            )
 
         amount = self._normalize_order_amount(amount)
         if amount <= 0:
@@ -425,6 +416,30 @@ class CTARobot(BaseStrategyRobot):
         if sentiment_halved:
             action += "_sentiment_halved"
         return action
+
+    def _calculate_entry_amount(self, reference_price: float) -> float:
+        target_margin = max(0.0, float(self.config.margin_fraction_per_trade))
+        target_leverage = max(0.0, float(self.config.nominal_leverage))
+        if target_margin <= 0 or target_leverage <= 0 or reference_price <= 0:
+            return 0.0
+
+        if not hasattr(self.client, "fetch_total_equity"):
+            return float(self.execution_config.cta_order_size)
+
+        try:
+            equity = float(self.client.fetch_total_equity("USDT"))
+        except Exception:
+            logger.exception("CTA sizing failed to fetch account equity; falling back to configured order size")
+            return float(self.execution_config.cta_order_size)
+
+        target_notional = equity * target_margin * target_leverage
+        if target_notional <= 0:
+            return 0.0
+
+        unit_notional = self.client.estimate_notional(self.symbol, 1.0, reference_price)
+        if unit_notional <= 0:
+            return 0.0
+        return target_notional / unit_notional
 
     def _place_entry_order(
         self,

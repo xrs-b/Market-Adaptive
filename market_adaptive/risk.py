@@ -340,6 +340,9 @@ class RiskControlManager:
                 continue
 
             if local is None and not actual.is_flat:
+                if self._grid_position_protected(symbol, actual):
+                    actions.append(f"{symbol}:protected_grid_position")
+                    continue
                 self.shutdown_client.cancel_all_orders(symbol)
                 self.shutdown_client.close_all_positions(symbol)
                 actions.append(f"{symbol}:closed_rogue_position")
@@ -692,6 +695,12 @@ class RiskControlManager:
             return 0.0
 
         return min(float(amount), remaining_notional / unit_notional)
+
+    def _grid_position_protected(self, symbol: str, actual: ExchangePositionSnapshot) -> bool:
+        profile = self.latest_grid_risk
+        if profile is None or profile.symbol != symbol:
+            return False
+        return not actual.is_flat
 
     def _fetch_exchange_position(self, symbol: str) -> ExchangePositionSnapshot:
         long_size = 0.0

@@ -303,6 +303,16 @@ class RiskControlManagerTests(unittest.TestCase):
         self.assertEqual(result, "grid:regime_cleanup")
         self.assertEqual(self.grid_cleanup_reasons, ["status_switch:sideways->trend"])
 
+    def test_recovery_whitelists_live_grid_positions(self) -> None:
+        self.client.positions = [{"contracts": 2.0, "side": "long", "notional": 200.0}]
+        self.manager.update_grid_risk(GridRiskProfile(symbol="BTC/USDT", lower_bound=97.0, upper_bound=103.0))
+
+        result = self.manager.recover_positions_once()
+
+        self.assertIn("protected_grid_position", result)
+        self.assertEqual(self.shutdown_client.cancelled_symbols, [])
+        self.assertEqual(self.shutdown_client.closed_symbols, [])
+
     def test_recovery_resets_local_state_when_exchange_is_flat(self) -> None:
         self.logical_positions["BTC/USDT"] = LogicalPositionSnapshot(
             symbol="BTC/USDT",

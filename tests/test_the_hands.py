@@ -32,6 +32,8 @@ class DummyClient:
             "bids": [[100.0 - index * 0.1, 1.6] for index in range(20)],
             "asks": [[100.1 + index * 0.1, 1.0] for index in range(20)],
         }
+        self.total_equity = 95_000.0
+        self.min_order_amount = 0.0
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 200, since=None):
         del symbol, since
@@ -102,6 +104,14 @@ class DummyClient:
         self.futures_settings_calls.append(
             {"symbol": symbol, "leverage": leverage, "margin_mode": margin_mode}
         )
+
+    def fetch_total_equity(self, quote_currency: str = "USDT") -> float:
+        del quote_currency
+        return self.total_equity
+
+    def get_min_order_amount(self, symbol: str) -> float:
+        del symbol
+        return self.min_order_amount
 
     def get_position_liquidation_price(self, position: dict) -> float | None:
         liquidation_price = position.get("liquidationPrice") or position.get("info", {}).get("liqPx")
@@ -421,24 +431,20 @@ class TheHandsTests(unittest.TestCase):
 
         self.assertEqual(result.action, "cta:open_long_sentiment_halved")
         self.assertEqual(len(self.client.market_orders), 1)
-        self.assertAlmostEqual(self.client.market_orders[0]["amount"], 0.01)
+        self.assertAlmostEqual(self.client.market_orders[0]["amount"], 71.25)
         self.assertIsNotNone(robot.position)
-        self.assertAlmostEqual(robot.position.initial_size, 0.01)
+        self.assertAlmostEqual(robot.position.initial_size, 71.25)
 
-    def test_cta_robot_uses_boosted_risk_percent_for_fully_aligned_mtf_entry(self) -> None:
+    def test_cta_robot_uses_dynamic_fixed_fraction_position_sizing(self) -> None:
         self._insert_status("trend")
         self._load_bullish_signal(lower_last_close=100.0)
-        risk_manager = DummyRiskManager()
-        robot = CTARobot(self.client, self.database, self.cta_config, self.execution, risk_manager=risk_manager)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
 
         result = robot.run()
 
         self.assertEqual(result.action, "cta:open_long")
-        self.assertEqual(len(risk_manager.position_size_calls), 1)
-        self.assertAlmostEqual(
-            risk_manager.position_size_calls[0]["risk_percent"],
-            self.cta_config.boosted_risk_percent_per_trade,
-        )
+        self.assertEqual(len(self.client.market_orders), 1)
+        self.assertAlmostEqual(self.client.market_orders[0]["amount"], 142.5)
         self.assertIsNotNone(robot.position)
         self.assertAlmostEqual(robot.position.risk_percent, self.cta_config.boosted_risk_percent_per_trade)
 
@@ -520,11 +526,11 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(result.action, "cta:open_long_limit")
         self.assertEqual(len(self.client.limit_orders), 1)
         self.assertEqual(len(self.client.market_orders), 1)
-        self.assertAlmostEqual(self.client.market_orders[0]["amount"], 0.012)
+        self.assertAlmostEqual(self.client.market_orders[0]["amount"], 142.492)
         self.assertIsNotNone(robot.position)
-        expected_price = ((0.008 * 100.22) + (0.012 * 100.6)) / 0.02
+        expected_price = ((0.008 * 100.22) + (142.492 * 100.6)) / 142.5
         self.assertAlmostEqual(robot.position.entry_price, expected_price)
-        self.assertAlmostEqual(robot.position.initial_size, 0.02)
+        self.assertAlmostEqual(robot.position.initial_size, 142.5)
 
     def test_extract_filled_amount_returns_zero_for_zero_fill_ioc_orders(self) -> None:
         robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
@@ -632,22 +638,22 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(second_result.action, "cta:take_profit_2pct")
         self.assertEqual(self.client.market_orders[1]["side"], "sell")
         self.assertTrue(self.client.market_orders[1]["reduce_only"])
-        self.assertAlmostEqual(self.client.market_orders[1]["amount"], 0.01)
+        self.assertAlmostEqual(self.client.market_orders[1]["amount"], 71.25)
 
         self._load_bullish_signal(lower_last_close=106.0)
         third_result = robot.run()
         self.assertEqual(third_result.action, "cta:take_profit_5pct")
-        self.assertAlmostEqual(self.client.market_orders[2]["amount"], 0.005)
+        self.assertAlmostEqual(self.client.market_orders[2]["amount"], 35.625)
         self.assertIsNotNone(robot.position)
 
         robot.position.stop_price = 104.0
         self._load_pullback_after_rally(latest_close=103.0)
         fourth_result = robot.run()
         self.assertEqual(fourth_result.action, "cta:atr_stop_all_out")
-        self.assertAlmostEqual(self.client.market_orders[3]["amount"], 0.005)
+        self.assertAlmostEqual(self.client.market_orders[3]["amount"], 35.625)
         self.assertIsNone(robot.position)
 
-    def test_grid_robot_uses_neutral_price_band_and_martingale_buys(self) -> None:
+    def test_grid_robot_uses_neutral_price_band_and_dynamic_per_level_sizing(self) -> None:
         self._insert_status("sideways")
         self._load_sideways_grid_data(center=100.0)
         robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
@@ -661,13 +667,13 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(len(self.client.futures_settings_calls), 1)
         self.assertEqual(self.client.futures_settings_calls[0]["leverage"], 5)
         self.assertEqual(self.client.futures_settings_calls[0]["margin_mode"], "isolated")
-        self.assertEqual(self.client.cancel_all_calls, ["BTC/USDT"])
+        self.assertEqual(self.client.cancel_all_calls, [])
 
         buy_orders = [order for order in self.client.limit_orders if order["side"] == "buy"]
         sell_orders = [order for order in self.client.limit_orders if order["side"] == "sell"]
         self.assertEqual(len(buy_orders), 5)
         self.assertEqual(len(sell_orders), 5)
-        self.assertGreater(buy_orders[-1]["amount"], buy_orders[0]["amount"])
+        self.assertTrue(all(order["amount"] == 19.0 for order in buy_orders + sell_orders))
         self.assertTrue(all(not order.get("reduce_only", False) for order in sell_orders))
         self.assertTrue(all(order["price"] >= 97.0 for order in buy_orders))
         self.assertTrue(all(order["price"] <= 103.0 for order in sell_orders))
@@ -710,6 +716,27 @@ class TheHandsTests(unittest.TestCase):
 
         self.assertTrue(first.action.startswith("grid:placed_"))
         self.assertTrue(second.action.startswith("grid:hold_existing_grid"))
+
+    def test_grid_robot_enforces_five_minute_hard_regrid_cooldown(self) -> None:
+        self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
+        now = datetime(2026, 4, 11, 10, 0, tzinfo=timezone.utc)
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, now_provider=lambda: now, use_dynamic_range=False)
+        robot._cached_context = robot._fallback_context(100.0, atr_value=10.0)
+        robot.last_regrid_time = now.timestamp() - 299
+        robot.current_grid_center = 100.0
+
+        self.assertFalse(robot._should_regrid(robot._fallback_context(105.0, atr_value=10.0), 105.0, now))
+
+    def test_grid_robot_requires_center_shift_beyond_point_four_atr(self) -> None:
+        self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
+        now = datetime(2026, 4, 11, 10, 10, tzinfo=timezone.utc)
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, now_provider=lambda: now, use_dynamic_range=False)
+        robot._cached_context = robot._fallback_context(100.0, atr_value=10.0)
+        robot.last_regrid_time = now.timestamp() - 301
+        robot.current_grid_center = 100.0
+
+        self.assertFalse(robot._should_regrid(robot._fallback_context(103.9, atr_value=10.0), 103.9, now))
+        self.assertTrue(robot._should_regrid(robot._fallback_context(104.1, atr_value=10.0), 104.1, now))
 
     def test_grid_robot_cools_down_repeatedly_triggered_buy_layer(self) -> None:
         self._insert_status("sideways")
@@ -996,6 +1023,20 @@ class TheHandsTests(unittest.TestCase):
 
         self.assertFalse(robot._has_active_grid_orders(context, now))
 
+    def test_grid_robot_regrid_cancels_pending_orders_without_flattening_positions(self) -> None:
+        self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, market_oracle=None, use_dynamic_range=False)
+        self.client.limit_orders = [
+            {"id": "order-1", "side": "buy", "price": 99.0, "reduceOnly": False},
+            {"id": "order-2", "side": "sell", "price": 101.0, "reduceOnly": False},
+        ]
+        self.client.positions = [{"contracts": 1.0, "side": "long", "notional": 100.0}]
+
+        robot._cancel_pending_grid_orders(list(self.client.limit_orders))
+
+        self.assertEqual(self.client.cancel_order_calls, [("order-1", "BTC/USDT"), ("order-2", "BTC/USDT")])
+        self.assertEqual(self.client.close_all_calls, [])
+
     def test_grid_robot_run_holds_partial_grid_with_reduce_only_hedge_instead_of_regridding(self) -> None:
         self._insert_status("sideways")
         self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
@@ -1034,7 +1075,7 @@ class TheHandsTests(unittest.TestCase):
 
         self.assertTrue(first.action.startswith("grid:placed_"))
         self.assertTrue(second.action.startswith("grid:hold_existing_grid"))
-        self.assertEqual(len(self.client.cancel_all_calls), 1)
+        self.assertEqual(len(self.client.cancel_all_calls), 0)
 
     def test_grid_robot_logs_fetch_open_orders_failure_in_health_check(self) -> None:
         self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
@@ -1090,7 +1131,7 @@ class TheHandsTests(unittest.TestCase):
 
         self.assertTrue(first.action.startswith("grid:placed_"))
         self.assertTrue(second.action.startswith("grid:health_check_degraded"))
-        self.assertEqual(len(self.client.cancel_all_calls), 1)
+        self.assertEqual(len(self.client.cancel_all_calls), 0)
         self.assertEqual(robot._health_check_failed_streak, 3)
         self.assertIsNotNone(robot._health_check_degraded_until)
 
@@ -1128,7 +1169,7 @@ class TheHandsTests(unittest.TestCase):
 
         self.assertTrue(first.action.startswith("grid:placed_"))
         self.assertTrue(second.action.startswith("grid:order_sync_unavailable"))
-        self.assertEqual(len(self.client.cancel_all_calls), 1)
+        self.assertEqual(len(self.client.cancel_all_calls), 0)
 
     def test_grid_robot_reduces_exposure_stepwise_instead_of_flattening(self) -> None:
         self.client.positions = [{"contracts": 0.12, "side": "long", "info": {"posSide": "long"}}]

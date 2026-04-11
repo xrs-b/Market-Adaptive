@@ -162,10 +162,12 @@ class MainController:
         )
 
     def _collect_logical_positions(self) -> dict[str, LogicalPositionSnapshot | None]:
-        return {
-            self.cta_robot.symbol: self.cta_robot.get_logical_position(),
-            self.grid_robot.symbol: None,
-        }
+        positions: dict[str, LogicalPositionSnapshot | None] = {}
+        cta_position = self.cta_robot.get_logical_position()
+        positions[self.cta_robot.symbol] = cta_position
+        if self.grid_robot.symbol not in positions:
+            positions[self.grid_robot.symbol] = None
+        return positions
 
     def _reset_local_position(self, symbol: str, reason: str) -> None:
         if symbol == self.cta_robot.symbol:

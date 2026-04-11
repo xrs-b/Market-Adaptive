@@ -102,6 +102,8 @@ class GridRobot(BaseStrategyRobot):
         self._ws_stop_event: asyncio.Event | None = None
         self._ws_orders_placed_in_cycle: set[str] = set()
         self._ws_cycle_anchor_timestamp_ms: int | None = None
+        self.last_regrid_time = 0.0
+        self.current_grid_center: float | None = None
 
     def should_notify_action(self, action: str) -> bool:
         if action in {
@@ -319,7 +321,7 @@ class GridRobot(BaseStrategyRobot):
                 f"bounds={context.lower_bound:.2f}-{context.upper_bound:.2f}"
             )
 
-        self.client.cancel_all_orders(self.symbol)
+        self._cancel_pending_grid_orders(order_sync_snapshot)
         net_position_size = self._fetch_net_position_size()
         opening_orders = self._build_opening_orders(context, current_price, now)
         rebalance_orders = self._build_rebalance_orders(context, net_position_size)
@@ -356,6 +358,8 @@ class GridRobot(BaseStrategyRobot):
 
         self._cached_context = context
         self._last_grid_placed_at = now
+        self.last_regrid_time = time.time()
+        self.current_grid_center = current_price
         action_parts = [
             f"grid:placed_{placed_orders}_orders@{current_price:.2f}",
             f"openings={opening_orders_placed}",
@@ -596,27 +600,32 @@ class GridRobot(BaseStrategyRobot):
         if previous is None:
             logger.info("[grid_robot] _should_regrid: no cached context, returning True")
             return True
-        if previous.center_price <= 0:
+
+        current_ts = now.timestamp()
+        if self.last_regrid_time > 0:
+            elapsed = current_ts - float(self.last_regrid_time)
+            if elapsed < 300:
+                logger.info("[grid_robot] _should_regrid: hard cooldown active elapsed=%.2fs", elapsed)
+                return False
+
+        grid_center = self.current_grid_center if self.current_grid_center is not None else previous.center_price
+        if grid_center <= 0:
             logger.info("[grid_robot] _should_regrid: invalid previous center, returning True")
             return True
 
-        min_lifetime_seconds = max(0, int(getattr(self.config, "min_grid_lifetime_seconds", 300)))
-        if self._last_grid_placed_at is not None and min_lifetime_seconds > 0:
-            age_seconds = (now - self._last_grid_placed_at).total_seconds()
-            logger.info(
-                "[grid_robot] _should_regrid: grid age=%ds, min_lifetime=%ds",
-                age_seconds,
-                min_lifetime_seconds,
-            )
-            if age_seconds < min_lifetime_seconds:
-                previous_atr = max(abs(float(previous.atr_value)), 1e-12)
-                atr_diff_ratio = abs(float(context.atr_value) - float(previous.atr_value)) / previous_atr
-                if atr_diff_ratio > 0:
-                    logger.info(
-                        "[grid_robot] _should_regrid: ATR fluctuated slightly (diff: %.1f%%), skipping regrid",
-                        atr_diff_ratio * 100.0,
-                    )
-                return False
+        trigger_distance = max(0.0, float(context.atr_value) * 0.4)
+        if trigger_distance <= 0:
+            trigger_distance = abs(grid_center) * 0.001
+        price_shift = abs(current_price - grid_center)
+        logger.info(
+            "[grid_robot] _should_regrid: price_shift=%.2f trigger_distance=%.2f center=%.2f",
+            price_shift,
+            trigger_distance,
+            grid_center,
+        )
+        if self.current_grid_center is not None and price_shift <= trigger_distance:
+            logger.info("[grid_robot] _should_regrid: spatial lock active")
+            return False
 
         previous_atr = max(abs(float(previous.atr_value)), 1e-12)
         atr_diff_ratio = abs(float(context.atr_value) - float(previous.atr_value)) / previous_atr
@@ -625,18 +634,7 @@ class GridRobot(BaseStrategyRobot):
             logger.info("[grid_robot] _should_regrid: ATR change %.1f%% > threshold %.1f%%, triggering regrid", atr_diff_ratio * 100, atr_regrid_change_ratio * 100)
             return True
 
-        trigger_ratio = float(getattr(self.config, "regrid_trigger_atr_ratio", 0.30))
-        trigger_distance = max(0.0, context.atr_value * trigger_ratio)
-        if trigger_distance <= 0:
-            trigger_distance = abs(previous.center_price) * 0.001
-        price_shift = abs(current_price - previous.center_price)
-        logger.info(
-            "[grid_robot] _should_regrid: price_shift=%.2f trigger_distance=%.2f (ratio=%.2f)",
-            price_shift,
-            trigger_distance,
-            trigger_ratio,
-        )
-        if price_shift >= trigger_distance:
+        if price_shift > trigger_distance:
             logger.info("[grid_robot] _should_regrid: price shift triggers regrid")
             return True
 
@@ -1045,16 +1043,16 @@ class GridRobot(BaseStrategyRobot):
     def _build_opening_orders(self, context: GridContext, current_price: float, now: datetime) -> list[GridOrderPlan]:
         del current_price, now
         orders: list[GridOrderPlan] = []
+        per_level_amount = self._calculate_grid_order_amount(context.center_price)
 
         for index, price in enumerate(context.buy_prices, start=1):
-            amount = self.execution_config.grid_order_size * (self.config.martingale_factor ** (index - 1))
             orders.append(
                 GridOrderPlan(
                     layer_key=self._layer_key(context.anchor_timestamp_ms, "buy", index),
                     index=index,
                     side="buy",
                     price=price,
-                    amount=self._normalize_amount(amount),
+                    amount=self._normalize_amount(per_level_amount),
                 )
             )
 
@@ -1065,11 +1063,40 @@ class GridRobot(BaseStrategyRobot):
                     index=index,
                     side="sell",
                     price=price,
-                    amount=self._normalize_amount(self.execution_config.grid_order_size),
+                    amount=self._normalize_amount(per_level_amount),
                 )
             )
 
         return orders
+
+    def _calculate_grid_order_amount(self, reference_price: float) -> float:
+        if reference_price <= 0:
+            return 0.0
+        if not hasattr(self.client, "fetch_total_equity"):
+            return float(self.execution_config.grid_order_size)
+        try:
+            equity = float(self.client.fetch_total_equity("USDT"))
+        except Exception:
+            logger.exception("Grid sizing failed to fetch account equity; falling back to configured order size")
+            return float(self.execution_config.grid_order_size)
+
+        total_grid_notional = equity * max(0.0, float(self.config.equity_allocation_ratio))
+        per_level_notional = total_grid_notional / max(1, int(self.config.levels))
+        unit_notional = self._estimate_notional(1.0, reference_price)
+        if per_level_notional <= 0 or unit_notional <= 0:
+            return 0.0
+        return per_level_notional / unit_notional
+
+    def _cancel_pending_grid_orders(self, orders: list[dict]) -> None:
+        cancel_order = getattr(self.client, "cancel_order", None)
+        if not callable(cancel_order):
+            self.client.cancel_all_orders(self.symbol)
+            return
+        for order in orders:
+            order_id = order.get("id") or order.get("info", {}).get("ordId")
+            if order_id in (None, ""):
+                continue
+            cancel_order(str(order_id), self.symbol)
 
     def _place_grid_batch_safely(self, orders: list[GridOrderPlan]) -> dict[str, int | str]:
         self._placed_order_ids = []

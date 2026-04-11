@@ -121,6 +121,8 @@ class ExecutionConfig:
 @dataclass
 class CTAConfig:
     symbol: str = "BTC/USDT"
+    margin_fraction_per_trade: float = 0.05
+    nominal_leverage: float = 3.0
     timeframe: str = "15m"  # legacy alias for execution_timeframe
     lower_timeframe: str = "15m"  # legacy alias for execution_timeframe
     higher_timeframe: str = "1h"  # legacy alias for swing_timeframe
@@ -205,6 +207,7 @@ class CTAConfig:
 @dataclass
 class GridConfig:
     symbol: str = "BTC/USDT"
+    equity_allocation_ratio: float = 0.20
     timeframe: str = "1h"  # legacy alias for Bollinger timeframe
     lookback_limit: int = 120
     bollinger_period: int = 20
@@ -369,6 +372,8 @@ def load_config(config_path: str | Path) -> AppConfig:
     )
     cta = CTAConfig(
         symbol=str(cta_payload.get("symbol", "BTC/USDT")),
+        margin_fraction_per_trade=float(cta_payload.get("margin_fraction_per_trade", 0.05)),
+        nominal_leverage=float(cta_payload.get("nominal_leverage", 3.0)),
         timeframe=cta_timeframe,
         lower_timeframe=cta_execution_timeframe,
         higher_timeframe=cta_swing_timeframe,
@@ -415,6 +420,7 @@ def load_config(config_path: str | Path) -> AppConfig:
     )
     grid = GridConfig(
         symbol=str(grid_payload.get("symbol", "BTC/USDT")),
+        equity_allocation_ratio=float(grid_payload.get("equity_allocation_ratio", 0.20)),
         timeframe=str(grid_payload.get("bollinger_timeframe", grid_payload.get("timeframe", "1h"))),
         lookback_limit=int(grid_payload.get("lookback_limit", 120)),
         bollinger_period=int(grid_payload.get("bollinger_length", grid_payload.get("bollinger_period", 20))),
