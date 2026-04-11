@@ -329,7 +329,7 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(len(self.client.market_orders), 0)
         self.assertIsNone(robot.position)
 
-    def test_cta_robot_requires_configured_obv_slope_breakout_threshold(self) -> None:
+    def test_cta_robot_requires_configured_obv_breakout_strength(self) -> None:
         self._insert_status("trend")
         self._load_bullish_signal(lower_last_close=100.0)
         strict_config = CTAConfig(
@@ -340,7 +340,9 @@ class TheHandsTests(unittest.TestCase):
             stop_loss_atr=2.0,
             first_take_profit_size=0.5,
             second_take_profit_size=0.25,
-            obv_slope_threshold_degrees=80.0,
+            obv_zscore_threshold=999.0,
+            obv_roc_period=1000,
+            obv_roc_extreme_percentile=0.999,
         )
         robot = CTARobot(self.client, self.database, strict_config, self.execution)
 

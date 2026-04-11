@@ -9,6 +9,7 @@ from market_adaptive.indicators import (
     compute_indicator_snapshot,
     compute_kdj,
     compute_obv,
+    compute_obv_confirmation_snapshot,
     compute_obv_slope_angle,
     compute_rsi,
     compute_supertrend,
@@ -100,6 +101,22 @@ class IndicatorTests(unittest.TestCase):
         angle = compute_obv_slope_angle(frame, window=8)
 
         self.assertGreater(angle, 30.0)
+
+    def test_compute_obv_confirmation_snapshot_detects_extreme_buy_flow(self) -> None:
+        frame = ohlcv_to_dataframe(self._build_ohlcv(start_price=90.0, step=1.0, length=140, step_ms=900_000))
+        snapshot = compute_obv_confirmation_snapshot(
+            frame,
+            sma_period=50,
+            roc_period=3,
+            zscore_window=100,
+            roc_percentile_window=100,
+            extreme_percentile=0.90,
+        )
+
+        self.assertTrue(snapshot.above_sma)
+        self.assertGreater(snapshot.roc_pct, 0.0)
+        self.assertGreaterEqual(snapshot.roc_high_threshold, snapshot.roc_low_threshold)
+        self.assertTrue(snapshot.buy_confirmed(zscore_threshold=2.0))
 
     def test_compute_volume_profile_returns_poc_and_value_area(self) -> None:
         base_timestamp = 1_700_000_000_000

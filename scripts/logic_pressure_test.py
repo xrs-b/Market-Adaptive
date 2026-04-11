@@ -73,13 +73,8 @@ def _build_robot(ohlcv_by_timeframe: dict[str, list[list[Any]]], cta_config: CTA
         notifier=None,
         risk_manager=None,
         sentiment_analyst=None,
-        order_flow_monitor=None,
     )
     return robot
-
-
-def _score_components(snapshot) -> dict[str, float]:
-    return {component.name: float(component.score) for component in snapshot.components}
 
 
 def _evaluate_at_bar(ohlcv_by_timeframe: dict[str, list[list[Any]]], cta_config: CTAConfig, *, cursor_ms: int) -> dict[str, Any] | None:
@@ -87,8 +82,8 @@ def _evaluate_at_bar(ohlcv_by_timeframe: dict[str, list[list[Any]]], cta_config:
     signal = robot._build_trend_signal()
     if signal is None:
         return None
-    score_snapshot = robot._build_score_snapshot(signal, None)
-    trigger_ready = bool(signal.direction > 0 and score_snapshot.trade_allowed)
+    trigger_ready = bool(signal.direction > 0)
+    obv = signal.obv_confirmation
     return {
         "timestamp": datetime.fromtimestamp(cursor_ms / 1000, tz=timezone.utc).isoformat(),
         "price": float(signal.price),
@@ -100,24 +95,21 @@ def _evaluate_at_bar(ohlcv_by_timeframe: dict[str, list[list[Any]]], cta_config:
         "execution_breakout": bool(signal.execution_breakout),
         "execution_trigger_reason": str(signal.execution_trigger_reason),
         "swing_rsi": float(signal.swing_rsi),
-        "execution_rsi": float(signal.execution_rsi),
-        "execution_adx": float(signal.execution_adx),
+        "risk_percent": float(signal.risk_percent),
         "obv_bias": int(signal.obv_bias),
-        "obv_signal_value": float(signal.obv_signal_value),
-        "obv_slope_angle": float(signal.obv_slope_angle),
-        "obv_slope_threshold": float(cta_config.obv_slope_threshold_degrees),
-        "obv_slope_gap": float(signal.obv_slope_angle - cta_config.obv_slope_threshold_degrees),
-        "obv_slope_passed": bool(signal.obv_slope_passed),
+        "obv_current": float(obv.current_obv),
+        "obv_sma": float(obv.sma_value),
+        "obv_roc": float(obv.roc_pct),
+        "obv_roc_p90": float(obv.roc_high_threshold),
+        "obv_roc_p10": float(obv.roc_low_threshold),
+        "obv_increment": float(obv.increment_value),
+        "obv_zscore": float(obv.zscore),
+        "obv_zscore_threshold": float(cta_config.obv_zscore_threshold),
+        "obv_confirmation_passed": bool(signal.obv_confirmation_passed),
         "volume_filter_passed": bool(signal.volume_filter_passed),
-        "volume_breakout_passed": bool(signal.volume_breakout_passed),
         "long_setup_blocked": bool(signal.long_setup_blocked),
         "long_setup_reason": str(signal.long_setup_reason),
-        "score_total": float(score_snapshot.total_score),
-        "score_min_trade": float(score_snapshot.min_trade_score),
-        "score_tier": str(score_snapshot.tier),
-        "trade_allowed": bool(score_snapshot.trade_allowed),
         "trigger_ready": trigger_ready,
-        "score_components": _score_components(score_snapshot),
     }
 
 
@@ -135,7 +127,7 @@ def run_pressure_test(config: AppConfig, *, hours: float, obv_scale: float) -> d
         if start_dt.timestamp() * 1000 <= int(row[0]) <= end_dt.timestamp() * 1000
     ]
     baseline_config = config.cta
-    relaxed_config = replace(config.cta, obv_slope_threshold_degrees=float(config.cta.obv_slope_threshold_degrees) * float(obv_scale))
+    relaxed_config = replace(config.cta, obv_zscore_threshold=float(config.cta.obv_zscore_threshold) * float(obv_scale))
 
     baseline_rows: list[dict[str, Any]] = []
     relaxed_rows: list[dict[str, Any]] = []
@@ -186,7 +178,7 @@ def main() -> int:
         for unlocked in report["unlocked_windows"]:
             relaxed = unlocked["relaxed"]
             print(
-                "unlocked {timestamp} price={price:.4f} obv={obv_slope_angle:.2f}/{obv_slope_threshold:.2f} score={score_total:.2f} reason={execution_trigger_reason}".format(
+                "unlocked {timestamp} price={price:.4f} z={obv_zscore:.2f}>{obv_zscore_threshold:.2f} roc={obv_roc:.2f} p90={obv_roc_p90:.2f} reason={execution_trigger_reason}".format(
                     **relaxed,
                 )
             )

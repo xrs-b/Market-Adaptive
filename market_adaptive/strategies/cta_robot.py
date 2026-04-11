@@ -4,10 +4,11 @@ from dataclasses import dataclass
 
 from market_adaptive.config import CTAConfig, ExecutionConfig
 from market_adaptive.indicators import (
+    OBVConfirmationSnapshot,
     VolumeProfileSnapshot,
     compute_atr,
     compute_obv,
-    compute_obv_slope_angle,
+    compute_obv_confirmation_snapshot,
     compute_volume_profile,
 )
 from market_adaptive.risk import CTARiskProfile, LogicalPositionSnapshot
@@ -29,8 +30,8 @@ class TrendSignal:
     execution_trigger_reason: str
     mtf_aligned: bool
     obv_bias: int
-    obv_slope_angle: float
-    obv_slope_passed: bool
+    obv_confirmation: OBVConfirmationSnapshot
+    obv_confirmation_passed: bool
     volume_filter_passed: bool
     volume_profile: VolumeProfileSnapshot | None
     long_setup_blocked: bool
@@ -38,6 +39,14 @@ class TrendSignal:
     price: float
     atr: float
     risk_percent: float
+
+    @property
+    def obv_slope_angle(self) -> float:
+        return self.obv_confirmation.roc_pct
+
+    @property
+    def obv_slope_passed(self) -> bool:
+        return self.obv_confirmation_passed
 
 
 @dataclass
@@ -190,20 +199,23 @@ class CTARobot(BaseStrategyRobot):
 
         execution_frame = mtf_signal.execution_frame
         execution_obv = compute_obv(execution_frame)
-        execution_obv_signal = execution_obv.ewm(span=self.config.obv_signal_period, adjust=False).mean()
         atr_series = compute_atr(execution_frame, length=self.config.atr_period)
 
-        obv_value = float(execution_obv.iloc[-1])
-        obv_signal_value = float(execution_obv_signal.iloc[-1])
-        obv_bias = 1 if obv_value > obv_signal_value else -1 if obv_value < obv_signal_value else 0
-        raw_direction = 1 if mtf_signal.fully_aligned else 0
-        volume_filter_passed = raw_direction > 0 and obv_bias > 0
-        current_price = float(execution_frame["close"].iloc[-1])
-        obv_slope_angle = compute_obv_slope_angle(
+        obv_confirmation = compute_obv_confirmation_snapshot(
             execution_frame,
-            window=self.config.obv_slope_window,
             obv=execution_obv,
+            sma_period=self.config.obv_sma_period,
+            roc_period=self.config.obv_roc_period,
+            zscore_window=self.config.obv_zscore_window,
+            roc_percentile_window=self.config.obv_roc_percentile_window,
+            extreme_percentile=self.config.obv_roc_extreme_percentile,
         )
+        obv_bias = 1 if obv_confirmation.above_sma else -1 if obv_confirmation.below_sma else 0
+        raw_direction = 1 if mtf_signal.fully_aligned else 0
+        volume_filter_passed = raw_direction > 0 and obv_confirmation.buy_confirmed(
+            zscore_threshold=self.config.obv_zscore_threshold,
+        )
+        current_price = float(execution_frame["close"].iloc[-1])
         volume_profile = compute_volume_profile(
             execution_frame,
             lookback_hours=self.config.volume_profile_lookback_hours,
@@ -214,29 +226,28 @@ class CTARobot(BaseStrategyRobot):
         final_direction = raw_direction
         long_setup_blocked = False
         long_setup_reason = ""
-        obv_slope_passed = True
+        obv_confirmation_passed = True
 
         if raw_direction > 0:
-            if not volume_filter_passed:
+            obv_confirmation_passed = volume_filter_passed
+            if not obv_confirmation.above_sma:
                 long_setup_blocked = True
-                long_setup_reason = "obv_not_confirmed"
-            else:
-                obv_slope_passed = obv_slope_angle >= float(self.config.obv_slope_threshold_degrees)
-                if volume_profile is None:
-                    long_setup_blocked = True
-                    long_setup_reason = "missing_volume_profile"
-                elif not volume_profile.above_poc(current_price):
-                    long_setup_blocked = True
-                    long_setup_reason = "below_poc"
-                elif volume_profile.contains_price(current_price):
-                    long_setup_blocked = True
-                    long_setup_reason = "inside_value_area"
-                elif not volume_profile.above_value_area(current_price):
-                    long_setup_blocked = True
-                    long_setup_reason = "below_value_area_high"
-                elif not obv_slope_passed:
-                    long_setup_blocked = True
-                    long_setup_reason = "obv_slope_too_flat"
+                long_setup_reason = "obv_below_sma"
+            elif not obv_confirmation_passed:
+                long_setup_blocked = True
+                long_setup_reason = "obv_strength_not_confirmed"
+            elif volume_profile is None:
+                long_setup_blocked = True
+                long_setup_reason = "missing_volume_profile"
+            elif not volume_profile.above_poc(current_price):
+                long_setup_blocked = True
+                long_setup_reason = "below_poc"
+            elif volume_profile.contains_price(current_price):
+                long_setup_blocked = True
+                long_setup_reason = "inside_value_area"
+            elif not volume_profile.above_value_area(current_price):
+                long_setup_blocked = True
+                long_setup_reason = "below_value_area_high"
 
             if long_setup_blocked:
                 final_direction = 0
@@ -252,8 +263,8 @@ class CTARobot(BaseStrategyRobot):
             execution_trigger_reason=mtf_signal.execution_trigger.reason,
             mtf_aligned=mtf_signal.fully_aligned,
             obv_bias=obv_bias,
-            obv_slope_angle=obv_slope_angle,
-            obv_slope_passed=obv_slope_passed,
+            obv_confirmation=obv_confirmation,
+            obv_confirmation_passed=obv_confirmation_passed,
             volume_filter_passed=volume_filter_passed,
             volume_profile=volume_profile,
             long_setup_blocked=long_setup_blocked,
