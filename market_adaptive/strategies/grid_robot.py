@@ -324,6 +324,7 @@ class GridRobot(BaseStrategyRobot):
             return "grid:no_orders"
 
         self._cached_context = context
+        self._last_grid_placed_at = now
         action_parts = [
             f"grid:placed_{placed_orders}_orders@{current_price:.2f}",
             f"openings={opening_orders_placed}",
