@@ -1023,6 +1023,28 @@ class TheHandsTests(unittest.TestCase):
 
         self.assertFalse(robot._has_active_grid_orders(context, now))
 
+    def test_grid_robot_health_check_treats_string_false_reduce_only_as_opening_orders(self) -> None:
+        self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
+        now = datetime(2026, 4, 11, 10, 0, tzinfo=timezone.utc)
+        context = robot._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=int(now.timestamp() * 1000))
+        assert context is not None
+        robot._cached_context = context
+        opening_orders = robot._build_opening_orders(context, self.client.last_price, now)
+        self.client.limit_orders = [
+            {
+                "id": f"order-{idx}",
+                "side": order.side,
+                "price": order.price,
+                "reduceOnly": "false",
+                "status": "open",
+                "info": {"reduceOnly": "false"},
+            }
+            for idx, order in enumerate(opening_orders, start=1)
+        ]
+
+        self.assertTrue(robot._has_active_grid_orders(context, now))
+
     def test_grid_robot_regrid_cancels_pending_orders_without_flattening_positions(self) -> None:
         self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
         robot = GridRobot(self.client, self.database, self.grid_config, self.execution, market_oracle=None, use_dynamic_range=False)

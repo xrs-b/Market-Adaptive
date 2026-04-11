@@ -713,13 +713,40 @@ class GridRobot(BaseStrategyRobot):
             )
         return None
 
+    def _as_exchange_bool(self, value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"", "0", "false", "f", "no", "n", "off", "none", "null"}:
+                return False
+            if normalized in {"1", "true", "t", "yes", "y", "on"}:
+                return True
+        return bool(value)
+
+    def _is_reduce_only_order(self, order: dict) -> bool:
+        info = order.get("info", {}) or {}
+        return any(
+            self._as_exchange_bool(value)
+            for value in (
+                order.get("reduceOnly"),
+                order.get("reduce_only"),
+                info.get("reduceOnly"),
+                info.get("reduce_only"),
+            )
+        )
+
     def _has_active_grid_orders(self, context: GridContext, now: datetime) -> bool:
         orders = self._fetch_open_orders_with_retry(now, purpose="health_check")
         if orders is None:
             return False
 
-        active = [order for order in orders if not bool(order.get("reduceOnly") or order.get("reduce_only") or order.get("info", {}).get("reduceOnly"))]
-        reduce_only_orders = [order for order in orders if bool(order.get("reduceOnly") or order.get("reduce_only") or order.get("info", {}).get("reduceOnly"))]
+        active = [order for order in orders if not self._is_reduce_only_order(order)]
+        reduce_only_orders = [order for order in orders if self._is_reduce_only_order(order)]
         buy_orders = [order for order in active if str(order.get("side") or "").lower() == "buy"]
         sell_orders = [order for order in active if str(order.get("side") or "").lower() == "sell"]
         reference_context = self._cached_context or context
@@ -906,7 +933,7 @@ class GridRobot(BaseStrategyRobot):
             filled = float(order.get("filled") or order.get("info", {}).get("fillSz") or 0.0)
             if status not in {"closed", "filled"} or filled <= 0:
                 continue
-            reduce_only = bool(order.get("reduceOnly") or order.get("reduce_only") or order.get("info", {}).get("reduceOnly"))
+            reduce_only = self._is_reduce_only_order(order)
             if reduce_only:
                 continue
             side = str(order.get("side") or "").lower()
