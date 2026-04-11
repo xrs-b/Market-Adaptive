@@ -14,6 +14,9 @@ class MockExchange:
         self.leverage_calls = []
         self.order_book_calls = []
         self.raise_on_set_margin_mode = None
+        self.open_orders = []
+        self.cancel_order_calls = []
+        self.raise_on_cancel_order = None
 
     def set_sandbox_mode(self, enabled: bool) -> None:
         self.sandbox_mode = enabled
@@ -29,6 +32,16 @@ class MockExchange:
     def fetch_position_mode(self, symbol: str) -> dict[str, bool]:
         del symbol
         return {"hedged": False}
+
+    def fetch_open_orders(self, symbol: str):
+        del symbol
+        return list(self.open_orders)
+
+    def cancel_order(self, order_id: str, symbol: str):
+        self.cancel_order_calls.append((order_id, symbol))
+        if self.raise_on_cancel_order is not None:
+            raise self.raise_on_cancel_order
+        return {"id": order_id, "status": "canceled"}
 
     def fetch_order_book(self, symbol: str, limit=None) -> dict:
         self.order_book_calls.append((symbol, limit))
@@ -84,6 +97,21 @@ class OKXClientTests(unittest.TestCase):
             client.exchange.leverage_calls,
             [(3, "BTC/USDT:USDT", {"mgnMode": "isolated"})],
         )
+
+    def test_cancel_all_orders_ignores_filled_or_missing_order_race(self) -> None:
+        client = DummyOKXClient(
+            OKXConfig(api_key="", api_secret="", passphrase="", default_type="swap"),
+            ExecutionConfig(),
+        )
+        client.exchange.open_orders = [{"id": "123"}]
+        client.exchange.raise_on_cancel_order = ccxt.OrderNotFound(
+            'okx {"sMsg":"Order cancellation failed as the order has been filled, canceled or does not exist."}'
+        )
+
+        responses = client.cancel_all_orders("BTC/USDT")
+
+        self.assertEqual(client.exchange.cancel_order_calls, [("123", "BTC/USDT:USDT")])
+        self.assertEqual(responses, [{"id": "123", "status": "already_closed"}])
 
     def test_fetch_order_book_normalizes_swap_symbol(self) -> None:
         client = DummyOKXClient(

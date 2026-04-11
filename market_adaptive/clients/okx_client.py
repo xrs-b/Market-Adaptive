@@ -108,7 +108,12 @@ class OKXClient:
         return self.exchange.fetch_open_orders(self._normalize_symbol(symbol))
 
     def cancel_order(self, order_id: str, symbol: str) -> dict[str, Any]:
-        return self.exchange.cancel_order(order_id, self._normalize_symbol(symbol))
+        try:
+            return self.exchange.cancel_order(order_id, self._normalize_symbol(symbol))
+        except (ccxt.OrderNotFound, ccxt.InvalidOrder, ccxt.BadRequest) as exc:
+            if self._is_idempotent_cancel_error(exc):
+                return {"id": order_id, "status": "already_closed"}
+            raise
 
     def cancel_all_orders(self, symbol: str) -> list[dict[str, Any]]:
         responses: list[dict[str, Any]] = []
@@ -393,6 +398,18 @@ class OKXClient:
             or "already" in message
             or "same" in message
             or 'setmarginmode() params["lever"] should be between 1 and 125' in message
+        )
+
+    @staticmethod
+    def _is_idempotent_cancel_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return (
+            "ordernotfound" in message
+            or "does not exist" in message
+            or "has been filled" in message
+            or "already canceled" in message
+            or "already cancelled" in message
+            or "order cancellation failed as the order has been filled" in message
         )
 
     def _is_hedged_mode(self) -> bool:
