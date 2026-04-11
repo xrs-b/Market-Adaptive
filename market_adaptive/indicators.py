@@ -263,20 +263,13 @@ def _manual_dmi(frame: pd.DataFrame, length: int) -> pd.DataFrame:
 
 
 def _dmi(frame: pd.DataFrame, length: int) -> pd.DataFrame:
+    manual = _manual_dmi(frame, length)
     if ta is not None:
         adx_frame = ta.adx(frame["high"], frame["low"], frame["close"], length=length)
         adx_column = f"ADX_{length}"
-        plus_column = f"DMP_{length}"
-        minus_column = f"DMN_{length}"
-        if adx_frame is not None and adx_column in adx_frame and plus_column in adx_frame and minus_column in adx_frame:
-            return pd.DataFrame(
-                {
-                    "adx": adx_frame[adx_column].fillna(0.0).astype(float),
-                    "plus_di": adx_frame[plus_column].fillna(0.0).astype(float),
-                    "minus_di": adx_frame[minus_column].fillna(0.0).astype(float),
-                }
-            )
-    return _manual_dmi(frame, length)
+        if adx_frame is not None and adx_column in adx_frame:
+            manual["adx"] = adx_frame[adx_column].fillna(0.0).astype(float)
+    return manual
 
 
 def _manual_adx(frame: pd.DataFrame, length: int) -> pd.Series:

@@ -43,6 +43,8 @@ class IndicatorTests(unittest.TestCase):
         self.assertTrue(math.isfinite(snapshot.volatility))
         self.assertGreaterEqual(snapshot.adx_value, 0.0)
         self.assertGreaterEqual(snapshot.di_gap, 0.0)
+        self.assertLessEqual(snapshot.plus_di_value, 100.0)
+        self.assertLessEqual(snapshot.minus_di_value, 100.0)
         self.assertGreaterEqual(snapshot.bb_width, 0.0)
         self.assertGreaterEqual(snapshot.volatility, 0.0)
 
