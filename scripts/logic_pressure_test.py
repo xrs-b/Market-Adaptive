@@ -110,6 +110,27 @@ def _evaluate_at_bar(ohlcv_by_timeframe: dict[str, list[list[Any]]], cta_config:
     }
 
 
+def _zscore_summary(rows: list[dict[str, Any]]) -> dict[str, float | None]:
+    blocked = [float(row["obv_zscore"]) for row in rows if not row["trigger_ready"]]
+    if not blocked:
+        return {"count": 0, "min": None, "max": None, "avg": None}
+    return {
+        "count": len(blocked),
+        "min": min(blocked),
+        "max": max(blocked),
+        "avg": mean(blocked),
+    }
+
+
+def _blocked_reason_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counter = Counter(
+        (row.get("long_setup_reason") or row.get("execution_trigger_reason") or "other")
+        for row in rows
+        if not row["trigger_ready"]
+    )
+    return dict(counter)
+
+
 def run_pressure_test(config: AppConfig, *, hours: float, obv_scale: float) -> dict[str, Any]:
     client = OKXClient(config.okx, config.execution)
     history = _fetch_history(client, config.cta, hours)

@@ -563,19 +563,26 @@ class GridRobot(BaseStrategyRobot):
     def _should_regrid(self, context: GridContext, current_price: float, now: datetime) -> bool:
         previous = self._cached_context
         if previous is None:
+            logger.info("[grid_robot] _should_regrid: no cached context, returning True")
             return True
         if previous.center_price <= 0:
+            logger.info("[grid_robot] _should_regrid: invalid previous center, returning True")
             return True
 
         min_lifetime_seconds = max(0, int(getattr(self.config, "min_grid_lifetime_seconds", 300)))
         if self._last_grid_placed_at is not None and min_lifetime_seconds > 0:
             age_seconds = (now - self._last_grid_placed_at).total_seconds()
+            logger.info(
+                "[grid_robot] _should_regrid: grid age=%ds, min_lifetime=%ds",
+                age_seconds,
+                min_lifetime_seconds,
+            )
             if age_seconds < min_lifetime_seconds:
                 previous_atr = max(abs(float(previous.atr_value)), 1e-12)
                 atr_diff_ratio = abs(float(context.atr_value) - float(previous.atr_value)) / previous_atr
                 if atr_diff_ratio > 0:
                     logger.info(
-                        "ATR fluctuated slightly (diff: %.1f%%), skipping regrid to maintain stability.",
+                        "[grid_robot] _should_regrid: ATR fluctuated slightly (diff: %.1f%%), skipping regrid",
                         atr_diff_ratio * 100.0,
                     )
                 return False
@@ -584,18 +591,26 @@ class GridRobot(BaseStrategyRobot):
         atr_diff_ratio = abs(float(context.atr_value) - float(previous.atr_value)) / previous_atr
         atr_regrid_change_ratio = float(getattr(self.config, "atr_regrid_change_ratio", 0.10))
         if atr_diff_ratio > atr_regrid_change_ratio:
+            logger.info("[grid_robot] _should_regrid: ATR change %.1f%% > threshold %.1f%%, triggering regrid", atr_diff_ratio * 100, atr_regrid_change_ratio * 100)
             return True
-        if atr_diff_ratio > 0:
-            logger.info(
-                "ATR fluctuated slightly (diff: %.1f%%), skipping regrid to maintain stability.",
-                atr_diff_ratio * 100.0,
-            )
 
         trigger_ratio = float(getattr(self.config, "regrid_trigger_atr_ratio", 0.30))
         trigger_distance = max(0.0, context.atr_value * trigger_ratio)
         if trigger_distance <= 0:
             trigger_distance = abs(previous.center_price) * 0.001
-        return abs(current_price - previous.center_price) >= trigger_distance
+        price_shift = abs(current_price - previous.center_price)
+        logger.info(
+            "[grid_robot] _should_regrid: price_shift=%.2f trigger_distance=%.2f (ratio=%.2f)",
+            price_shift,
+            trigger_distance,
+            trigger_ratio,
+        )
+        if price_shift >= trigger_distance:
+            logger.info("[grid_robot] _should_regrid: price shift triggers regrid")
+            return True
+
+        logger.info("[grid_robot] _should_regrid: no trigger, returning False")
+        return False
 
     def _has_active_grid_orders(self, context: GridContext, now: datetime) -> bool:
         if not hasattr(self.client, "fetch_open_orders"):
