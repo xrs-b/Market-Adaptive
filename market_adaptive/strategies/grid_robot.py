@@ -100,6 +100,8 @@ class GridRobot(BaseStrategyRobot):
         self._ws_thread: threading.Thread | None = None
         self._ws_loop: asyncio.AbstractEventLoop | None = None
         self._ws_stop_event: asyncio.Event | None = None
+        self._ws_orders_placed_in_cycle: set[str] = set()
+        self._ws_cycle_anchor_timestamp_ms: int | None = None
 
     def should_notify_action(self, action: str) -> bool:
         if action in {
@@ -513,6 +515,7 @@ class GridRobot(BaseStrategyRobot):
     def _refresh_grid_context(self, current_price: float, anchor_timestamp_ms: int | None = None) -> GridContext | None:
         atr_value = self._resolve_atr_value()
         anchor_timestamp_ms = int(anchor_timestamp_ms if anchor_timestamp_ms is not None else self.now_provider().timestamp() * 1000)
+        self._reset_ws_order_cycle(anchor_timestamp_ms)
 
         if self.use_dynamic_range and atr_value > 0:
             lower_bound = current_price - self.atr_multiplier * atr_value
@@ -898,6 +901,7 @@ class GridRobot(BaseStrategyRobot):
         context = self._cached_context
         if context is None or context.atr_value <= 0:
             return
+        self._reset_ws_order_cycle(context.anchor_timestamp_ms)
         step_size = max(1e-12, (context.upper_bound - context.lower_bound) / max(1, self.config.levels))
         for order in events:
             status = str(order.get("status") or order.get("info", {}).get("state") or "").lower()
@@ -911,21 +915,51 @@ class GridRobot(BaseStrategyRobot):
             fill_price = float(order.get("average") or order.get("price") or order.get("info", {}).get("fillPx") or 0.0)
             if side not in {"buy", "sell"} or fill_price <= 0:
                 continue
+
+            hedge_key = self._ws_hedge_dedup_key(order)
+            if hedge_key is not None and hedge_key in self._ws_orders_placed_in_cycle:
+                logger.info("Grid websocket hedge skipped duplicate | key=%s", hedge_key)
+                continue
+
+            close_pos_side = "long" if side == "buy" else "short"
+            if not self._has_open_position_for_pos_side(close_pos_side):
+                logger.warning(
+                    "Grid websocket hedge skipped missing position | fill_side=%s pos_side=%s filled=%.8f",
+                    side,
+                    close_pos_side,
+                    filled,
+                )
+                continue
+
             counter_side = "sell" if side == "buy" else "buy"
-            counter_price = fill_price + step_size if side == "buy" else fill_price - step_size
-            counter_price = self.client.price_to_precision(self.symbol, counter_price)
+            raw_counter_price = fill_price + step_size if side == "buy" else fill_price - step_size
+            bounded_counter_price = min(max(raw_counter_price, context.lower_bound), context.upper_bound)
+            counter_price = float(self.client.price_to_precision(self.symbol, bounded_counter_price))
             counter_amount = self._normalize_amount(filled)
             if counter_price <= 0 or counter_amount <= 0:
                 continue
-            close_pos_side = "long" if side == "buy" else "short"
-            self.client.place_limit_order(
-                self.symbol,
-                counter_side,
-                counter_amount,
-                counter_price,
-                reduce_only=True,
-                params={"posSide": close_pos_side},
-            )
+            try:
+                response = self.client.place_limit_order(
+                    self.symbol,
+                    counter_side,
+                    counter_amount,
+                    counter_price,
+                    reduce_only=True,
+                    params={"posSide": close_pos_side},
+                )
+            except Exception:
+                logger.exception(
+                    "Grid websocket hedge placement failed | fill_side=%s fill_price=%.2f counter_side=%s counter_price=%.2f amount=%.8f",
+                    side,
+                    fill_price,
+                    counter_side,
+                    counter_price,
+                    counter_amount,
+                )
+                continue
+
+            if hedge_key is not None:
+                self._ws_orders_placed_in_cycle.add(hedge_key)
             logger.info(
                 "Grid websocket hedge order | fill_side=%s fill_price=%.2f counter_side=%s counter_price=%.2f amount=%.8f",
                 side,
@@ -933,6 +967,68 @@ class GridRobot(BaseStrategyRobot):
                 counter_side,
                 counter_price,
                 counter_amount,
+            )
+            self._confirm_ws_hedge_order(response, counter_side=counter_side, counter_price=counter_price, amount=counter_amount)
+
+    def _reset_ws_order_cycle(self, anchor_timestamp_ms: int | None) -> None:
+        if anchor_timestamp_ms is None:
+            return
+        if self._ws_cycle_anchor_timestamp_ms == anchor_timestamp_ms:
+            return
+        self._ws_cycle_anchor_timestamp_ms = anchor_timestamp_ms
+        self._ws_orders_placed_in_cycle.clear()
+
+    def _ws_hedge_dedup_key(self, order: dict) -> str | None:
+        order_id = order.get("id") or order.get("orderId") or order.get("info", {}).get("ordId")
+        if order_id in (None, ""):
+            return None
+        return str(order_id)
+
+    def _has_open_position_for_pos_side(self, pos_side: str) -> bool:
+        if not hasattr(self.client, "fetch_positions"):
+            return True
+        try:
+            positions = self.client.fetch_positions([self.symbol]) or []
+        except Exception:
+            logger.exception("Grid websocket hedge position check failed | pos_side=%s", pos_side)
+            return False
+
+        for position in positions:
+            raw_size = position.get("contracts") or position.get("positionAmt") or position.get("info", {}).get("pos") or 0.0
+            size = abs(float(raw_size or 0.0))
+            if size <= 0:
+                continue
+            side = str(position.get("side") or position.get("info", {}).get("posSide") or "").lower()
+            if side not in {"long", "short"}:
+                side = "long" if float(raw_size or 0.0) >= 0 else "short"
+            if side == str(pos_side).lower():
+                return True
+        return False
+
+    def _confirm_ws_hedge_order(self, response: dict | None, *, counter_side: str, counter_price: float, amount: float) -> None:
+        if not hasattr(self.client, "fetch_order"):
+            return
+        order_id = response.get("id") if isinstance(response, dict) else None
+        if order_id in (None, ""):
+            return
+        try:
+            time.sleep(0.1)
+            hedge_order = self.client.fetch_order(str(order_id), self.symbol)
+        except Exception:
+            logger.exception("Grid websocket hedge confirmation failed | order_id=%s", order_id)
+            return
+        if hedge_order is None:
+            logger.warning("Grid websocket hedge_order_rejected | order_id=%s side=%s price=%.2f amount=%.8f status=missing", order_id, counter_side, counter_price, amount)
+            return
+        status = str(hedge_order.get("status") or hedge_order.get("info", {}).get("state") or "").lower()
+        if status not in {"open", "closed", "filled", "partially_filled", "partiallyfilled", "live"}:
+            logger.warning(
+                "Grid websocket hedge_order_rejected | order_id=%s side=%s price=%.2f amount=%.8f status=%s",
+                order_id,
+                counter_side,
+                counter_price,
+                amount,
+                status or "unknown",
             )
 
     def _derive_layer_prices(self, lower_bound: float, anchor_price: float, upper_bound: float) -> tuple[list[float], list[float]]:

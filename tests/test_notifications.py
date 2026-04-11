@@ -59,6 +59,10 @@ class DummyClient:
         self.close_all_calls.append(symbol)
         return []
 
+    def fetch_open_orders(self, symbol: str):
+        del symbol
+        return list(self.limit_orders)
+
 
 class NotificationTests(unittest.TestCase):
     def setUp(self) -> None:

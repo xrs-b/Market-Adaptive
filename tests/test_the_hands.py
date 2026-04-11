@@ -1161,12 +1161,14 @@ class TheHandsTests(unittest.TestCase):
     def test_grid_robot_websocket_fill_places_reduce_only_counter_order_with_pos_side(self) -> None:
         self._insert_status("sideways")
         self._load_sideways_grid_data(center=100.0)
+        self.client.positions = [{"contracts": 0.02, "side": "long", "info": {"posSide": "long"}}]
         robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False, market_oracle=None)
         context = robot._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=1)
         assert context is not None
         robot._cached_context = context
 
         robot._on_ws_orders({
+            "id": "fill-1",
             "status": "closed",
             "filled": 0.01,
             "side": "buy",
@@ -1179,6 +1181,112 @@ class TheHandsTests(unittest.TestCase):
         self.assertTrue(self.client.limit_orders[0]["reduce_only"])
         self.assertEqual(self.client.limit_orders[0]["params"]["posSide"], "long")
         self.assertEqual(self.client.limit_orders[0]["side"], "sell")
+
+    def test_grid_robot_websocket_fill_skips_hedge_when_position_missing(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+        self.client.positions = []
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False, market_oracle=None)
+        context = robot._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=1)
+        assert context is not None
+        robot._cached_context = context
+
+        with self.assertLogs("market_adaptive.strategies.grid_robot", level="WARNING") as captured:
+            robot._on_ws_orders({
+                "id": "fill-missing-position",
+                "status": "closed",
+                "filled": 0.01,
+                "side": "buy",
+                "price": 99.0,
+                "reduceOnly": False,
+                "info": {"state": "filled", "fillSz": "0.01", "fillPx": "99.0"},
+            })
+
+        self.assertEqual(len(self.client.limit_orders), 0)
+        self.assertTrue(any("missing position" in message for message in captured.output))
+
+    def test_grid_robot_websocket_fill_is_idempotent_per_cycle(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+        self.client.positions = [{"contracts": 0.02, "side": "long", "info": {"posSide": "long"}}]
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False, market_oracle=None)
+        context = robot._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=1)
+        assert context is not None
+        robot._cached_context = context
+        payload = {
+            "id": "fill-dup-1",
+            "status": "closed",
+            "filled": 0.01,
+            "side": "buy",
+            "price": 99.0,
+            "reduceOnly": False,
+            "info": {"state": "filled", "fillSz": "0.01", "fillPx": "99.0"},
+        }
+
+        robot._on_ws_orders(payload)
+        robot._on_ws_orders(payload)
+
+        self.assertEqual(len(self.client.limit_orders), 1)
+
+    def test_grid_robot_websocket_fill_clamps_hedge_price_to_grid_bounds(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+        self.client.positions = [{"contracts": 0.02, "side": "short", "info": {"posSide": "short"}}]
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False, market_oracle=None)
+        context = robot._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=1)
+        assert context is not None
+        robot._cached_context = context
+
+        robot._on_ws_orders({
+            "id": "fill-clamp-1",
+            "status": "closed",
+            "filled": 0.01,
+            "side": "sell",
+            "price": context.lower_bound,
+            "reduceOnly": False,
+            "info": {"state": "filled", "fillSz": "0.01", "fillPx": str(context.lower_bound)},
+        })
+
+        self.assertEqual(len(self.client.limit_orders), 1)
+        self.assertAlmostEqual(self.client.limit_orders[0]["price"], context.lower_bound)
+        self.assertEqual(self.client.limit_orders[0]["side"], "buy")
+
+    def test_grid_robot_websocket_fill_logs_placement_failure_and_rejection(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+        self.client.positions = [{"contracts": 0.02, "side": "long", "info": {"posSide": "long"}}]
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False, market_oracle=None)
+        context = robot._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=1)
+        assert context is not None
+        robot._cached_context = context
+
+        self.client.raise_on_limit_order_at = 0
+        with self.assertLogs("market_adaptive.strategies.grid_robot", level="ERROR") as failure_logs:
+            robot._on_ws_orders({
+                "id": "fill-fail-1",
+                "status": "closed",
+                "filled": 0.01,
+                "side": "buy",
+                "price": 99.0,
+                "reduceOnly": False,
+                "info": {"state": "filled", "fillSz": "0.01", "fillPx": "99.0"},
+            })
+        self.assertTrue(any("hedge placement failed" in message for message in failure_logs.output))
+        self.assertEqual(len(self.client.limit_orders), 0)
+
+        self.client.raise_on_limit_order_at = None
+        self.client.fetch_order_responses["order-1"] = {"id": "order-1", "status": "canceled", "info": {"state": "canceled"}}
+        with self.assertLogs("market_adaptive.strategies.grid_robot", level="WARNING") as rejection_logs:
+            robot._on_ws_orders({
+                "id": "fill-reject-1",
+                "status": "closed",
+                "filled": 0.01,
+                "side": "buy",
+                "price": 99.0,
+                "reduceOnly": False,
+                "info": {"state": "filled", "fillSz": "0.01", "fillPx": "99.0"},
+            })
+        self.assertTrue(any("hedge_order_rejected" in message for message in rejection_logs.output))
 
     def test_grid_robot_regime_cleanup_uses_limit_for_profitable_positions(self) -> None:
         self.client.last_price = 105.0
