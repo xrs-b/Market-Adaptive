@@ -95,6 +95,7 @@ class GridRobot(BaseStrategyRobot):
         self._last_grid_placed_at: datetime | None = None
         self._last_healthy_grid_seen_at: datetime | None = None
         self._health_check_failed_streak = 0
+        self._placed_order_ids: list[str] = []
         self._health_check_degraded_until: datetime | None = None
         self._ws_thread: threading.Thread | None = None
         self._ws_loop: asyncio.AbstractEventLoop | None = None
@@ -321,12 +322,8 @@ class GridRobot(BaseStrategyRobot):
         opening_orders = self._build_opening_orders(context, current_price, now)
         rebalance_orders = self._build_rebalance_orders(context, net_position_size)
 
-        placed_orders = 0
-        opening_orders_placed = 0
-        rebalance_orders_placed = 0
+        opening_candidates: list[GridOrderPlan] = []
         cooled_layers = 0
-        reserved_notional = 0.0
-
         for order in opening_orders:
             if order.side == "buy" and self._layer_is_cooling(order.layer_key, now, current_price, order.price):
                 cooled_layers += 1
@@ -335,10 +332,15 @@ class GridRobot(BaseStrategyRobot):
                 continue
             if not self._directional_opening_allowed(order.side, order.price, order.amount):
                 continue
-            if self._try_place_limit_order(order, reserved_notional=reserved_notional):
-                placed_orders += 1
-                opening_orders_placed += 1
-                reserved_notional += self._estimate_notional(order.amount, order.price)
+            opening_candidates.append(order)
+
+        batch_result = self._place_grid_batch_safely(opening_candidates)
+        if batch_result["status"] == "failed":
+            return f"grid:batch_place_failed|reason={batch_result['reason']}"
+
+        opening_orders_placed = int(batch_result["placed_orders"])
+        placed_orders = opening_orders_placed
+        rebalance_orders_placed = 0
 
         for order in rebalance_orders:
             if self._try_place_limit_order(order, reserved_notional=0.0):
@@ -973,6 +975,48 @@ class GridRobot(BaseStrategyRobot):
 
         return orders
 
+    def _place_grid_batch_safely(self, orders: list[GridOrderPlan]) -> dict[str, int | str]:
+        self._placed_order_ids = []
+        if not orders:
+            return {"status": "ok", "placed_orders": 0}
+
+        batch_notional = 0.0
+        for order in orders:
+            amount = self._normalize_amount(order.amount)
+            if amount <= 0:
+                continue
+            requested_notional = batch_notional + self._estimate_notional(amount, order.price)
+            if self.risk_manager is not None and not order.reduce_only:
+                opening_side = "long" if order.side == "buy" else "short"
+                leverage_allowed, reason = self.risk_manager.check_directional_exposure_limit(
+                    requested_notional,
+                    opening_side,
+                )
+                if not leverage_allowed:
+                    return {"status": "failed", "placed_orders": 0, "reason": str(reason or "directional_limit")}
+                limit_allowed, reason = self.risk_manager.check_symbol_notional_limit(self.symbol, requested_notional)
+                if not limit_allowed:
+                    return {"status": "failed", "placed_orders": 0, "reason": str(reason or "symbol_limit")}
+            batch_notional = requested_notional
+
+        placed_orders = 0
+        try:
+            for order in orders:
+                placed_orders += self._try_place_limit_order(order, reserved_notional=0.0, track_batch=True)
+        except Exception as exc:
+            self._rollback_grid_batch_orders()
+            return {"status": "failed", "placed_orders": 0, "reason": exc.__class__.__name__}
+
+        return {"status": "ok", "placed_orders": placed_orders}
+
+    def _rollback_grid_batch_orders(self) -> None:
+        for order_id in list(reversed(self._placed_order_ids)):
+            try:
+                self.client.cancel_order(order_id, self.symbol)
+            except Exception:
+                logger.exception("[grid_robot] failed to rollback grid batch order | symbol=%s order_id=%s", self.symbol, order_id)
+        self._placed_order_ids = []
+
     def _build_rebalance_orders(self, context: GridContext, net_position_size: float) -> list[GridOrderPlan]:
         base_amount = max(0.0, float(self.execution_config.grid_order_size))
         threshold = base_amount * max(0.0, float(self.config.rebalance_exposure_threshold))
@@ -1013,7 +1057,7 @@ class GridRobot(BaseStrategyRobot):
             )
         return orders
 
-    def _try_place_limit_order(self, order: GridOrderPlan, *, reserved_notional: float) -> int:
+    def _try_place_limit_order(self, order: GridOrderPlan, *, reserved_notional: float, track_batch: bool = False) -> int:
         amount = self._normalize_amount(order.amount)
         if amount <= 0:
             return 0
@@ -1031,13 +1075,17 @@ class GridRobot(BaseStrategyRobot):
             if not limit_allowed:
                 return 0
 
-        self.client.place_limit_order(
+        response = self.client.place_limit_order(
             self.symbol,
             order.side,
             amount,
             order.price,
             reduce_only=order.reduce_only,
         )
+        if track_batch:
+            order_id = response.get("id") if isinstance(response, dict) else None
+            if order_id not in (None, ""):
+                self._placed_order_ids.append(str(order_id))
         return 1
 
     def _layer_is_cooling(self, layer_key: str, now: datetime, current_price: float, layer_price: float) -> bool:

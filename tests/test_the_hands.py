@@ -16,6 +16,7 @@ class DummyClient:
         self.market_orders = []
         self.limit_orders = []
         self.cancel_all_calls = []
+        self.cancel_order_calls = []
         self.close_all_calls = []
         self.futures_settings_calls = []
         self.last_price = 100.0
@@ -23,6 +24,8 @@ class DummyClient:
         self.ohlcv_by_timeframe = {}
         self.positions = []
         self.latest_long_short_ratio = None
+        self.raise_on_limit_order_at = None
+        self._limit_order_seq = 0
         self.order_book = {
             "bids": [[100.0 - index * 0.1, 1.6] for index in range(20)],
             "asks": [[100.1 + index * 0.1, 1.0] for index in range(20)],
@@ -52,9 +55,17 @@ class DummyClient:
         return payload
 
     def place_limit_order(self, symbol: str, side: str, amount: float, price: float, **kwargs):
-        payload = {"symbol": symbol, "side": side, "amount": amount, "price": price, "status": "open", **kwargs}
+        if self.raise_on_limit_order_at is not None and len(self.limit_orders) >= self.raise_on_limit_order_at:
+            raise RuntimeError("limit order placement failed")
+        self._limit_order_seq += 1
+        payload = {"id": f"order-{self._limit_order_seq}", "symbol": symbol, "side": side, "amount": amount, "price": price, "status": "open", **kwargs}
         self.limit_orders.append(payload)
         return payload
+
+    def cancel_order(self, order_id: str, symbol: str):
+        self.cancel_order_calls.append((order_id, symbol))
+        self.limit_orders = [order for order in self.limit_orders if order.get("id") != order_id]
+        return {"id": order_id, "symbol": symbol, "status": "canceled"}
 
     def cancel_all_orders(self, symbol: str):
         self.cancel_all_calls.append(symbol)
@@ -686,6 +697,46 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(second.action.split("|")[0], "grid:flash_crash_cooldown")
         self.assertIn("remaining=", second.action)
         self.assertEqual(len(self.client.limit_orders), 0)
+
+    def test_grid_robot_batch_places_opening_orders_before_rebalance_orders(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+        self.client.positions = [{"contracts": 0.12, "side": "long"}]
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution)
+
+        result = robot.run()
+
+        self.assertIn("grid:placed_12_orders@100.00", result.action)
+        self.assertIn("openings=10", result.action)
+        self.assertIn("rebalances=2", result.action)
+        self.assertEqual(robot._placed_order_ids, [f"order-{index}" for index in range(1, 11)])
+        self.assertEqual(len(self.client.cancel_order_calls), 0)
+
+    def test_grid_robot_rolls_back_partial_batch_when_opening_order_placement_fails(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+        self.client.raise_on_limit_order_at = 3
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
+
+        result = robot.run()
+
+        self.assertEqual(result.action, "grid:batch_place_failed|reason=RuntimeError")
+        self.assertEqual(self.client.cancel_order_calls, [("order-3", "BTC/USDT"), ("order-2", "BTC/USDT"), ("order-1", "BTC/USDT")])
+        self.assertEqual(len(self.client.limit_orders), 0)
+        self.assertEqual(robot._placed_order_ids, [])
+
+    def test_grid_robot_batch_failure_skips_rebalance_orders(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+        self.client.positions = [{"contracts": 0.12, "side": "long"}]
+        self.client.raise_on_limit_order_at = 1
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
+
+        result = robot.run()
+
+        self.assertEqual(result.action, "grid:batch_place_failed|reason=RuntimeError")
+        self.assertEqual([order["side"] for order in self.client.limit_orders], [])
+        self.assertEqual(self.client.cancel_order_calls, [("order-1", "BTC/USDT")])
 
     def test_grid_robot_places_reduce_only_rebalance_orders_when_long_heavy(self) -> None:
         self._insert_status("sideways")
