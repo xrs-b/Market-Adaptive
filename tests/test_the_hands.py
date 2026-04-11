@@ -604,6 +604,9 @@ class TheHandsTests(unittest.TestCase):
         result = robot.run()
 
         self.assertEqual(result.action.split("|")[0], "grid:flash_crash_triggered")
+        self.assertIn("atr=", result.action)
+        self.assertIn("dynamic=", result.action)
+        self.assertIn("regrid=false", result.action)
         self.assertEqual(len(self.client.limit_orders), 0)
         self.assertGreaterEqual(self.client.cancel_all_calls.count("BTC/USDT"), 1)
 

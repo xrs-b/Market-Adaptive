@@ -233,7 +233,14 @@ class GridRobot(BaseStrategyRobot):
             self._publish_grid_risk(None)
             remaining_seconds = max(0, int((self._flash_crash_until - now).total_seconds())) if self._flash_crash_until else 0
             logger.warning("Grid flash crash cooldown | symbol=%s remaining=%ss", self.symbol, remaining_seconds)
-            return f"grid:flash_crash_cooldown|remaining={remaining_seconds}s"
+            cached = self._cached_context
+            if cached is None:
+                return f"grid:flash_crash_cooldown|remaining={remaining_seconds}s|dynamic={str(self.use_dynamic_range).lower()}|regrid=false"
+            return (
+                f"grid:flash_crash_cooldown|remaining={remaining_seconds}s|atr={cached.atr_value:.2f}|"
+                f"dynamic={str(self.use_dynamic_range).lower()}|regrid=false|center={cached.center_price:.2f}|"
+                f"bounds={cached.lower_bound:.2f}-{cached.upper_bound:.2f}"
+            )
 
         context = self._refresh_grid_context(current_price, anchor_timestamp_ms=int(now.timestamp() * 1000))
         if context is None:
@@ -273,6 +280,7 @@ class GridRobot(BaseStrategyRobot):
         if not needs_regrid and self._has_active_grid_orders():
             return (
                 f"grid:hold_existing_grid|center={context.center_price:.2f}|atr={context.atr_value:.2f}|"
+                f"dynamic={str(self.use_dynamic_range).lower()}|regrid=false|"
                 f"bounds={context.lower_bound:.2f}-{context.upper_bound:.2f}"
             )
 
@@ -318,6 +326,8 @@ class GridRobot(BaseStrategyRobot):
             f"cooldown={cooled_layers}",
             f"atr={context.atr_value:.2f}",
             f"dynamic={str(self.use_dynamic_range).lower()}",
+            f"regrid=true",
+            f"center={context.center_price:.2f}",
             f"bounds={context.lower_bound:.2f}-{context.upper_bound:.2f}",
         ]
         if risk_blocked_reason is not None:
@@ -437,7 +447,8 @@ class GridRobot(BaseStrategyRobot):
         )
         return (
             f"grid:flash_crash_triggered|range_1m={one_minute_range:.2f}|atr={context.atr_value:.2f}"
-            f"|threshold={threshold:.2f}|cooldown={cooldown_seconds}s"
+            f"|threshold={threshold:.2f}|cooldown={cooldown_seconds}s|dynamic={str(self.use_dynamic_range).lower()}"
+            f"|regrid=false|center={context.center_price:.2f}|bounds={context.lower_bound:.2f}-{context.upper_bound:.2f}"
         )
 
     def _latest_flash_crash_range(self, now: datetime) -> float:
