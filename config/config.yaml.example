@@ -121,11 +121,12 @@ cta:
 
 grid:
   symbol: "BTC/USDT"
+  equity_allocation_ratio: 0.40
   bollinger_timeframe: "1h"
   lookback_limit: 120
   bollinger_length: 20
   bollinger_std: 2.0
-  levels: 10
+  levels: 8
   leverage: 3
   martingale_factor: 1.25
   layer_trigger_window_seconds: 300
@@ -140,6 +141,8 @@ grid:
   atr_timeframe: "1h"
   atr_period: 14
   atr_multiplier: 2.5
+  min_spacing_ratio: 0.008
+  fee_rate: 0.001
   atr_regrid_change_ratio: 0.10
   regrid_trigger_atr_ratio: 0.30
   min_grid_lifetime_seconds: 300

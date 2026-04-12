@@ -757,8 +757,11 @@ class GridRobot(BaseStrategyRobot):
         actual_buy_prices = [self._extract_order_price(order) for order in buy_orders]
         actual_sell_prices = [self._extract_order_price(order) for order in sell_orders]
         all_opening_prices = [price for price in actual_buy_prices + actual_sell_prices if price > 0]
+        expected_opening_prices = [price for price in expected_buy_prices + expected_sell_prices if price > 0]
+        expected_lower_bound = min(expected_opening_prices) if expected_opening_prices else reference_context.lower_bound
+        expected_upper_bound = max(expected_opening_prices) if expected_opening_prices else reference_context.upper_bound
         within_bounds = bool(all_opening_prices) and all(
-            reference_context.lower_bound - 1e-9 <= price <= reference_context.upper_bound + 1e-9
+            expected_lower_bound - 1e-9 <= price <= expected_upper_bound + 1e-9
             for price in all_opening_prices
         )
         price_tolerance = self._grid_health_price_tolerance(reference_context)
@@ -957,9 +960,7 @@ class GridRobot(BaseStrategyRobot):
                 continue
 
             counter_side = "sell" if side == "buy" else "buy"
-            raw_counter_price = fill_price + step_size if side == "buy" else fill_price - step_size
-            bounded_counter_price = min(max(raw_counter_price, context.lower_bound), context.upper_bound)
-            counter_price = float(self.client.price_to_precision(self.symbol, bounded_counter_price))
+            counter_price = self._calculate_fee_aware_close_price(entry_side=side, entry_price=fill_price, step_size=step_size, context=context)
             counter_amount = self._normalize_amount(filled)
             if counter_price <= 0 or counter_amount <= 0:
                 continue
@@ -1059,9 +1060,14 @@ class GridRobot(BaseStrategyRobot):
     def _derive_layer_prices(self, lower_bound: float, anchor_price: float, upper_bound: float) -> tuple[list[float], list[float]]:
         buy_levels = max(1, self.config.levels // 2)
         sell_levels = max(1, self.config.levels - buy_levels)
+        min_spacing_ratio = max(0.0, float(getattr(self.config, "min_spacing_ratio", 0.0)))
 
         buy_step = max(1e-12, (anchor_price - lower_bound) / buy_levels)
         sell_step = max(1e-12, (upper_bound - anchor_price) / sell_levels)
+        minimum_step = max(anchor_price * min_spacing_ratio, 1e-12)
+
+        buy_step = max(buy_step, minimum_step)
+        sell_step = max(sell_step, minimum_step)
 
         buy_prices = [anchor_price - buy_step * (index + 1) for index in range(buy_levels)]
         sell_prices = [anchor_price + sell_step * (index + 1) for index in range(sell_levels)]
@@ -1071,8 +1077,24 @@ class GridRobot(BaseStrategyRobot):
         del current_price, now
         orders: list[GridOrderPlan] = []
         per_level_amount = self._calculate_grid_order_amount(context.center_price)
+        per_level_notional = self._estimate_notional(per_level_amount, context.center_price)
 
         for index, price in enumerate(context.buy_prices, start=1):
+            expected_close_price = self._calculate_fee_aware_close_price(entry_side="buy", entry_price=price, step_size=abs(context.center_price - price), context=context)
+            expected_net_profit = self._estimate_grid_level_net_profit(
+                entry_side="buy",
+                entry_price=price,
+                close_price=expected_close_price,
+                amount=per_level_amount,
+            )
+            logger.info(
+                "Grid level plan | symbol=%s side=buy level=%d entry=%.2f expected_notional=%.2fUSDT expected_net_profit=%.2fUSDT",
+                self.symbol,
+                index,
+                price,
+                per_level_notional,
+                expected_net_profit,
+            )
             orders.append(
                 GridOrderPlan(
                     layer_key=self._layer_key(context.anchor_timestamp_ms, "buy", index),
@@ -1084,6 +1106,21 @@ class GridRobot(BaseStrategyRobot):
             )
 
         for index, price in enumerate(context.sell_prices, start=1):
+            expected_close_price = self._calculate_fee_aware_close_price(entry_side="sell", entry_price=price, step_size=abs(price - context.center_price), context=context)
+            expected_net_profit = self._estimate_grid_level_net_profit(
+                entry_side="sell",
+                entry_price=price,
+                close_price=expected_close_price,
+                amount=per_level_amount,
+            )
+            logger.info(
+                "Grid level plan | symbol=%s side=sell level=%d entry=%.2f expected_notional=%.2fUSDT expected_net_profit=%.2fUSDT",
+                self.symbol,
+                index,
+                price,
+                per_level_notional,
+                expected_net_profit,
+            )
             orders.append(
                 GridOrderPlan(
                     layer_key=self._layer_key(context.anchor_timestamp_ms, "sell", index),
@@ -1095,6 +1132,32 @@ class GridRobot(BaseStrategyRobot):
             )
 
         return orders
+
+
+    def _calculate_fee_aware_close_price(self, *, entry_side: str, entry_price: float, step_size: float, context: GridContext | None = None) -> float:
+        fee_rate = max(0.0, float(getattr(self.config, "fee_rate", 0.001)))
+        minimum_move = entry_price * ((1 + fee_rate) / max(1e-12, 1 - fee_rate) - 1)
+        target_move = max(float(step_size), minimum_move) + max(1e-8, entry_price * 1e-6)
+        if str(entry_side).lower() == "buy":
+            raw_close_price = entry_price + target_move
+            if context is not None:
+                raw_close_price = min(raw_close_price, context.upper_bound)
+        else:
+            raw_close_price = entry_price - target_move
+            if context is not None:
+                raw_close_price = max(raw_close_price, context.lower_bound)
+        return float(self.client.price_to_precision(self.symbol, raw_close_price))
+
+    def _estimate_grid_level_net_profit(self, *, entry_side: str, entry_price: float, close_price: float, amount: float) -> float:
+        amount = max(0.0, float(amount))
+        if amount <= 0:
+            return 0.0
+        fee_rate = max(0.0, float(getattr(self.config, "fee_rate", 0.001)))
+        entry_notional = self._estimate_notional(amount, entry_price)
+        close_notional = self._estimate_notional(amount, close_price)
+        gross_profit = (close_price - entry_price) * amount if str(entry_side).lower() == "buy" else (entry_price - close_price) * amount
+        fees = (entry_notional + close_notional) * fee_rate
+        return gross_profit - fees
 
     def _calculate_grid_order_amount(self, reference_price: float) -> float:
         if reference_price <= 0:

@@ -207,12 +207,12 @@ class CTAConfig:
 @dataclass
 class GridConfig:
     symbol: str = "BTC/USDT"
-    equity_allocation_ratio: float = 0.20
+    equity_allocation_ratio: float = 0.40
     timeframe: str = "1h"  # legacy alias for Bollinger timeframe
     lookback_limit: int = 120
     bollinger_period: int = 20
     bollinger_std: float = 2.0
-    levels: int = 10
+    levels: int = 8
     leverage: int = 3
     martingale_factor: float = 1.25
     trigger_window_seconds: int = 300
@@ -228,6 +228,8 @@ class GridConfig:
     atr_timeframe: str = "1h"
     atr_period: int = 14
     atr_multiplier: float = 2.5
+    min_spacing_ratio: float = 0.008
+    fee_rate: float = 0.001
     atr_regrid_change_ratio: float = 0.10
     regrid_trigger_atr_ratio: float = 0.30
     min_grid_lifetime_seconds: int = 300
@@ -420,12 +422,12 @@ def load_config(config_path: str | Path) -> AppConfig:
     )
     grid = GridConfig(
         symbol=str(grid_payload.get("symbol", "BTC/USDT")),
-        equity_allocation_ratio=float(grid_payload.get("equity_allocation_ratio", 0.20)),
+        equity_allocation_ratio=float(grid_payload.get("equity_allocation_ratio", 0.40)),
         timeframe=str(grid_payload.get("bollinger_timeframe", grid_payload.get("timeframe", "1h"))),
         lookback_limit=int(grid_payload.get("lookback_limit", 120)),
         bollinger_period=int(grid_payload.get("bollinger_length", grid_payload.get("bollinger_period", 20))),
         bollinger_std=float(grid_payload.get("bollinger_std", 2.0)),
-        levels=int(grid_payload.get("levels", 10)),
+        levels=int(grid_payload.get("levels", 8)),
         leverage=int(grid_payload.get("leverage", 3)),
         martingale_factor=float(grid_payload.get("martingale_factor", 1.25)),
         trigger_window_seconds=int(grid_payload.get("layer_trigger_window_seconds", grid_payload.get("trigger_window_seconds", 300))),
@@ -441,6 +443,8 @@ def load_config(config_path: str | Path) -> AppConfig:
         atr_timeframe=str(grid_payload.get("atr_timeframe", "1h")),
         atr_period=int(grid_payload.get("atr_period", 14)),
         atr_multiplier=float(grid_payload.get("atr_multiplier", 2.5)),
+        min_spacing_ratio=float(grid_payload.get("min_spacing_ratio", 0.008)),
+        fee_rate=float(grid_payload.get("fee_rate", 0.001)),
         atr_regrid_change_ratio=float(grid_payload.get("atr_regrid_change_ratio", 0.10)),
         regrid_trigger_atr_ratio=float(grid_payload.get("regrid_trigger_atr_ratio", 0.30)),
         min_grid_lifetime_seconds=int(grid_payload.get("min_grid_lifetime_seconds", 300)),

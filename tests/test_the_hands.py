@@ -211,7 +211,7 @@ class TheHandsTests(unittest.TestCase):
             lookback_limit=80,
             bollinger_period=20,
             bollinger_std=2.0,
-            levels=10,
+            levels=8,
             leverage=5,
             martingale_factor=1.5,
             trigger_window_seconds=300,
@@ -661,9 +661,9 @@ class TheHandsTests(unittest.TestCase):
         result = robot.run()
 
         self.assertTrue(result.active)
-        self.assertIn("grid:placed_10_orders@100.00", result.action)
+        self.assertIn("grid:placed_8_orders@100.00", result.action)
         self.assertIn("rebalances=0", result.action)
-        self.assertEqual(len(self.client.limit_orders), 10)
+        self.assertEqual(len(self.client.limit_orders), 8)
         self.assertEqual(len(self.client.futures_settings_calls), 1)
         self.assertEqual(self.client.futures_settings_calls[0]["leverage"], 5)
         self.assertEqual(self.client.futures_settings_calls[0]["margin_mode"], "isolated")
@@ -671,14 +671,54 @@ class TheHandsTests(unittest.TestCase):
 
         buy_orders = [order for order in self.client.limit_orders if order["side"] == "buy"]
         sell_orders = [order for order in self.client.limit_orders if order["side"] == "sell"]
-        self.assertEqual(len(buy_orders), 5)
-        self.assertEqual(len(sell_orders), 5)
-        self.assertTrue(all(order["amount"] == 19.0 for order in buy_orders + sell_orders))
+        self.assertEqual(len(buy_orders), 4)
+        self.assertEqual(len(sell_orders), 4)
+        self.assertTrue(all(order["amount"] == 47.5 for order in buy_orders + sell_orders))
         self.assertTrue(all(not order.get("reduce_only", False) for order in sell_orders))
-        self.assertTrue(all(order["price"] >= 97.0 for order in buy_orders))
-        self.assertTrue(all(order["price"] <= 103.0 for order in sell_orders))
+        self.assertTrue(all(order["price"] >= 96.8 for order in buy_orders))
+        self.assertTrue(all(order["price"] <= 103.2 for order in sell_orders))
         self.assertLess(max(buy_orders, key=lambda order: order["price"])["price"], 100.0)
         self.assertGreater(min(sell_orders, key=lambda order: order["price"])["price"], 100.0)
+
+
+    def test_grid_robot_enforces_minimum_spacing_floor_of_point_eight_percent(self) -> None:
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
+
+        buy_prices, sell_prices = robot._derive_layer_prices(99.5, 100.0, 100.5)
+
+        self.assertEqual(len(buy_prices), 4)
+        self.assertEqual(len(sell_prices), 4)
+        self.assertAlmostEqual(buy_prices[0], 99.2)
+        self.assertAlmostEqual(sell_prices[0], 100.8)
+        self.assertAlmostEqual(buy_prices[0] - buy_prices[1], 0.8)
+        self.assertAlmostEqual(sell_prices[1] - sell_prices[0], 0.8)
+
+    def test_grid_robot_uses_eight_level_grid_by_default(self) -> None:
+        self.assertEqual(self.grid_config.levels, 8)
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
+        context = robot._fallback_context(100.0, atr_value=0.0)
+
+        self.assertEqual(len(context.buy_prices), 4)
+        self.assertEqual(len(context.sell_prices), 4)
+
+    def test_grid_robot_allocates_forty_percent_equity_across_levels(self) -> None:
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
+
+        amount = robot._calculate_grid_order_amount(100.0)
+
+        self.assertAlmostEqual(amount, 47.5)
+
+    def test_grid_robot_fee_aware_close_price_exceeds_round_trip_fee_move(self) -> None:
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
+        context = robot._fallback_context(100.0, atr_value=0.0)
+
+        buy_close = robot._calculate_fee_aware_close_price(entry_side="buy", entry_price=100.0, step_size=0.05, context=context)
+        sell_close = robot._calculate_fee_aware_close_price(entry_side="sell", entry_price=100.0, step_size=0.05, context=context)
+
+        self.assertGreater(buy_close - 100.0, 0.2)
+        self.assertGreater(100.0 - sell_close, 0.2)
+        self.assertGreater(robot._estimate_grid_level_net_profit(entry_side="buy", entry_price=100.0, close_price=buy_close, amount=1.0), 0.0)
+        self.assertGreater(robot._estimate_grid_level_net_profit(entry_side="sell", entry_price=100.0, close_price=sell_close, amount=1.0), 0.0)
 
     def test_grid_robot_honors_risk_observe_block_and_stops_opening_orders(self) -> None:
         self._insert_status("sideways")
@@ -791,7 +831,7 @@ class TheHandsTests(unittest.TestCase):
         fourth_result = robot.run()
         fourth_count = len(self.client.limit_orders) - first_count - second_count - third_count
 
-        self.assertEqual(first_count, 10)
+        self.assertEqual(first_count, 8)
         self.assertEqual(second_count, 0)
         self.assertEqual(third_count, 0)
         self.assertEqual(fourth_count, 0)
@@ -888,10 +928,10 @@ class TheHandsTests(unittest.TestCase):
 
         result = robot.run()
 
-        self.assertIn("grid:placed_12_orders@100.00", result.action)
-        self.assertIn("openings=10", result.action)
+        self.assertIn("grid:placed_10_orders@100.00", result.action)
+        self.assertIn("openings=8", result.action)
         self.assertIn("rebalances=2", result.action)
-        self.assertEqual(robot._placed_order_ids, [f"order-{index}" for index in range(1, 11)])
+        self.assertEqual(robot._placed_order_ids, [f"order-{index}" for index in range(1, 9)])
         self.assertEqual(len(self.client.cancel_order_calls), 0)
 
     def test_grid_robot_rolls_back_partial_batch_when_opening_order_placement_fails(self) -> None:
