@@ -86,16 +86,16 @@ class DiscordNotifier:
         if normalized_strategy.lower() == "grid" and "fill" in normalized_signal.lower():
             return self._queue_aggregated_grid_trade(normalized_strategy, normalized_signal, trade)
 
-        title = f"{normalized_strategy.upper()} 成交通知"
+        title = f"{normalized_strategy.upper()} 成交回报"
         fields = [
             {"name": "方向", "value": trade["side"], "inline": True},
-            {"name": "价格", "value": f"{trade['price']:.4f}", "inline": True},
-            {"name": "数量", "value": f"{trade['size']:.8f}", "inline": True},
-            {"name": "名义价值", "value": f"{trade['notional']:.4f} USDT", "inline": True},
+            {"name": "成交价", "value": f"{trade['price']:.4f}", "inline": True},
+            {"name": "成交量", "value": f"{trade['size']:.8f}", "inline": True},
+            {"name": "成交额", "value": f"{trade['notional']:.4f} USDT", "inline": True},
             {"name": "策略", "value": normalized_strategy, "inline": True},
-            {"name": "信号", "value": normalized_signal, "inline": True},
+            {"name": "触发信号", "value": normalized_signal, "inline": True},
         ]
-        payload = self._build_embed_payload(title=title, description="成交执行更新", color=EMBED_COLOR_GOOD, fields=fields)
+        payload = self._build_embed_payload(title=title, description="订单已成交，请留意仓位与后续挂单。", color=EMBED_COLOR_GOOD, fields=fields)
         return self._submit_coroutine(self._post_payload(payload))
 
     def notify_profit(
@@ -124,13 +124,13 @@ class DiscordNotifier:
                 exit_price=exit_price,
                 size=size,
             )
-        title = "已实现盈亏更新"
+        title = "已实现盈亏"
         fields = [
-            {"name": "已实现盈亏", "value": f"{float(pnl):+.4f} USDT", "inline": True},
+            {"name": "本次盈亏", "value": f"{float(pnl):+.4f} USDT", "inline": True},
             {"name": "收益率", "value": f"{float(roi):+.2f}%", "inline": True},
             {"name": "账户权益", "value": f"{float(balance):.4f} USDT", "inline": True},
         ]
-        payload = self._build_embed_payload(title=title, description="策略已实现盈亏快照", color=EMBED_COLOR_GOOD, fields=fields)
+        payload = self._build_embed_payload(title=title, description="仓位已部分或全部平仓，以下为最新已实现盈亏。", color=EMBED_COLOR_GOOD, fields=fields)
         return self._submit_coroutine(self._post_payload(payload))
 
     def notify_market_shift(self, old_state: str | None, new_state: str, reason: str) -> bool:
@@ -138,12 +138,12 @@ class DiscordNotifier:
             return False
         payload = self._build_embed_payload(
             title="市场状态切换",
-            description="检测到自适应市场状态变化",
+            description="检测到市场节奏变化，策略模式已同步更新。",
             color=EMBED_COLOR_WARN,
             fields=[
-                {"name": "从", "value": str(old_state or "无"), "inline": True},
-                {"name": "到", "value": str(new_state), "inline": True},
-                {"name": "原因", "value": str(reason), "inline": False},
+                {"name": "原状态", "value": str(old_state or "无"), "inline": True},
+                {"name": "新状态", "value": str(new_state), "inline": True},
+                {"name": "触发原因", "value": str(reason), "inline": False},
             ],
         )
         return self._submit_coroutine(self._post_payload(payload))
@@ -156,7 +156,7 @@ class DiscordNotifier:
         fields = [{"name": "模块", "value": resolved_module, "inline": True}]
         if traceback:
             fields.append({"name": "堆栈", "value": self._truncate(str(traceback), 1000), "inline": False})
-        payload = self._build_embed_payload(title="运行时错误", description=description, color=EMBED_COLOR_ERROR, fields=fields)
+        payload = self._build_embed_payload(title="运行异常", description=description, color=EMBED_COLOR_ERROR, fields=fields)
         return self._submit_coroutine(self._post_payload(payload))
 
     def close(self) -> None:
@@ -198,22 +198,21 @@ class DiscordNotifier:
         fields = [
             {"name": "方向", "value": bucket.side, "inline": True},
             {"name": "成交笔数", "value": str(len(bucket.trades)), "inline": True},
-            {"name": "窗口", "value": "60秒", "inline": True},
-            {"name": "均价", "value": f"{avg_price:.4f}", "inline": True},
-            {"name": "累计数量", "value": f"{total_size:.8f}", "inline": True},
-            {"name": "累计名义价值", "value": f"{total_notional:.4f} USDT", "inline": True},
+            {"name": "统计窗口", "value": "60秒", "inline": True},
+            {"name": "成交均价", "value": f"{avg_price:.4f}", "inline": True},
+            {"name": "累计成交量", "value": f"{total_size:.8f}", "inline": True},
+            {"name": "累计成交额", "value": f"{total_notional:.4f} USDT", "inline": True},
             {"name": "策略", "value": bucket.strategy, "inline": True},
-            {"name": "信号", "value": bucket.signal, "inline": True},
-            {"name": "最近成交", "value": self._format_timestamp(latest_trade["captured_at"]), "inline": True},
+            {"name": "触发信号", "value": bucket.signal, "inline": True},
+            {"name": "最近成交时间", "value": self._format_timestamp(latest_trade["captured_at"]), "inline": True},
         ]
         payload = self._build_embed_payload(
             title=f"{bucket.strategy.upper()} 网格成交汇总",
-            description="已聚合网格成交，减少 Discord 噪音",
+            description="过去 60 秒网格成交已合并展示，方便快速查看执行情况。",
             color=EMBED_COLOR_GOOD,
             fields=fields,
         )
         await self._post_payload(payload)
-
 
     def _queue_aggregated_grid_profit(
         self,
@@ -268,17 +267,17 @@ class DiscordNotifier:
         fields = [
             {"name": "策略", "value": bucket.strategy, "inline": True},
             {"name": "交易对", "value": bucket.symbol, "inline": True},
-            {"name": "成交笔数", "value": str(len(bucket.profits)), "inline": True},
-            {"name": "已实现盈亏", "value": f"{total_pnl:+.4f} USDT", "inline": True},
+            {"name": "平仓笔数", "value": str(len(bucket.profits)), "inline": True},
+            {"name": "累计已实现盈亏", "value": f"{total_pnl:+.4f} USDT", "inline": True},
             {"name": "平均收益率", "value": f"{avg_roi:+.2f}%", "inline": True},
-            {"name": "累计平仓数量", "value": f"{total_size:.8f}", "inline": True},
-            {"name": "最近方向", "value": latest.get("side") or "-", "inline": True},
+            {"name": "累计平仓量", "value": f"{total_size:.8f}", "inline": True},
+            {"name": "最近平仓方向", "value": latest.get("side") or "-", "inline": True},
             {"name": "最近平仓价", "value": f"{float(latest['exit_price']):.4f}" if latest.get("exit_price") not in (None, "") else "-", "inline": True},
             {"name": "账户权益", "value": f"{last_balance:.4f} USDT", "inline": True},
         ]
         payload = self._build_embed_payload(
             title=title,
-            description="已聚合网格减仓成交，避免 Discord 通知过于频繁",
+            description="过去 60 秒网格止盈/减仓结果已汇总，方便评估整体兑现表现。",
             color=EMBED_COLOR_GOOD,
             fields=fields,
         )

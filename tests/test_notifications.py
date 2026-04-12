@@ -277,7 +277,7 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(embed["title"], "GRID 网格成交汇总")
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
         self.assertEqual(field_map["成交笔数"], "2")
-        self.assertEqual(field_map["累计名义价值"], "30.2000 USDT")
+        self.assertEqual(field_map["累计成交额"], "30.2000 USDT")
 
     def test_grid_websocket_fill_calls_trade_notifier(self) -> None:
         client = DummyClient()
@@ -341,9 +341,9 @@ class NotificationTests(unittest.TestCase):
 
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]["embeds"][0]
-        self.assertEqual(embed["title"], "已实现盈亏更新")
+        self.assertEqual(embed["title"], "已实现盈亏")
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
-        self.assertIn("已实现盈亏", field_map)
+        self.assertIn("本次盈亏", field_map)
         self.assertRegex(embed["timestamp"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
         self.assertRegex(embed["footer"]["text"].split(" | ")[0], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
@@ -360,8 +360,8 @@ class NotificationTests(unittest.TestCase):
         embed = notifier.payloads[0]['embeds'][0]
         self.assertEqual(embed['title'], '网格已实现盈亏汇总')
         field_map = {field['name']: field['value'] for field in embed['fields']}
-        self.assertEqual(field_map['成交笔数'], '2')
-        self.assertEqual(field_map['已实现盈亏'], '+2.0000 USDT')
+        self.assertEqual(field_map['平仓笔数'], '2')
+        self.assertEqual(field_map['累计已实现盈亏'], '+2.0000 USDT')
 
     def test_cta_take_profit_notifies_realized_profit(self) -> None:
         client = DummyClient()
