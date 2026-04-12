@@ -5,6 +5,7 @@ class DummyNotifier:
     def __init__(self) -> None:
         self.messages: list[tuple[str, str]] = []
         self.trade_calls: list[dict] = []
+        self.profit_calls: list[dict] = []
         self.market_shift_calls: list[dict] = []
         self.error_calls: list[dict] = []
 
@@ -25,6 +26,7 @@ class DummyNotifier:
         return True
 
     def notify_profit(self, pnl: float, roi: float, balance: float) -> bool:
+        self.profit_calls.append({"pnl": pnl, "roi": roi, "balance": balance})
         self.messages.append(("Net Profit Update", f"pnl={pnl} roi={roi} balance={balance}"))
         return True
 

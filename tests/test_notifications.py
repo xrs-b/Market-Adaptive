@@ -10,6 +10,7 @@ from market_adaptive.db import DatabaseInitializer, MarketStatusRecord
 from market_adaptive.notifiers.discord_notifier import DiscordNotifier
 from market_adaptive.oracles.market_oracle import MarketOracle
 from market_adaptive.strategies import CTARobot, GridRobot
+from market_adaptive.strategies.cta_robot import ManagedPosition
 from market_adaptive.testsupport import DummyNotifier
 
 
@@ -20,6 +21,8 @@ class DummyClient:
         self.cancel_all_calls = []
         self.close_all_calls = []
         self.last_price = 100.0
+        self.market_order_price = None
+        self.total_equity = 1000.0
         self.ohlcv = []
         self.ohlcv_by_timeframe = {}
         self.order_book = {
@@ -43,8 +46,14 @@ class DummyClient:
             "asks": list(self.order_book.get("asks", []))[:limit],
         }
 
+    def fetch_positions(self, symbols=None):
+        del symbols
+        return []
+
     def place_market_order(self, symbol: str, side: str, amount: float, **kwargs):
         payload = {"symbol": symbol, "side": side, "amount": amount, **kwargs}
+        if self.market_order_price is not None:
+            payload["average"] = self.market_order_price
         self.market_orders.append(payload)
         return payload
 
@@ -72,6 +81,18 @@ class DummyClient:
     def amount_to_precision(self, symbol: str, amount: float) -> float:
         del symbol
         return float(amount)
+
+    def fetch_total_equity(self, quote_currency: str = "USDT") -> float:
+        del quote_currency
+        return self.total_equity
+
+    def get_contract_value(self, symbol: str) -> float:
+        del symbol
+        return 1.0
+
+    def estimate_notional(self, symbol: str, amount: float, price: float) -> float:
+        del symbol
+        return abs(float(amount)) * abs(float(price))
 
 
 class CapturingDiscordNotifier(DiscordNotifier):
@@ -280,6 +301,56 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(len(notifier.trade_calls), 1)
         self.assertEqual(notifier.trade_calls[0]["strategy"], "grid")
         self.assertEqual(notifier.trade_calls[0]["signal"], "grid_fill_websocket")
+
+    def test_cta_take_profit_notifies_realized_profit(self) -> None:
+        client = DummyClient()
+        client.market_order_price = 102.0
+        client.total_equity = 1234.5
+        notifier = DummyNotifier()
+        robot = CTARobot(client, self.database, CTAConfig(), ExecutionConfig(), notifier=notifier)
+        robot.position = ManagedPosition(
+            side='long',
+            entry_price=100.0,
+            initial_size=1.0,
+            remaining_size=1.0,
+            stop_price=95.0,
+            best_price=100.0,
+            atr_value=1.0,
+            stop_distance=5.0,
+        )
+
+        reduced = robot._reduce_position(0.5)
+
+        self.assertTrue(reduced)
+        self.assertEqual(len(notifier.profit_calls), 1)
+        self.assertAlmostEqual(notifier.profit_calls[0]['pnl'], 1.0)
+        self.assertAlmostEqual(notifier.profit_calls[0]['roi'], 2.0)
+        self.assertAlmostEqual(notifier.profit_calls[0]['balance'], 1234.5)
+
+    def test_cta_full_close_notifies_realized_loss_for_short(self) -> None:
+        client = DummyClient()
+        client.market_order_price = 102.0
+        client.total_equity = 987.6
+        notifier = DummyNotifier()
+        robot = CTARobot(client, self.database, CTAConfig(), ExecutionConfig(), notifier=notifier)
+        robot.position = ManagedPosition(
+            side='short',
+            entry_price=100.0,
+            initial_size=1.5,
+            remaining_size=1.5,
+            stop_price=105.0,
+            best_price=100.0,
+            atr_value=1.0,
+            stop_distance=5.0,
+        )
+
+        robot._close_remaining_position(reason='atr_stop')
+
+        self.assertEqual(robot.position, None)
+        self.assertEqual(len(notifier.profit_calls), 1)
+        self.assertAlmostEqual(notifier.profit_calls[0]['pnl'], -3.0)
+        self.assertAlmostEqual(notifier.profit_calls[0]['roi'], -2.0)
+        self.assertAlmostEqual(notifier.profit_calls[0]['balance'], 987.6)
 
 
 if __name__ == '__main__':

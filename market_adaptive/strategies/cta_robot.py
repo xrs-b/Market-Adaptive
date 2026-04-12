@@ -602,14 +602,16 @@ class CTARobot(BaseStrategyRobot):
         if amount <= 0:
             return False
 
-        self.client.place_market_order(
+        position = self.position
+        exit_order = self.client.place_market_order(
             self.symbol,
-            self.position.exit_side,
+            position.exit_side,
             amount,
             reduce_only=True,
         )
-        self.position.remaining_size = self._round_size(self.position.remaining_size - amount)
-        if self.position.remaining_size <= 0:
+        self._notify_realized_profit(position=position, amount=amount, exit_order=exit_order)
+        position.remaining_size = self._round_size(position.remaining_size - amount)
+        if position.remaining_size <= 0:
             self.position = None
             self._publish_risk_profile(None)
         else:
@@ -620,15 +622,17 @@ class CTARobot(BaseStrategyRobot):
         if self.position is None:
             return
 
-        amount = self._round_size(self.position.remaining_size)
+        position = self.position
+        amount = self._round_size(position.remaining_size)
         if amount > 0:
-            self.client.place_market_order(
+            exit_order = self.client.place_market_order(
                 self.symbol,
-                self.position.exit_side,
+                position.exit_side,
                 amount,
                 reduce_only=True,
                 params={"reason": reason},
             )
+            self._notify_realized_profit(position=position, amount=amount, exit_order=exit_order)
         self.position = None
 
     def _publish_risk_profile(self, signal: TrendSignal | None) -> None:
@@ -747,6 +751,50 @@ class CTARobot(BaseStrategyRobot):
             if value not in (None, "", 0, "0"):
                 return float(value)
         return float(fallback)
+
+    def _notify_realized_profit(self, *, position: ManagedPosition, amount: float, exit_order: dict | None) -> None:
+        if self.notifier is None or not hasattr(self.notifier, "notify_profit"):
+            return
+
+        exit_amount = self._round_size(amount)
+        if exit_amount <= 0:
+            return
+
+        fallback_price = None
+        if hasattr(self.client, "fetch_last_price"):
+            try:
+                fallback_price = float(self.client.fetch_last_price(self.symbol))
+            except Exception:
+                fallback_price = None
+        if fallback_price in (None, 0):
+            fallback_price = position.entry_price
+
+        exit_price = self._extract_order_price(exit_order, fallback=float(fallback_price))
+        if exit_price <= 0 or position.entry_price <= 0:
+            return
+
+        contract_value = 1.0
+        if hasattr(self.client, "get_contract_value"):
+            try:
+                contract_value = abs(float(self.client.get_contract_value(self.symbol))) or 1.0
+            except Exception:
+                contract_value = 1.0
+
+        price_delta = exit_price - position.entry_price
+        if position.side == "short":
+            price_delta = position.entry_price - exit_price
+        pnl = float(price_delta) * float(exit_amount) * contract_value
+        entry_notional = abs(float(position.entry_price)) * float(exit_amount) * contract_value
+        roi = (pnl / entry_notional * 100.0) if entry_notional > 0 else 0.0
+
+        balance = 0.0
+        if hasattr(self.client, "fetch_total_equity"):
+            try:
+                balance = float(self.client.fetch_total_equity("USDT"))
+            except Exception:
+                balance = 0.0
+
+        self.notifier.notify_profit(pnl=pnl, roi=roi, balance=balance)
 
     def _normalize_order_amount(self, amount: float) -> float:
         normalized = max(0.0, float(amount))
