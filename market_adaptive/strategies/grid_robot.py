@@ -1150,12 +1150,19 @@ class GridRobot(BaseStrategyRobot):
 
     def _estimate_grid_level_net_profit(self, *, entry_side: str, entry_price: float, close_price: float, amount: float) -> float:
         amount = max(0.0, float(amount))
-        if amount <= 0:
+        entry_price = abs(float(entry_price))
+        close_price = abs(float(close_price))
+        if amount <= 0 or entry_price <= 0 or close_price <= 0:
             return 0.0
         fee_rate = max(0.0, float(getattr(self.config, "fee_rate", 0.001)))
         entry_notional = self._estimate_notional(amount, entry_price)
         close_notional = self._estimate_notional(amount, close_price)
-        gross_profit = (close_price - entry_price) * amount if str(entry_side).lower() == "buy" else (entry_price - close_price) * amount
+        base_exposure = entry_notional / max(entry_price, 1e-12)
+        gross_profit = (
+            (close_price - entry_price) * base_exposure
+            if str(entry_side).lower() == "buy"
+            else (entry_price - close_price) * base_exposure
+        )
         fees = (entry_notional + close_notional) * fee_rate
         return gross_profit - fees
 

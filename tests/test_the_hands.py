@@ -34,6 +34,7 @@ class DummyClient:
         }
         self.total_equity = 95_000.0
         self.min_order_amount = 0.0
+        self.contract_value = 1.0
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 200, since=None):
         del symbol, since
@@ -133,7 +134,7 @@ class DummyClient:
 
     def estimate_notional(self, symbol: str, amount: float, price: float) -> float:
         del symbol
-        return abs(float(amount)) * abs(float(price))
+        return abs(float(amount)) * abs(float(price)) * float(self.contract_value)
 
     def fetch_latest_long_short_account_ratio(self, symbol: str, timeframe: str = "5m", limit: int = 1):
         del symbol, timeframe, limit
@@ -1260,6 +1261,19 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(len(self.client.market_orders), 1)
         self.assertAlmostEqual(self.client.market_orders[0]["amount"], 0.06)
         self.assertEqual(self.client.market_orders[0]["params"]["posSide"], "long")
+
+    def test_grid_robot_expected_profit_respects_okx_contract_value(self) -> None:
+        self.client.contract_value = 0.01
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution)
+
+        expected_profit = robot._estimate_grid_level_net_profit(
+            entry_side="buy",
+            entry_price=72346.76,
+            close_price=72930.20,
+            amount=6.54720625,
+        )
+
+        self.assertAlmostEqual(expected_profit, 28.687437940070147, places=6)
 
     def test_grid_robot_websocket_fill_places_reduce_only_counter_order_with_pos_side(self) -> None:
         self._insert_status("sideways")
