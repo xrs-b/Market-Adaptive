@@ -107,10 +107,11 @@ class MainController:
         self.risk_control.initialize()
         self.logger.info("Main Controller started | daily_start_equity=%.4f", self.risk_control.daily_start_equity or 0.0)
         self.notifier.send(
-            "System Started",
+            "系统已启动",
             (
-                f"daily_start_equity={(self.risk_control.daily_start_equity or 0.0):.4f} | "
-                f"symbols={','.join(self.symbols)}"
+                "交易系统已完成启动。\n"
+                f"今日起始权益：{(self.risk_control.daily_start_equity or 0.0):.4f} USDT\n"
+                f"监控交易对：{', '.join(self.symbols)}"
             ),
         )
 
@@ -178,18 +179,30 @@ class MainController:
         result = self.cta_robot.force_risk_exit(reason)
         if self.notifier is not None:
             self.notifier.send(
-                "Risk Action",
-                f"strategy=cta | symbol={self.cta_robot.symbol} | action=full_exit | reason={reason} | result={result}",
+                "风控执行动作",
+                (
+                    "CTA 仓位已执行风控离场。\n"
+                    f"策略：cta\n"
+                    f"交易对：{self.cta_robot.symbol}\n"
+                    "动作：全部平仓\n"
+                    f"原因：{reason}\n"
+                    f"结果：{result}"
+                ),
             )
 
     def _reduce_grid_exposure(self, reason: str, reduction_step_pct: float) -> None:
         result = self.grid_robot.reduce_exposure_step(reason, reduction_step_pct)
         if self.notifier is not None:
             self.notifier.send(
-                "Risk Action",
+                "风控执行动作",
                 (
-                    f"strategy=grid | symbol={self.grid_robot.symbol} | action=reduce_exposure | "
-                    f"step={reduction_step_pct:.0%} | reason={reason} | result={result}"
+                    "网格仓位已执行风险收缩。\n"
+                    f"策略：grid\n"
+                    f"交易对：{self.grid_robot.symbol}\n"
+                    "动作：逐步减仓\n"
+                    f"减仓步长：{reduction_step_pct:.0%}\n"
+                    f"原因：{reason}\n"
+                    f"结果：{result}"
                 ),
             )
 
@@ -244,8 +257,12 @@ class MainController:
             )
         )
         self.notifier.send(
-            "System Stopped",
-            f"shutdown_at={shutdown_at} | unrealized_pnl={self.latest_total_pnl:.4f}",
+            "系统已停止",
+            (
+                "交易系统已完成停机。\n"
+                f"停止时间：{datetime.fromisoformat(shutdown_at).astimezone().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"当前未实现盈亏：{self.latest_total_pnl:.4f} USDT"
+            ),
         )
         self.logger.info("Database checkpoint saved. Main Controller stopped.")
 

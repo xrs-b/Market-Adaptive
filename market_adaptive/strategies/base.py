@@ -71,7 +71,7 @@ class BaseStrategyRobot:
         logger.info("%s flatten done: symbol=%s", self.strategy_name, self.symbol)
         if self.notifier is not None:
             self.notifier.send(
-                "Strategy Cleanup",
+                "策略清理完成",
                 f"strategy={self.strategy_name} | symbol={self.symbol} | reason={reason}",
             )
 
@@ -89,6 +89,12 @@ class BaseStrategyRobot:
         if self.notifier is None:
             return
         self.notifier.send(
-            "Strategy Action",
-            f"strategy={self.strategy_name} | symbol={self.symbol} | status={status} | action={action}",
+            "策略动作通知",
+            (
+                "策略执行了新的动作。\n"
+                f"策略：{self.strategy_name}\n"
+                f"交易对：{self.symbol}\n"
+                f"市场状态：{status}\n"
+                f"执行结果：{action}"
+            ),
         )

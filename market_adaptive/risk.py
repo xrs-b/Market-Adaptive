@@ -388,12 +388,13 @@ class RiskControlManager:
 
         if self.notifier is not None:
             self.notifier.send(
-                "Risk Triggered",
+                "风控已触发",
                 (
-                    f"daily_drawdown={snapshot.daily_drawdown * 100:.2f}% | "
-                    f"equity={snapshot.equity:.4f} | "
-                    f"daily_start_equity={snapshot.daily_start_equity:.4f} | "
-                    f"margin_ratio={snapshot.margin_ratio * 100:.2f}%"
+                    "账户触发熔断保护，系统已停止新开仓并执行清仓。\n"
+                    f"当日回撤：{snapshot.daily_drawdown * 100:.2f}%\n"
+                    f"当前权益：{snapshot.equity:.4f} USDT\n"
+                    f"日初权益：{snapshot.daily_start_equity:.4f} USDT\n"
+                    f"保证金比率：{snapshot.margin_ratio * 100:.2f}%"
                 ),
             )
 

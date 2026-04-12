@@ -197,9 +197,13 @@ class MarketOracle:
             self.notifier.notify_market_shift(old_status, record.status, reason)
             return
         self.notifier.send(
-            "Market Status Switched",
+            "市场状态已切换",
             (
-                f"symbol={record.symbol} | {old_status} -> {record.status} | "
-                f"adx={record.adx_value:.4f} | volatility={record.volatility:.6f}"
+                "检测到市场节奏变化。\n"
+                f"交易对：{record.symbol}\n"
+                f"原状态：{old_status}\n"
+                f"新状态：{record.status}\n"
+                f"ADX：{record.adx_value:.4f}\n"
+                f"波动率：{record.volatility:.6f}"
             ),
         )

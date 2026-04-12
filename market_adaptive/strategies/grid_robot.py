@@ -233,8 +233,14 @@ class GridRobot(BaseStrategyRobot):
         result = "grid:regime_cleanup_idle" if not actions else "grid:regime_cleanup|" + "+".join(actions)
         if self.notifier is not None:
             self.notifier.send(
-                "Strategy Cleanup",
-                f"strategy={self.strategy_name} | symbol={self.symbol} | reason={reason} | result={result}",
+                "策略清理完成",
+                (
+                    "网格策略已完成状态切换清理。\n"
+                    f"策略：{self.strategy_name}\n"
+                    f"交易对：{self.symbol}\n"
+                    f"原因：{reason}\n"
+                    f"结果：{result}"
+                ),
             )
         return result
 
@@ -495,7 +501,7 @@ class GridRobot(BaseStrategyRobot):
         )
         if self.notifier is not None:
             self.notifier.send(
-                "Grid Risk Alert",
+                "网格风险预警",
                 (
                     f"symbol={self.symbol} | action=flash_crash_triggered | range_1m={one_minute_range:.2f} | "
                     f"atr={context.atr_value:.2f} | threshold={threshold:.2f} | cooldown={cooldown_seconds}s | "

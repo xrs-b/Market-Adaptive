@@ -143,7 +143,7 @@ class MainControllerTests(unittest.TestCase):
         self.assertTrue(controller.stop_event.is_set())
         self.assertIn("BTC/USDT", controller.risk_control.shutdown_client.cancelled_symbols)
         self.assertIn("BTC/USDT", controller.risk_control.shutdown_client.closed_symbols)
-        self.assertTrue(any(title == "Risk Triggered" for title, _ in controller.notifier.messages))
+        self.assertTrue(any(title == "风控已触发" for title, _ in controller.notifier.messages))
         self.assertEqual(self.database.get_system_state("system_status").state_value, "OFF")
 
     def test_recovery_closes_rogue_exchange_position(self) -> None:
@@ -172,7 +172,7 @@ class MainControllerTests(unittest.TestCase):
         self.assertIsNotNone(checkpoint)
         self.assertIn("BTC/USDT", controller.shutdown_client.cancelled_symbols)
         self.assertIn("BTC/USDT", controller.shutdown_client.closed_symbols)
-        self.assertTrue(any(title == "System Stopped" for title, _ in controller.notifier.messages))
+        self.assertTrue(any(title == "系统已停止" for title, _ in controller.notifier.messages))
 
 if __name__ == "__main__":
     unittest.main()

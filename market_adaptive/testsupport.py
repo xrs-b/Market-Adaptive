@@ -32,10 +32,11 @@ class DummyNotifier:
 
     def notify_market_shift(self, old_state: str | None, new_state: str, reason: str) -> bool:
         self.market_shift_calls.append({"old_state": old_state, "new_state": new_state, "reason": reason})
-        self.messages.append(("Market Status Switched", f"{old_state}->{new_state} | {reason}"))
+        self.messages.append(("市场状态已切换", f"{old_state}->{new_state}\n{reason}"))
         return True
 
     def notify_error(self, error_msg: str, traceback: str | None = None, module_name: str | None = None) -> bool:
         self.error_calls.append({"error_msg": error_msg, "traceback": traceback, "module_name": module_name})
-        self.messages.append(("Runtime Error", error_msg))
+        self.messages.append(("运行异常", error_msg))
         return True
+

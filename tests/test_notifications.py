@@ -197,7 +197,7 @@ class NotificationTests(unittest.TestCase):
         oracle.run_once()
 
         self.assertEqual(len(self.notifier.messages), 1)
-        self.assertEqual(self.notifier.messages[0][0], 'Market Status Switched')
+        self.assertEqual(self.notifier.messages[0][0], '市场状态已切换')
 
     def test_cta_robot_notifies_on_trade_action(self) -> None:
         client = DummyClient()
@@ -209,7 +209,7 @@ class NotificationTests(unittest.TestCase):
         robot = CTARobot(client, db, CTAConfig(), ExecutionConfig(), notifier=notifier)
         robot.run()
 
-        self.assertTrue(any(title == 'Strategy Action' for title, _ in notifier.messages))
+        self.assertTrue(any(title == '策略动作通知' for title, _ in notifier.messages))
         self.assertTrue(any('cta:open_long' in body for _, body in notifier.messages))
 
     def test_grid_robot_does_not_notify_on_regular_grid_placement(self) -> None:
@@ -226,7 +226,7 @@ class NotificationTests(unittest.TestCase):
         result = robot.run()
 
         self.assertTrue(result.action.startswith('grid:placed_'))
-        self.assertFalse(any(title == 'Strategy Action' for title, _ in notifier.messages))
+        self.assertFalse(any(title == '策略动作通知' for title, _ in notifier.messages))
 
     def test_grid_robot_notifies_on_cleanup(self) -> None:
         client = DummyClient()
@@ -238,7 +238,7 @@ class NotificationTests(unittest.TestCase):
         db.insert_market_status(MarketStatusRecord('2026-04-10T00:05:00+00:00', 'BTC/USDT', 'sideways', 10.0, 0.01))
         robot.run()
 
-        self.assertTrue(any(title == 'Strategy Cleanup' for title, _ in notifier.messages))
+        self.assertTrue(any(title == '策略清理完成' for title, _ in notifier.messages))
 
     def test_grid_robot_notifies_on_flash_crash_trigger(self) -> None:
         client = DummyClient()
@@ -258,7 +258,7 @@ class NotificationTests(unittest.TestCase):
         result = robot.run()
 
         self.assertEqual(result.action.split('|')[0], 'grid:flash_crash_triggered')
-        self.assertTrue(any(title == 'Grid Risk Alert' for title, _ in notifier.messages))
+        self.assertTrue(any(title == '网格风险预警' for title, _ in notifier.messages))
         self.assertTrue(any('flash_crash_triggered' in body for _, body in notifier.messages))
 
     def test_discord_notifier_builds_embed_and_aggregates_grid_fills(self) -> None:
@@ -274,7 +274,7 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]["embeds"][0]
         self.assertEqual(embed["color"], 0x00FF00)
-        self.assertEqual(embed["title"], "GRID 网格成交汇总")
+        self.assertEqual(embed["title"], "网格策略成交汇总")
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
         self.assertEqual(field_map["成交笔数"], "2")
         self.assertEqual(field_map["累计成交额"], "30.2000 USDT")
@@ -344,8 +344,9 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(embed["title"], "已实现盈亏")
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
         self.assertIn("本次盈亏", field_map)
-        self.assertRegex(embed["timestamp"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
-        self.assertRegex(embed["footer"]["text"].split(" | ")[0], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+        self.assertNotIn("timestamp", embed)
+        footer_lines = embed["footer"]["text"].splitlines()
+        self.assertRegex(footer_lines[0], r"^通知时间：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
     def test_discord_notifier_aggregates_grid_profit_notifications(self) -> None:
         notifier = CapturingDiscordNotifier()

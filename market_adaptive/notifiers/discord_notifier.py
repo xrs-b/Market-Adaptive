@@ -86,13 +86,13 @@ class DiscordNotifier:
         if normalized_strategy.lower() == "grid" and "fill" in normalized_signal.lower():
             return self._queue_aggregated_grid_trade(normalized_strategy, normalized_signal, trade)
 
-        title = f"{normalized_strategy.upper()} 成交回报"
+        title = f"{self._display_strategy_name(normalized_strategy)}成交回报"
         fields = [
             {"name": "方向", "value": trade["side"], "inline": True},
             {"name": "成交价", "value": f"{trade['price']:.4f}", "inline": True},
             {"name": "成交量", "value": f"{trade['size']:.8f}", "inline": True},
             {"name": "成交额", "value": f"{trade['notional']:.4f} USDT", "inline": True},
-            {"name": "策略", "value": normalized_strategy, "inline": True},
+            {"name": "策略", "value": self._display_strategy_name(normalized_strategy), "inline": True},
             {"name": "触发信号", "value": normalized_signal, "inline": True},
         ]
         payload = self._build_embed_payload(title=title, description="订单已成交，请留意仓位与后续挂单。", color=EMBED_COLOR_GOOD, fields=fields)
@@ -202,12 +202,12 @@ class DiscordNotifier:
             {"name": "成交均价", "value": f"{avg_price:.4f}", "inline": True},
             {"name": "累计成交量", "value": f"{total_size:.8f}", "inline": True},
             {"name": "累计成交额", "value": f"{total_notional:.4f} USDT", "inline": True},
-            {"name": "策略", "value": bucket.strategy, "inline": True},
+            {"name": "策略", "value": self._display_strategy_name(bucket.strategy), "inline": True},
             {"name": "触发信号", "value": bucket.signal, "inline": True},
             {"name": "最近成交时间", "value": self._format_timestamp(latest_trade["captured_at"]), "inline": True},
         ]
         payload = self._build_embed_payload(
-            title=f"{bucket.strategy.upper()} 网格成交汇总",
+            title=f"{self._display_strategy_name(bucket.strategy)}成交汇总",
             description="过去 60 秒网格成交已合并展示，方便快速查看执行情况。",
             color=EMBED_COLOR_GOOD,
             fields=fields,
@@ -265,7 +265,7 @@ class DiscordNotifier:
         latest = bucket.profits[-1]
         title = "网格已实现盈亏汇总"
         fields = [
-            {"name": "策略", "value": bucket.strategy, "inline": True},
+            {"name": "策略", "value": self._display_strategy_name(bucket.strategy), "inline": True},
             {"name": "交易对", "value": bucket.symbol, "inline": True},
             {"name": "平仓笔数", "value": str(len(bucket.profits)), "inline": True},
             {"name": "累计已实现盈亏", "value": f"{total_pnl:+.4f} USDT", "inline": True},
@@ -299,9 +299,12 @@ class DiscordNotifier:
             "color": int(color),
             "fields": fields or [],
             "footer": {
-                "text": f"{formatted_timestamp} | 运行时长 {self._get_uptime_text()} | 主机 {socket.gethostname()}",
+                "text": (
+                    f"通知时间：{formatted_timestamp}\n"
+                    f"运行时长：{self._get_uptime_text()}\n"
+                    f"主机：{socket.gethostname()}"
+                ),
             },
-            "timestamp": formatted_timestamp,
         }
         return {"username": self.config.username, "embeds": [embed]}
 
@@ -378,6 +381,14 @@ class DiscordNotifier:
             except Exception:
                 pass
         return "unknown"
+
+    def _display_strategy_name(self, strategy: str | None) -> str:
+        normalized = str(strategy or "").strip().lower()
+        if normalized == "grid":
+            return "网格策略"
+        if normalized == "cta":
+            return "CTA 策略"
+        return str(strategy or "未知策略")
 
     def _truncate(self, value: str, limit: int) -> str:
         if len(value) <= limit:
