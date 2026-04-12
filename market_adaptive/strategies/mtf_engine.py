@@ -46,7 +46,7 @@ class MultiTimeframeSignalEngine:
             self.config.execution_breakout_lookback + 2,
             self.config.atr_period * 3,
             self.config.obv_signal_period + 2,
-            self.config.obv_slope_window + 2,
+            self.config.obv_signal_window + 2,
         )
 
     def build_signal(self) -> MTFSignal | None:

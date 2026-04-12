@@ -45,12 +45,20 @@ class TrendSignal:
     risk_percent: float
 
     @property
-    def obv_slope_angle(self) -> float:
+    def obv_signal_strength(self) -> float:
         return self.obv_confirmation.zscore
 
     @property
-    def obv_slope_passed(self) -> bool:
+    def obv_signal_confirmed(self) -> bool:
         return self.obv_confirmation_passed
+
+    @property
+    def obv_slope_angle(self) -> float:
+        return self.obv_signal_strength
+
+    @property
+    def obv_slope_passed(self) -> bool:
+        return self.obv_signal_confirmed
 
 
 @dataclass

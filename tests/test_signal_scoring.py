@@ -14,7 +14,7 @@ class SignalScoringTests(unittest.TestCase):
             volume_confirmed=False,
             timeframe_confirmed=False,
             order_flow_confirmed=True,
-            obv_slope_confirmed=False,
+            obv_signal_confirmed=False,
             execution_trigger_confirmed=False,
         )
 
@@ -29,7 +29,7 @@ class SignalScoringTests(unittest.TestCase):
             volume_confirmed=True,
             timeframe_confirmed=False,
             order_flow_confirmed=False,
-            obv_slope_confirmed=False,
+            obv_signal_confirmed=False,
             execution_trigger_confirmed=False,
         )
 
@@ -45,13 +45,14 @@ class SignalScoringTests(unittest.TestCase):
             volume_confirmed=True,
             timeframe_confirmed=True,
             order_flow_confirmed=False,
-            obv_slope_confirmed=True,
+            obv_signal_confirmed=True,
             execution_trigger_confirmed=False,
         )
 
         self.assertAlmostEqual(snapshot.total_score, 6.0)
         self.assertEqual(snapshot.tier, "high_quality")
         self.assertTrue(snapshot.high_quality)
+        self.assertAlmostEqual(snapshot.component_score("obv_signal"), 1.0)
         self.assertAlmostEqual(snapshot.component_score("obv_slope"), 1.0)
         self.assertAlmostEqual(snapshot.component_score("execution_trigger"), 0.0)
 

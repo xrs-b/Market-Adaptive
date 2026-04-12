@@ -89,11 +89,13 @@ cta:
   kdj_d_smoothing: 3
   execution_breakout_lookback: 3
   obv_signal_period: 8
+  obv_signal_window: 8
+  obv_signal_threshold_degrees: 30.0
   obv_slope_window: 8
   obv_slope_threshold_degrees: 30.0  # legacy field, no longer used for CTA entry gating
   obv_sma_period: 50
   obv_zscore_window: 100
-  obv_zscore_threshold: 1.5
+  obv_zscore_threshold: 1.0
   atr_period: 14
   atr_trailing_multiplier: 2.5
   stop_loss_atr: 2.0

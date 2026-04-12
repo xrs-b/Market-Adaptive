@@ -139,11 +139,11 @@ class CTAConfig:
     kdj_d_smoothing: int = 3
     execution_breakout_lookback: int = 3
     obv_signal_period: int = 8
-    obv_slope_window: int = 8
-    obv_slope_threshold_degrees: float = 30.0
+    obv_signal_window: int = 8
+    obv_signal_threshold_degrees: float = 30.0
     obv_sma_period: int = 50
     obv_zscore_window: int = 100
-    obv_zscore_threshold: float = 1.5
+    obv_zscore_threshold: float = 1.0
     atr_period: int = 14
     atr_trailing_multiplier: float = 2.5
     stop_loss_atr: float = 2.0
@@ -194,6 +194,8 @@ class CTAConfig:
         self.timeframe = self.execution_timeframe
         if self.boosted_risk_percent_per_trade <= 0:
             self.boosted_risk_percent_per_trade = self.risk_percent_per_trade
+        self.obv_signal_window = max(1, int(self.obv_signal_window))
+        self.obv_signal_threshold_degrees = float(self.obv_signal_threshold_degrees)
         self.order_flow_depth_levels = max(1, int(self.order_flow_depth_levels))
         self.order_flow_confirmation_ratio = max(0.0, float(self.order_flow_confirmation_ratio))
         self.order_flow_high_conviction_ratio = max(
@@ -203,6 +205,44 @@ class CTAConfig:
         self.order_flow_limit_buffer_bps = max(0.0, float(self.order_flow_limit_buffer_bps))
         self.order_flow_max_slippage_bps = max(0.0, float(self.order_flow_max_slippage_bps))
 
+    @property
+    def obv_slope_window(self) -> int:
+        return int(self.obv_signal_window)
+
+    @obv_slope_window.setter
+    def obv_slope_window(self, value: int) -> None:
+        self.obv_signal_window = int(value)
+
+    @property
+    def obv_slope_threshold_degrees(self) -> float:
+        return float(self.obv_signal_threshold_degrees)
+
+    @obv_slope_threshold_degrees.setter
+    def obv_slope_threshold_degrees(self, value: float) -> None:
+        self.obv_signal_threshold_degrees = float(value)
+
+
+
+
+@dataclass
+class SignalScoringConfig:
+    enabled: bool = True
+    min_trade_score: float = 3.0
+    high_quality_score: float = 5.0
+    trend_weight: float = 1.0
+    volume_weight: float = 2.0
+    timeframe_weight: float = 2.0
+    order_flow_weight: float = 1.0
+    obv_signal_weight: float = 1.0
+    execution_trigger_weight: float = 1.0
+
+    @property
+    def obv_slope_weight(self) -> float:
+        return float(self.obv_signal_weight)
+
+    @obv_slope_weight.setter
+    def obv_slope_weight(self, value: float) -> None:
+        self.obv_signal_weight = float(value)
 
 @dataclass
 class GridConfig:
@@ -392,11 +432,11 @@ def load_config(config_path: str | Path) -> AppConfig:
         kdj_d_smoothing=int(cta_payload.get("kdj_d_smoothing", 3)),
         execution_breakout_lookback=int(cta_payload.get("execution_breakout_lookback", 3)),
         obv_signal_period=int(cta_payload.get("obv_signal_period", 8)),
-        obv_slope_window=int(cta_payload.get("obv_slope_window", 8)),
-        obv_slope_threshold_degrees=float(cta_payload.get("obv_slope_threshold_degrees", 30.0)),
+        obv_signal_window=int(cta_payload.get("obv_signal_window", cta_payload.get("obv_slope_window", 8))),
+        obv_signal_threshold_degrees=float(cta_payload.get("obv_signal_threshold_degrees", cta_payload.get("obv_slope_threshold_degrees", 30.0))),
         obv_sma_period=int(cta_payload.get("obv_sma_period", 50)),
         obv_zscore_window=int(cta_payload.get("obv_zscore_window", 100)),
-        obv_zscore_threshold=float(cta_payload.get("obv_zscore_threshold", 1.5)),
+        obv_zscore_threshold=float(cta_payload.get("obv_zscore_threshold", 1.0)),
         atr_period=int(cta_payload.get("atr_period", 14)),
         atr_trailing_multiplier=float(cta_payload.get("atr_trailing_multiplier", 2.5)),
         stop_loss_atr=float(cta_payload.get("stop_loss_atr", 2.0)),

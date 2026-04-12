@@ -33,7 +33,7 @@ class SignalScoreSnapshot:
 
     def component_score(self, name: str) -> float:
         for component in self.components:
-            if component.name == name:
+            if component.name == name or (name == "obv_slope" and component.name == "obv_signal"):
                 return component.score
         return 0.0
 
@@ -45,7 +45,8 @@ def build_signal_score(
     volume_confirmed: bool,
     timeframe_confirmed: bool,
     order_flow_confirmed: bool,
-    obv_slope_confirmed: bool = False,
+    obv_signal_confirmed: bool = False,
+    obv_slope_confirmed: bool | None = None,
     execution_trigger_confirmed: bool = False,
 ) -> SignalScoreSnapshot:
     components = (
@@ -78,11 +79,11 @@ def build_signal_score(
             detail="buy_side_order_book_dominance",
         ),
         SignalScoreComponent(
-            name="obv_slope",
+            name="obv_signal",
             weight=float(config.obv_slope_weight),
-            passed=bool(obv_slope_confirmed),
-            score=float(config.obv_slope_weight) if obv_slope_confirmed else 0.0,
-            detail="obv_slope_angle_threshold",
+            passed=bool(obv_signal_confirmed if obv_slope_confirmed is None else obv_slope_confirmed),
+            score=float(config.obv_slope_weight) if (obv_signal_confirmed if obv_slope_confirmed is None else obv_slope_confirmed) else 0.0,
+            detail="obv_zscore_threshold",
         ),
         SignalScoreComponent(
             name="execution_trigger",

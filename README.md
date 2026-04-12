@@ -123,6 +123,8 @@ cta:
   kdj_d_smoothing: 3
   execution_breakout_lookback: 3
   obv_signal_period: 8
+  obv_signal_window: 8
+  obv_signal_threshold_degrees: 30.0
   obv_slope_window: 8
   obv_slope_threshold_degrees: 30.0
   atr_period: 14
@@ -192,7 +194,7 @@ notification:
 ### 策略规则
 - `CTARobot` 只在 `trend` 激活，并改为走三周期 `MTF Engine`：`4h` 用 `SuperTrend` 识别 major trend，`1h` 用 `RSI` 判定 swing readiness，`15m` 只负责 execution trigger（`KDJ` 金叉或突破最近 `execution_breakout_lookback` 根 K 线前高）
 - 当 `4h SuperTrend` 看多且 `1h RSI > swing_rsi_ready_threshold`（默认 `50`）时，CTA 进入 `bullish ready`；只有 `15m` 执行触发成立后，才允许进入后续多头过滤链路
-- 即使 MTF 已 ready / trigger，多头仍必须继续通过现有 CTA stack：`OBV` 信号线偏多、`OBV` 归一化斜率角度高于 `obv_slope_threshold_degrees`（默认约等于 `30°`），以及基于最近约 24 小时 intraday OHLCV 构造的 `Volume Profile` breakout 条件（突破 `POC` 并站上 `Value Area High`）；若价格仍在 value area 内或低于 POC，则直接跳过开仓
+- 即使 MTF 已 ready / trigger，多头仍必须继续通过现有 CTA stack：`OBV` 信号线偏多、`OBV` z-score 强度高于 `obv_zscore_threshold`（默认 `1.0`，兼容保留 `obv_slope_*` 旧字段名与属性，但 CTA 入场核心已切到 z-score 语义），以及基于最近约 24 小时 intraday OHLCV 构造的 `Volume Profile` breakout 条件（突破 `POC` 并站上 `Value Area High`）；若价格仍在 value area 内或低于 POC，则直接跳过开仓
 - 当 `4h`、`1h` 与 `15m` 三层信号 fully aligned 时，CTA 会把单笔风险从基线 `risk_percent_per_trade`（默认 `2%`）提升到 `boosted_risk_percent_per_trade`（默认 `3%`），再交给 `RiskControlManager` / Hybrid Shield 做最终仓位约束
 - CTA 多头开仓前会额外读取 OKX 公共 `long_short_accounts_ratio`；当零售多头情绪比值大于 `2.5` 时，默认阻止买入信号（也可配置为把多头仓位减半）
 - Sentiment 通过后，CTA 还会触发 `Order Flow Sentinel` 做最后一跳秒级盘口确认：调用 OKX `fetchOrderBook` 读取前 `20` 档深度，计算 `bid_sum / ask_sum`；当该比值低于 `1.5` 时，直接拒绝本次多头开仓
