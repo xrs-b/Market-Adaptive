@@ -4,11 +4,15 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
+
+import pandas as pd
 
 from market_adaptive.config import CTAConfig, ExecutionConfig, GridConfig, SentimentConfig
 from market_adaptive.db import DatabaseInitializer, MarketStatusRecord
 from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies import CTARobot, GridRobot, HandsCoordinator
+from market_adaptive.strategies.mtf_engine import MultiTimeframeSignalEngine
 
 
 class DummyClient:
@@ -266,11 +270,11 @@ class TheHandsTests(unittest.TestCase):
             [
                 lower_last_close - 5.6,
                 lower_last_close - 4.8,
-                lower_last_close - 4.0,
-                lower_last_close - 3.2,
-                lower_last_close - 2.4,
-                lower_last_close - 1.6,
-                lower_last_close - 0.8,
+                lower_last_close - 5.2,
+                lower_last_close - 4.6,
+                lower_last_close - 7.0,
+                lower_last_close - 6.5,
+                lower_last_close - 6.0,
                 lower_last_close,
             ]
         )
@@ -312,6 +316,23 @@ class TheHandsTests(unittest.TestCase):
         closes = [90 + index * 0.25 for index in range(55)] + [104.0, 103.4, 102.9, 102.4, 101.9]
         self._set_ohlcv("15m", closes, 900_000)
         self._set_bullish_higher_timeframes()
+
+    def _load_execution_window_prices(self, *, closes: list[float]) -> None:
+        self._set_ohlcv("15m", closes, 900_000)
+        self._set_bullish_higher_timeframes()
+
+    def _mock_execution_kdj(self, bars: int, golden_cross_bar_from_end: int) -> pd.DataFrame:
+        k_values = [40.0] * bars
+        d_values = [50.0] * bars
+        cross_index = bars - golden_cross_bar_from_end - 1
+        k_values[cross_index - 1] = 45.0
+        d_values[cross_index - 1] = 50.0
+        k_values[cross_index] = 55.0
+        d_values[cross_index] = 50.0
+        for index in range(cross_index + 1, bars):
+            k_values[index] = 56.0
+            d_values[index] = 51.0
+        return pd.DataFrame({"k": k_values, "d": d_values})
 
     def _set_sentiment_ratio(self, ratio: float, timestamp: int = 1_712_722_800_000) -> None:
         self.client.latest_long_short_ratio = {
@@ -364,6 +385,41 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(result.action, "cta:bullish_ready")
         self.assertEqual(len(self.client.market_orders), 0)
         self.assertIsNone(robot.position)
+
+    def test_cta_memory_window_unlocks_later_breakout(self) -> None:
+        self._load_execution_window_prices(closes=[100.0] * 56 + [100.4, 100.6, 100.8, 101.4])
+        engine = MultiTimeframeSignalEngine(self.client, self.cta_config)
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=3)
+
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.execution_trigger.bullish_memory_active)
+        self.assertEqual(signal.execution_trigger.bullish_cross_bars_ago, 3)
+        self.assertTrue(signal.execution_trigger.prior_high_break)
+        self.assertTrue(signal.fully_aligned)
+        self.assertEqual(
+            signal.execution_trigger.reason,
+            "Triggered via Memory Window: KDJ crossed 3 bars ago + Price Breakout NOW",
+        )
+
+    def test_cta_memory_window_blocks_outside_window_breakout(self) -> None:
+        self._load_execution_window_prices(closes=[100.0] * 56 + [100.4, 100.6, 100.8, 101.4])
+        engine = MultiTimeframeSignalEngine(self.client, self.cta_config)
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=6)
+
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertFalse(signal.execution_trigger.bullish_memory_active)
+        self.assertIsNone(signal.execution_trigger.bullish_cross_bars_ago)
+        self.assertTrue(signal.execution_trigger.prior_high_break)
+        self.assertFalse(signal.fully_aligned)
+        self.assertEqual(signal.execution_trigger.reason, "prior_high_break_waiting_kdj_memory")
 
     def test_cta_robot_skips_bullish_entry_while_price_is_still_inside_value_area(self) -> None:
         self._insert_status("trend")
@@ -462,7 +518,7 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(len(self.client.limit_orders), 0)
         self.assertIsNone(robot.position)
 
-    def test_cta_robot_uses_order_flow_limit_price_for_high_conviction_entry(self) -> None:
+    def test_cta_robot_uses_aggressive_ioc_limit_for_high_conviction_entry(self) -> None:
         self._insert_status("trend")
         self._load_bullish_signal(lower_last_close=100.0)
         self._set_order_book(
@@ -482,7 +538,8 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(len(self.client.market_orders), 0)
         self.assertEqual(len(self.client.limit_orders), 1)
         self.assertEqual(self.client.limit_orders[0]["params"]["timeInForce"], "IOC")
-        self.assertGreater(self.client.limit_orders[0]["price"], 100.1)
+        self.assertEqual(self.client.limit_orders[0]["params"]["executionMode"], "aggressive_limit")
+        self.assertAlmostEqual(self.client.limit_orders[0]["price"], 100.3)
         self.assertIsNotNone(robot.position)
 
     def test_cta_robot_chases_partial_ioc_fill_with_market_order_and_uses_weighted_entry_price(self) -> None:
@@ -579,9 +636,9 @@ class TheHandsTests(unittest.TestCase):
 
         result = robot.run()
 
-        self.assertEqual(result.action, "cta:low_fill_ratio")
-        self.assertEqual(len(self.client.market_orders), 0)
-        self.assertIsNone(robot.position)
+        self.assertEqual(result.action, "cta:open_long_limit")
+        self.assertEqual(len(self.client.market_orders), 1)
+        self.assertIsNotNone(robot.position)
 
     def test_cta_robot_returns_low_fill_ratio_when_ioc_limit_fill_stays_below_half(self) -> None:
         self._insert_status("trend")

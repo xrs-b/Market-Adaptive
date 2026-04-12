@@ -34,7 +34,9 @@ class CTAHeartbeatTests(unittest.TestCase):
             bullish_ready=True,
             execution_golden_cross=False,
             execution_breakout=True,
-            execution_trigger_reason="prior_high_break",
+            execution_memory_active=True,
+            execution_memory_bars_ago=3,
+            execution_trigger_reason="Triggered via Memory Window: KDJ crossed 3 bars ago + Price Breakout NOW",
             mtf_aligned=True,
             obv_bias=1,
             obv_confirmation=OBVConfirmationSnapshot(

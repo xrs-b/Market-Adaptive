@@ -137,6 +137,7 @@ class CTAConfig:
     kdj_length: int = 9
     kdj_k_smoothing: int = 3
     kdj_d_smoothing: int = 3
+    kdj_signal_memory_bars: int = 5
     execution_breakout_lookback: int = 3
     obv_signal_period: int = 8
     obv_signal_window: int = 8
@@ -194,6 +195,7 @@ class CTAConfig:
         self.timeframe = self.execution_timeframe
         if self.boosted_risk_percent_per_trade <= 0:
             self.boosted_risk_percent_per_trade = self.risk_percent_per_trade
+        self.kdj_signal_memory_bars = max(1, int(self.kdj_signal_memory_bars))
         self.obv_signal_window = max(1, int(self.obv_signal_window))
         self.obv_signal_threshold_degrees = float(self.obv_signal_threshold_degrees)
         self.order_flow_depth_levels = max(1, int(self.order_flow_depth_levels))

@@ -31,6 +31,8 @@ class TrendSignal:
     bullish_ready: bool
     execution_golden_cross: bool
     execution_breakout: bool
+    execution_memory_active: bool
+    execution_memory_bars_ago: int | None
     execution_trigger_reason: str
     mtf_aligned: bool
     obv_bias: int
@@ -280,6 +282,8 @@ class CTARobot(BaseStrategyRobot):
             bullish_ready=mtf_signal.bullish_ready,
             execution_golden_cross=mtf_signal.execution_trigger.kdj_golden_cross,
             execution_breakout=mtf_signal.execution_trigger.prior_high_break,
+            execution_memory_active=mtf_signal.execution_trigger.bullish_memory_active,
+            execution_memory_bars_ago=mtf_signal.execution_trigger.bullish_cross_bars_ago,
             execution_trigger_reason=mtf_signal.execution_trigger.reason,
             mtf_aligned=mtf_signal.fully_aligned,
             obv_bias=obv_bias,
@@ -302,6 +306,8 @@ class CTARobot(BaseStrategyRobot):
             "raw_direction": int(signal.raw_direction),
             "direction": int(signal.direction),
             "execution_trigger_reason": str(signal.execution_trigger_reason),
+            "execution_memory_active": bool(signal.execution_memory_active),
+            "execution_memory_bars_ago": signal.execution_memory_bars_ago,
             "obv_current": float(obv.current_obv),
             "obv_sma": float(obv.sma_value),
             "obv_above_sma": bool(obv.above_sma),
@@ -371,6 +377,14 @@ class CTARobot(BaseStrategyRobot):
             if not allowed:
                 self._publish_risk_profile(None)
                 return "cta:risk_blocked"
+
+        if signal.execution_memory_active and signal.execution_breakout:
+            logger.info(
+                "CTA entry trigger | symbol=%s side=%s %s",
+                self.symbol,
+                side,
+                signal.execution_trigger_reason,
+            )
 
         entry_order = self._place_entry_order(
             side=side,
@@ -490,20 +504,17 @@ class CTARobot(BaseStrategyRobot):
         if hasattr(self.client, "get_min_order_amount"):
             minimum_amount = float(self.client.get_min_order_amount(self.symbol))
 
-        if (
-            side == "buy"
-            and order_flow_assessment is not None
-            and order_flow_assessment.use_limit_order
-            and order_flow_assessment.recommended_limit_price is not None
-        ):
+        aggressive_limit_price = self._resolve_aggressive_entry_price(side=side, order_flow_assessment=order_flow_assessment)
+        if aggressive_limit_price is not None:
             response = self.client.place_limit_order(
                 self.symbol,
                 side,
                 amount,
-                order_flow_assessment.recommended_limit_price,
+                aggressive_limit_price,
                 params={
                     "timeInForce": "IOC",
-                    "orderFlowImbalance": round(order_flow_assessment.imbalance_ratio, 4),
+                    "executionMode": "aggressive_limit",
+                    "orderFlowImbalance": round(order_flow_assessment.imbalance_ratio, 4) if order_flow_assessment is not None else None,
                 },
             )
             limit_response = self._refresh_ioc_fill(response)
@@ -519,19 +530,18 @@ class CTARobot(BaseStrategyRobot):
                 fill_qty=limit_filled,
                 unfilled_qty=unfilled_amount,
             )
-            if limit_filled <= 0 or unfilled_amount <= max(minimum_amount, 0.0):
-                average_price = limit_price if limit_filled > 0 else None
-                return EntryOrderResult(limit_response, True, limit_filled, average_price)
+            if limit_filled > 0 and unfilled_amount <= max(minimum_amount, 0.0):
+                return EntryOrderResult(limit_response, True, limit_filled, limit_price)
 
-            market_response = self.client.place_market_order(self.symbol, side, unfilled_amount)
+            market_response = self.client.place_market_order(self.symbol, side, max(unfilled_amount, amount if limit_filled <= 0 else unfilled_amount))
             market_filled = self._normalize_order_amount(
-                self._extract_filled_amount(market_response, unfilled_amount, used_limit_order=False)
+                self._extract_filled_amount(market_response, unfilled_amount if limit_filled > 0 else amount, used_limit_order=False)
             )
             market_price = self._extract_order_price(
                 market_response,
-                fallback=fallback_price or limit_price,
+                fallback=fallback_price or limit_price or aggressive_limit_price,
             )
-            remaining_unfilled = self._normalize_order_amount(max(0.0, unfilled_amount - market_filled))
+            remaining_unfilled = self._normalize_order_amount(max(0.0, amount - limit_filled - market_filled))
             self._log_entry_fill(
                 order=market_response,
                 limit_price=response.get("price"),
@@ -562,6 +572,43 @@ class CTARobot(BaseStrategyRobot):
         )
         average_price = self._extract_order_price(response, fallback=fallback_price or 0.0) if filled_amount > 0 else None
         return EntryOrderResult(response, False, filled_amount, average_price)
+
+    def _resolve_aggressive_entry_price(
+        self,
+        *,
+        side: str,
+        order_flow_assessment: OrderFlowAssessment | None,
+    ) -> float | None:
+        if (
+            order_flow_assessment is None
+            or not order_flow_assessment.entry_allowed
+            or not order_flow_assessment.use_limit_order
+        ):
+            return None
+        reference_price = order_flow_assessment.best_ask if side == "buy" else order_flow_assessment.best_bid
+        if reference_price in (None, 0, "0"):
+            return None
+        tick_size = self._estimate_tick_size(side=side)
+        if tick_size <= 0:
+            return None
+        aggressive_price = float(reference_price) + (2.0 * tick_size if side == "buy" else -2.0 * tick_size)
+        if hasattr(self.client, "price_to_precision"):
+            aggressive_price = float(self.client.price_to_precision(self.symbol, aggressive_price))
+        return aggressive_price
+
+    def _estimate_tick_size(self, *, side: str) -> float:
+        try:
+            order_book = self.client.fetch_order_book(self.symbol, limit=3)
+        except Exception:
+            order_book = {}
+        levels = list((order_book.get("asks") if side == "buy" else order_book.get("bids")) or [])
+        prices = [float(level[0]) for level in levels if isinstance(level, (list, tuple)) and len(level) >= 2 and float(level[0]) > 0]
+        prices = sorted(set(prices))
+        if len(prices) >= 2:
+            diffs = [abs(b - a) for a, b in zip(prices, prices[1:]) if abs(b - a) > 0]
+            if diffs:
+                return min(diffs)
+        return 0.01
 
     def _manage_position(self, signal: TrendSignal) -> tuple[list[str], bool]:
         assert self.position is not None

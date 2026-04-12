@@ -11,8 +11,15 @@ from market_adaptive.indicators import compute_kdj, compute_rsi, compute_supertr
 @dataclass
 class ExecutionTriggerSnapshot:
     kdj_golden_cross: bool
+    kdj_dead_cross: bool
+    bullish_memory_active: bool
+    bearish_memory_active: bool
+    bullish_cross_bars_ago: int | None
+    bearish_cross_bars_ago: int | None
     prior_high_break: bool
+    prior_low_break: bool
     prior_high: float | None
+    prior_low: float | None
     reason: str
 
 
@@ -36,6 +43,15 @@ class MultiTimeframeSignalEngine:
     def __init__(self, client, config: CTAConfig) -> None:
         self.client = client
         self.config = config
+
+    @staticmethod
+    def _bars_since_last_true(mask: pd.Series, max_bars: int) -> int | None:
+        recent = mask.fillna(False).astype(bool).tail(max(1, int(max_bars)))
+        reversed_values = list(reversed(recent.tolist()))
+        for bars_ago, value in enumerate(reversed_values):
+            if value:
+                return bars_ago
+        return None
 
     @property
     def minimum_bars(self) -> int:
@@ -99,30 +115,58 @@ class MultiTimeframeSignalEngine:
         previous_k = float(execution_kdj["k"].iloc[-2])
         previous_d = float(execution_kdj["d"].iloc[-2])
         kdj_golden_cross = previous_k <= previous_d and current_k > current_d
+        kdj_dead_cross = previous_k >= previous_d and current_k < current_d
+
+        bullish_cross_mask = (execution_kdj["k"].shift(1) <= execution_kdj["d"].shift(1)) & (execution_kdj["k"] > execution_kdj["d"])
+        bearish_cross_mask = (execution_kdj["k"].shift(1) >= execution_kdj["d"].shift(1)) & (execution_kdj["k"] < execution_kdj["d"])
+        memory_bars = max(1, int(self.config.kdj_signal_memory_bars))
+
+        bullish_cross_bars_ago = self._bars_since_last_true(bullish_cross_mask, memory_bars)
+        bearish_cross_bars_ago = self._bars_since_last_true(bearish_cross_mask, memory_bars)
+        bullish_memory_active = bullish_cross_bars_ago is not None
+        bearish_memory_active = bearish_cross_bars_ago is not None
 
         prior_high_series = execution_frame["high"].shift(1).rolling(
             max(1, int(self.config.execution_breakout_lookback)),
             min_periods=max(1, int(self.config.execution_breakout_lookback)),
         ).max()
+        prior_low_series = execution_frame["low"].shift(1).rolling(
+            max(1, int(self.config.execution_breakout_lookback)),
+            min_periods=max(1, int(self.config.execution_breakout_lookback)),
+        ).min()
         prior_high_value = prior_high_series.iloc[-1]
+        prior_low_value = prior_low_series.iloc[-1]
         prior_high = None if pd.isna(prior_high_value) else float(prior_high_value)
+        prior_low = None if pd.isna(prior_low_value) else float(prior_low_value)
         current_price = float(execution_frame["close"].iloc[-1])
         prior_high_break = prior_high is not None and current_price > prior_high + 1e-12
+        prior_low_break = prior_low is not None and current_price < prior_low - 1e-12
 
-        reasons: list[str] = []
-        if kdj_golden_cross:
-            reasons.append("kdj_golden_cross")
-        if prior_high_break:
-            reasons.append("prior_high_break")
-        reason = "+".join(reasons) if reasons else "waiting_execution_trigger"
+        if bullish_memory_active and prior_high_break:
+            reason = (
+                f"Triggered via Memory Window: KDJ crossed {bullish_cross_bars_ago} bars ago + Price Breakout NOW"
+            )
+        elif kdj_golden_cross:
+            reason = "kdj_golden_cross_waiting_breakout"
+        elif prior_high_break:
+            reason = "prior_high_break_waiting_kdj_memory"
+        else:
+            reason = "waiting_execution_trigger"
 
         execution_trigger = ExecutionTriggerSnapshot(
             kdj_golden_cross=kdj_golden_cross,
+            kdj_dead_cross=kdj_dead_cross,
+            bullish_memory_active=bullish_memory_active,
+            bearish_memory_active=bearish_memory_active,
+            bullish_cross_bars_ago=bullish_cross_bars_ago,
+            bearish_cross_bars_ago=bearish_cross_bars_ago,
             prior_high_break=prior_high_break,
+            prior_low_break=prior_low_break,
             prior_high=prior_high,
+            prior_low=prior_low,
             reason=reason,
         )
-        fully_aligned = bullish_ready and (kdj_golden_cross or prior_high_break)
+        fully_aligned = bullish_ready and bullish_memory_active and prior_high_break
 
         return MTFSignal(
             major_timeframe=self.config.major_timeframe,
