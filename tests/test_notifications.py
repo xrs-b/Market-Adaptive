@@ -113,7 +113,7 @@ class CapturingDiscordNotifier(DiscordNotifier):
             loop.close()
 
     def _submit_coroutine(self, coro) -> bool:
-        if getattr(coro, "cr_code", None) is not None and coro.cr_code.co_name == "_flush_grid_trade_bucket_after_delay":
+        if getattr(coro, "cr_code", None) is not None and coro.cr_code.co_name in {"_flush_grid_trade_bucket_after_delay", "_flush_grid_profit_bucket_after_delay"}:
             coro.close()
             return True
         return self.submit_and_wait(coro)
@@ -274,10 +274,10 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]["embeds"][0]
         self.assertEqual(embed["color"], 0x00FF00)
-        self.assertEqual(embed["title"], "GRID Grid Fill Summary")
+        self.assertEqual(embed["title"], "GRID 网格成交汇总")
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
-        self.assertEqual(field_map["Fills"], "2")
-        self.assertEqual(field_map["Total Notional"], "30.2000 USDT")
+        self.assertEqual(field_map["成交笔数"], "2")
+        self.assertEqual(field_map["累计名义价值"], "30.2000 USDT")
 
     def test_grid_websocket_fill_calls_trade_notifier(self) -> None:
         client = DummyClient()
@@ -301,6 +301,67 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(len(notifier.trade_calls), 1)
         self.assertEqual(notifier.trade_calls[0]["strategy"], "grid")
         self.assertEqual(notifier.trade_calls[0]["signal"], "grid_fill_websocket")
+
+
+    def test_grid_reduce_only_fill_notifies_realized_profit(self) -> None:
+        client = DummyClient()
+        client.total_equity = 1500.0
+        notifier = DummyNotifier()
+        db = self.database
+        db.insert_market_status(MarketStatusRecord('2026-04-10T00:00:00+00:00', 'BTC/USDT', 'sideways', 10.0, 0.01))
+        client.ohlcv_by_timeframe['1h'] = [
+            [1_700_000_000_000 + i * 3_600_000, 100.0, 101.0, 99.0, 100.0, 120.0]
+            for i in range(80)
+        ]
+        robot = GridRobot(client, db, GridConfig(), ExecutionConfig(), notifier=notifier, market_oracle=None, use_dynamic_range=False)
+        robot._cached_context = robot._fallback_context(100.0, 2.0)
+        client.fetch_positions = lambda symbols=None: [{"contracts": 1.0, "side": "long", "entryPrice": 100.0}]
+        client.fetch_order = lambda order_id, symbol: {"status": "open", "id": order_id, "symbol": symbol}
+
+        def place_limit_order(symbol: str, side: str, amount: float, price: float, **kwargs):
+            payload = {"symbol": symbol, "side": side, "amount": amount, "price": price, "id": "hedge-1", **kwargs}
+            client.limit_orders.append(payload)
+            return payload
+
+        client.place_limit_order = place_limit_order
+
+        robot._on_ws_orders({"status": "filled", "filled": 0.5, "side": "buy", "average": 100.0, "id": "fill-1"})
+        robot._on_ws_orders({"status": "filled", "filled": 0.5, "side": "sell", "average": 101.0, "id": "hedge-1", "reduceOnly": True})
+
+        self.assertEqual(len(notifier.profit_calls), 1)
+        self.assertAlmostEqual(notifier.profit_calls[0]['pnl'], 0.5)
+        self.assertAlmostEqual(notifier.profit_calls[0]['roi'], 1.0)
+        self.assertAlmostEqual(notifier.profit_calls[0]['balance'], 1500.0)
+        self.assertEqual(notifier.profit_calls[0]['strategy'], 'grid')
+
+    def test_discord_notifier_localizes_profit_payload_and_timestamp(self) -> None:
+        notifier = CapturingDiscordNotifier()
+
+        notifier.notify_profit(pnl=12.34, roi=5.67, balance=1234.5)
+
+        self.assertEqual(len(notifier.payloads), 1)
+        embed = notifier.payloads[0]["embeds"][0]
+        self.assertEqual(embed["title"], "已实现盈亏更新")
+        field_map = {field["name"]: field["value"] for field in embed["fields"]}
+        self.assertIn("已实现盈亏", field_map)
+        self.assertRegex(embed["timestamp"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+        self.assertRegex(embed["footer"]["text"].split(" | ")[0], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+    def test_discord_notifier_aggregates_grid_profit_notifications(self) -> None:
+        notifier = CapturingDiscordNotifier()
+
+        notifier.notify_profit(pnl=1.2, roi=1.0, balance=1001.0, strategy='grid', symbol='BTC/USDT', side='SELL', exit_price=101.0, size=0.1)
+        notifier.notify_profit(pnl=0.8, roi=0.5, balance=1001.8, strategy='grid', symbol='BTC/USDT', side='SELL', exit_price=102.0, size=0.2)
+
+        self.assertEqual(len(notifier.payloads), 0)
+        notifier.submit_and_wait(notifier._flush_grid_profit_bucket_after_delay('grid::BTC/USDT', 0.0))
+
+        self.assertEqual(len(notifier.payloads), 1)
+        embed = notifier.payloads[0]['embeds'][0]
+        self.assertEqual(embed['title'], '网格已实现盈亏汇总')
+        field_map = {field['name']: field['value'] for field in embed['fields']}
+        self.assertEqual(field_map['成交笔数'], '2')
+        self.assertEqual(field_map['已实现盈亏'], '+2.0000 USDT')
 
     def test_cta_take_profit_notifies_realized_profit(self) -> None:
         client = DummyClient()

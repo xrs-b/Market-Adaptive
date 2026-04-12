@@ -102,6 +102,8 @@ class GridRobot(BaseStrategyRobot):
         self._ws_stop_event: asyncio.Event | None = None
         self._ws_orders_placed_in_cycle: set[str] = set()
         self._ws_cycle_anchor_timestamp_ms: int | None = None
+        self._pending_reduce_only_profits: dict[str, dict[str, float | str]] = {}
+        self._reduce_only_filled_amounts: dict[str, float] = {}
         self.last_regrid_time = 0.0
         self.current_grid_center: float | None = None
 
@@ -937,11 +939,12 @@ class GridRobot(BaseStrategyRobot):
             if status not in {"closed", "filled"} or filled <= 0:
                 continue
             reduce_only = self._is_reduce_only_order(order)
-            if reduce_only:
-                continue
             side = str(order.get("side") or "").lower()
             fill_price = float(order.get("average") or order.get("price") or order.get("info", {}).get("fillPx") or 0.0)
             if side not in {"buy", "sell"} or fill_price <= 0:
+                continue
+            if reduce_only:
+                self._notify_ws_reduce_only_fill(order, side=side, filled=filled, fill_price=fill_price)
                 continue
 
             hedge_key = self._ws_hedge_dedup_key(order)
@@ -986,6 +989,15 @@ class GridRobot(BaseStrategyRobot):
 
             if hedge_key is not None:
                 self._ws_orders_placed_in_cycle.add(hedge_key)
+            self._track_pending_reduce_only_profit(
+                response,
+                entry_side=side,
+                exit_side=counter_side,
+                entry_price=fill_price,
+                exit_price=counter_price,
+                amount=counter_amount,
+                pos_side=close_pos_side,
+            )
             logger.info(
                 "Grid websocket hedge order | fill_side=%s fill_price=%.2f counter_side=%s counter_price=%.2f amount=%.8f",
                 side,
@@ -1038,6 +1050,117 @@ class GridRobot(BaseStrategyRobot):
             if side == str(pos_side).lower():
                 return True
         return False
+
+
+    def _track_pending_reduce_only_profit(
+        self,
+        response: dict | None,
+        *,
+        entry_side: str,
+        exit_side: str,
+        entry_price: float,
+        exit_price: float,
+        amount: float,
+        pos_side: str,
+    ) -> None:
+        order_keys = self._extract_order_keys(response)
+        if not order_keys:
+            return
+        payload = {
+            "entry_side": str(entry_side),
+            "exit_side": str(exit_side),
+            "entry_price": float(entry_price),
+            "exit_price": float(exit_price),
+            "amount": float(amount),
+            "pos_side": str(pos_side),
+        }
+        for key in order_keys:
+            self._pending_reduce_only_profits[key] = payload.copy()
+
+    def _notify_ws_reduce_only_fill(self, order: dict, *, side: str, filled: float, fill_price: float) -> None:
+        if self.notifier is None or not hasattr(self.notifier, "notify_profit"):
+            return
+        order_keys = self._extract_order_keys(order)
+        if not order_keys:
+            return
+        tracked = None
+        tracked_key = None
+        for key in order_keys:
+            candidate = self._pending_reduce_only_profits.get(key)
+            if candidate is not None:
+                tracked = candidate
+                tracked_key = key
+                break
+        if tracked is None:
+            return
+
+        cumulative_filled = max(0.0, float(filled))
+        previous_cumulative = max(self._reduce_only_filled_amounts.get(tracked_key or order_keys[0], 0.0), 0.0)
+        delta_amount = min(float(tracked.get("amount") or 0.0), max(0.0, cumulative_filled - previous_cumulative))
+        target_amount = float(tracked.get("amount") or 0.0)
+        if cumulative_filled >= target_amount - 1e-12 and target_amount > 0:
+            delta_amount = max(0.0, target_amount - previous_cumulative)
+        key_for_progress = tracked_key or order_keys[0]
+        self._reduce_only_filled_amounts[key_for_progress] = max(previous_cumulative, cumulative_filled)
+        if delta_amount <= 0:
+            return
+
+        entry_price = float(tracked.get("entry_price") or 0.0)
+        if entry_price <= 0 or fill_price <= 0:
+            return
+        contract_value = 1.0
+        if hasattr(self.client, "get_contract_value"):
+            try:
+                contract_value = abs(float(self.client.get_contract_value(self.symbol))) or 1.0
+            except Exception:
+                contract_value = 1.0
+
+        entry_side = str(tracked.get("entry_side") or "").lower()
+        price_delta = fill_price - entry_price if entry_side == "buy" else entry_price - fill_price
+        pnl = float(price_delta) * float(delta_amount) * contract_value
+        entry_notional = abs(entry_price) * float(delta_amount) * contract_value
+        roi = (pnl / entry_notional * 100.0) if entry_notional > 0 else 0.0
+        balance = 0.0
+        if hasattr(self.client, "fetch_total_equity"):
+            try:
+                balance = float(self.client.fetch_total_equity("USDT"))
+            except Exception:
+                balance = 0.0
+        self.notifier.notify_profit(
+            pnl=pnl,
+            roi=roi,
+            balance=balance,
+            strategy=self.strategy_name,
+            symbol=self.symbol,
+            side=side,
+            exit_price=fill_price,
+            size=delta_amount,
+        )
+        if cumulative_filled >= target_amount - 1e-12 and target_amount > 0:
+            for key in order_keys:
+                self._pending_reduce_only_profits.pop(key, None)
+                self._reduce_only_filled_amounts.pop(key, None)
+
+    @staticmethod
+    def _extract_order_keys(order: dict | None) -> list[str]:
+        if not isinstance(order, dict):
+            return []
+        info = order.get("info") or {}
+        keys: list[str] = []
+        for value in (
+            order.get("id"),
+            order.get("orderId"),
+            order.get("clientOrderId"),
+            info.get("ordId"),
+            info.get("algoId"),
+            info.get("clOrdId"),
+        ):
+            if value in (None, ""):
+                continue
+            normalized = str(value)
+            if normalized not in keys:
+                keys.append(normalized)
+        return keys
 
     def _confirm_ws_hedge_order(self, response: dict | None, *, counter_side: str, counter_price: float, amount: float) -> None:
         if not hasattr(self.client, "fetch_order"):

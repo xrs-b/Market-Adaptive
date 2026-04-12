@@ -35,6 +35,15 @@ class TradeAggregationBucket:
     trades: list[dict[str, Any]]
 
 
+@dataclass
+class ProfitAggregationBucket:
+    strategy: str
+    symbol: str
+    started_at: datetime
+    flush_at: datetime
+    profits: list[dict[str, Any]]
+
+
 class DiscordNotifier:
     def __init__(self, config: DiscordNotificationConfig) -> None:
         self.config = config
@@ -42,6 +51,7 @@ class DiscordNotifier:
         self._thread: Thread | None = None
         self._ready = Event()
         self._trade_buckets: dict[str, TradeAggregationBucket] = {}
+        self._profit_buckets: dict[str, ProfitAggregationBucket] = {}
 
     @property
     def enabled(self) -> bool:
@@ -52,9 +62,9 @@ class DiscordNotifier:
             return False
         color = EMBED_COLOR_WARN
         normalized = str(title).lower()
-        if any(token in normalized for token in {"error", "stop", "risk"}):
+        if any(token in normalized for token in {"error", "stop", "risk", "错误", "风控"}):
             color = EMBED_COLOR_ERROR
-        elif any(token in normalized for token in {"profit", "trade", "started", "stopped", "cleanup", "action"}):
+        elif any(token in normalized for token in {"profit", "trade", "started", "stopped", "cleanup", "action", "盈利", "成交", "启动", "停止", "清理", "动作"}):
             color = EMBED_COLOR_GOOD
         payload = self._build_embed_payload(title=title, description=message, color=color)
         return self._submit_coroutine(self._post_payload(payload))
@@ -76,41 +86,64 @@ class DiscordNotifier:
         if normalized_strategy.lower() == "grid" and "fill" in normalized_signal.lower():
             return self._queue_aggregated_grid_trade(normalized_strategy, normalized_signal, trade)
 
-        title = f"{normalized_strategy.upper()} Trade Executed"
+        title = f"{normalized_strategy.upper()} 成交通知"
         fields = [
-            {"name": "Side", "value": trade["side"], "inline": True},
-            {"name": "Price", "value": f"{trade['price']:.4f}", "inline": True},
-            {"name": "Size", "value": f"{trade['size']:.8f}", "inline": True},
-            {"name": "Position Notional", "value": f"{trade['notional']:.4f} USDT", "inline": True},
-            {"name": "Strategy", "value": normalized_strategy, "inline": True},
-            {"name": "Signal", "value": normalized_signal, "inline": True},
+            {"name": "方向", "value": trade["side"], "inline": True},
+            {"name": "价格", "value": f"{trade['price']:.4f}", "inline": True},
+            {"name": "数量", "value": f"{trade['size']:.8f}", "inline": True},
+            {"name": "名义价值", "value": f"{trade['notional']:.4f} USDT", "inline": True},
+            {"name": "策略", "value": normalized_strategy, "inline": True},
+            {"name": "信号", "value": normalized_signal, "inline": True},
         ]
-        payload = self._build_embed_payload(title=title, description="Trade execution update", color=EMBED_COLOR_GOOD, fields=fields)
+        payload = self._build_embed_payload(title=title, description="成交执行更新", color=EMBED_COLOR_GOOD, fields=fields)
         return self._submit_coroutine(self._post_payload(payload))
 
-    def notify_profit(self, pnl: float, roi: float, balance: float) -> bool:
+    def notify_profit(
+        self,
+        pnl: float,
+        roi: float,
+        balance: float,
+        *,
+        strategy: str | None = None,
+        symbol: str | None = None,
+        side: str | None = None,
+        exit_price: float | None = None,
+        size: float | None = None,
+    ) -> bool:
         if not self.enabled:
             return False
-        title = "Net Profit Update"
+        normalized_strategy = str(strategy or "cta")
+        if normalized_strategy.lower() == "grid":
+            return self._queue_aggregated_grid_profit(
+                pnl=float(pnl),
+                roi=float(roi),
+                balance=float(balance),
+                strategy=normalized_strategy,
+                symbol=str(symbol or "未知"),
+                side=str(side or "").upper(),
+                exit_price=exit_price,
+                size=size,
+            )
+        title = "已实现盈亏更新"
         fields = [
-            {"name": "Net Profit", "value": f"{float(pnl):+.4f} USDT", "inline": True},
-            {"name": "ROI", "value": f"{float(roi):+.2f}%", "inline": True},
-            {"name": "Balance", "value": f"{float(balance):.4f} USDT", "inline": True},
+            {"name": "已实现盈亏", "value": f"{float(pnl):+.4f} USDT", "inline": True},
+            {"name": "收益率", "value": f"{float(roi):+.2f}%", "inline": True},
+            {"name": "账户权益", "value": f"{float(balance):.4f} USDT", "inline": True},
         ]
-        payload = self._build_embed_payload(title=title, description="Portfolio performance snapshot", color=EMBED_COLOR_GOOD, fields=fields)
+        payload = self._build_embed_payload(title=title, description="策略已实现盈亏快照", color=EMBED_COLOR_GOOD, fields=fields)
         return self._submit_coroutine(self._post_payload(payload))
 
     def notify_market_shift(self, old_state: str | None, new_state: str, reason: str) -> bool:
         if not self.enabled:
             return False
         payload = self._build_embed_payload(
-            title="Market Regime Shift",
-            description="Adaptive market state transition detected",
+            title="市场状态切换",
+            description="检测到自适应市场状态变化",
             color=EMBED_COLOR_WARN,
             fields=[
-                {"name": "From", "value": str(old_state or "none"), "inline": True},
-                {"name": "To", "value": str(new_state), "inline": True},
-                {"name": "Reason", "value": str(reason), "inline": False},
+                {"name": "从", "value": str(old_state or "无"), "inline": True},
+                {"name": "到", "value": str(new_state), "inline": True},
+                {"name": "原因", "value": str(reason), "inline": False},
             ],
         )
         return self._submit_coroutine(self._post_payload(payload))
@@ -120,10 +153,10 @@ class DiscordNotifier:
             return False
         resolved_module = module_name or self._resolve_calling_module()
         description = str(error_msg)
-        fields = [{"name": "Module", "value": resolved_module, "inline": True}]
+        fields = [{"name": "模块", "value": resolved_module, "inline": True}]
         if traceback:
-            fields.append({"name": "Traceback", "value": self._truncate(str(traceback), 1000), "inline": False})
-        payload = self._build_embed_payload(title="Runtime Error", description=description, color=EMBED_COLOR_ERROR, fields=fields)
+            fields.append({"name": "堆栈", "value": self._truncate(str(traceback), 1000), "inline": False})
+        payload = self._build_embed_payload(title="运行时错误", description=description, color=EMBED_COLOR_ERROR, fields=fields)
         return self._submit_coroutine(self._post_payload(payload))
 
     def close(self) -> None:
@@ -163,19 +196,89 @@ class DiscordNotifier:
         avg_price = total_notional / total_size if total_size > 0 else 0.0
         latest_trade = bucket.trades[-1]
         fields = [
-            {"name": "Side", "value": bucket.side, "inline": True},
-            {"name": "Fills", "value": str(len(bucket.trades)), "inline": True},
-            {"name": "Window", "value": "60s", "inline": True},
-            {"name": "Average Price", "value": f"{avg_price:.4f}", "inline": True},
-            {"name": "Total Size", "value": f"{total_size:.8f}", "inline": True},
-            {"name": "Total Notional", "value": f"{total_notional:.4f} USDT", "inline": True},
-            {"name": "Strategy", "value": bucket.strategy, "inline": True},
-            {"name": "Signal", "value": bucket.signal, "inline": True},
-            {"name": "Last Fill", "value": latest_trade["captured_at"].isoformat(), "inline": True},
+            {"name": "方向", "value": bucket.side, "inline": True},
+            {"name": "成交笔数", "value": str(len(bucket.trades)), "inline": True},
+            {"name": "窗口", "value": "60秒", "inline": True},
+            {"name": "均价", "value": f"{avg_price:.4f}", "inline": True},
+            {"name": "累计数量", "value": f"{total_size:.8f}", "inline": True},
+            {"name": "累计名义价值", "value": f"{total_notional:.4f} USDT", "inline": True},
+            {"name": "策略", "value": bucket.strategy, "inline": True},
+            {"name": "信号", "value": bucket.signal, "inline": True},
+            {"name": "最近成交", "value": self._format_timestamp(latest_trade["captured_at"]), "inline": True},
         ]
         payload = self._build_embed_payload(
-            title=f"{bucket.strategy.upper()} Grid Fill Summary",
-            description="Aggregated grid fills to reduce Discord noise",
+            title=f"{bucket.strategy.upper()} 网格成交汇总",
+            description="已聚合网格成交，减少 Discord 噪音",
+            color=EMBED_COLOR_GOOD,
+            fields=fields,
+        )
+        await self._post_payload(payload)
+
+
+    def _queue_aggregated_grid_profit(
+        self,
+        *,
+        pnl: float,
+        roi: float,
+        balance: float,
+        strategy: str,
+        symbol: str,
+        side: str,
+        exit_price: float | None,
+        size: float | None,
+    ) -> bool:
+        now = datetime.now(timezone.utc)
+        bucket_key = f"{strategy.lower()}::{symbol}"
+        bucket = self._profit_buckets.get(bucket_key)
+        if bucket is None or now >= bucket.flush_at:
+            bucket = ProfitAggregationBucket(
+                strategy=strategy,
+                symbol=symbol,
+                started_at=now,
+                flush_at=now + timedelta(minutes=1),
+                profits=[],
+            )
+            self._profit_buckets[bucket_key] = bucket
+            self._submit_coroutine(self._flush_grid_profit_bucket_after_delay(bucket_key, 60.0))
+        bucket.profits.append(
+            {
+                "pnl": pnl,
+                "roi": roi,
+                "balance": balance,
+                "side": side,
+                "exit_price": exit_price,
+                "size": size,
+                "captured_at": now,
+            }
+        )
+        return True
+
+    async def _flush_grid_profit_bucket_after_delay(self, bucket_key: str, delay_seconds: float) -> None:
+        await asyncio.sleep(delay_seconds)
+        bucket = self._profit_buckets.pop(bucket_key, None)
+        if bucket is None or not bucket.profits:
+            return
+
+        total_pnl = sum(float(item["pnl"]) for item in bucket.profits)
+        total_size = sum(abs(float(item.get("size") or 0.0)) for item in bucket.profits)
+        last_balance = float(bucket.profits[-1]["balance"])
+        avg_roi = sum(float(item["roi"]) for item in bucket.profits) / len(bucket.profits)
+        latest = bucket.profits[-1]
+        title = "网格已实现盈亏汇总"
+        fields = [
+            {"name": "策略", "value": bucket.strategy, "inline": True},
+            {"name": "交易对", "value": bucket.symbol, "inline": True},
+            {"name": "成交笔数", "value": str(len(bucket.profits)), "inline": True},
+            {"name": "已实现盈亏", "value": f"{total_pnl:+.4f} USDT", "inline": True},
+            {"name": "平均收益率", "value": f"{avg_roi:+.2f}%", "inline": True},
+            {"name": "累计平仓数量", "value": f"{total_size:.8f}", "inline": True},
+            {"name": "最近方向", "value": latest.get("side") or "-", "inline": True},
+            {"name": "最近平仓价", "value": f"{float(latest['exit_price']):.4f}" if latest.get("exit_price") not in (None, "") else "-", "inline": True},
+            {"name": "账户权益", "value": f"{last_balance:.4f} USDT", "inline": True},
+        ]
+        payload = self._build_embed_payload(
+            title=title,
+            description="已聚合网格减仓成交，避免 Discord 通知过于频繁",
             color=EMBED_COLOR_GOOD,
             fields=fields,
         )
@@ -190,15 +293,16 @@ class DiscordNotifier:
         fields: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         timestamp = datetime.now(timezone.utc)
+        formatted_timestamp = self._format_timestamp(timestamp)
         embed = {
             "title": self._truncate(str(title), 256),
             "description": self._truncate(str(description), 4000),
             "color": int(color),
             "fields": fields or [],
             "footer": {
-                "text": f"{timestamp.isoformat()} | uptime {self._get_uptime_text()} | host {socket.gethostname()}",
+                "text": f"{formatted_timestamp} | 运行时长 {self._get_uptime_text()} | 主机 {socket.gethostname()}",
             },
-            "timestamp": timestamp.isoformat(),
+            "timestamp": formatted_timestamp,
         }
         return {"username": self.config.username, "embeds": [embed]}
 
@@ -294,6 +398,9 @@ class DiscordNotifier:
             parts.append(f"{minutes}m")
         parts.append(f"{secs}s")
         return " ".join(parts)
+
+    def _format_timestamp(self, value: datetime) -> str:
+        return value.astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class NullNotifier:

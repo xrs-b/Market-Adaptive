@@ -25,9 +25,9 @@ class DummyNotifier:
         )
         return True
 
-    def notify_profit(self, pnl: float, roi: float, balance: float) -> bool:
-        self.profit_calls.append({"pnl": pnl, "roi": roi, "balance": balance})
-        self.messages.append(("Net Profit Update", f"pnl={pnl} roi={roi} balance={balance}"))
+    def notify_profit(self, pnl: float, roi: float, balance: float, **kwargs) -> bool:
+        self.profit_calls.append({"pnl": pnl, "roi": roi, "balance": balance, **kwargs})
+        self.messages.append(("已实现盈亏更新", f"pnl={pnl} roi={roi} balance={balance}"))
         return True
 
     def notify_market_shift(self, old_state: str | None, new_state: str, reason: str) -> bool:
