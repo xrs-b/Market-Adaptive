@@ -8,6 +8,7 @@ class DummyNotifier:
         self.profit_calls: list[dict] = []
         self.market_shift_calls: list[dict] = []
         self.error_calls: list[dict] = []
+        self.near_miss_calls: list[dict] = []
 
     def send(self, title: str, message: str) -> bool:
         self.messages.append((title, message))
@@ -38,5 +39,10 @@ class DummyNotifier:
     def notify_error(self, error_msg: str, traceback: str | None = None, module_name: str | None = None) -> bool:
         self.error_calls.append({"error_msg": error_msg, "traceback": traceback, "module_name": module_name})
         self.messages.append(("运行异常", error_msg))
+        return True
+
+    def notify_cta_near_miss_report(self, *, symbol: str, samples: list[object], window_seconds: float) -> bool:
+        self.near_miss_calls.append({"symbol": symbol, "samples": samples, "window_seconds": window_seconds})
+        self.messages.append(("CTA 近失报告", f"symbol={symbol} count={len(samples)} window={window_seconds}"))
         return True
 

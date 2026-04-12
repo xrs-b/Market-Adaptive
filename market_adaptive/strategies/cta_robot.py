@@ -64,6 +64,21 @@ class TrendSignal:
 
 
 @dataclass
+class CTANearMissSample:
+    symbol: str
+    captured_at: float
+    execution_trigger_reason: str
+    execution_memory_active: bool
+    execution_memory_bars_ago: int | None
+    execution_breakout: bool
+    execution_golden_cross: bool
+    obv_zscore: float
+    obv_threshold: float
+    obv_gap: float
+    price: float
+
+
+@dataclass
 class EntryOrderResult:
     order: dict
     used_limit_order: bool
@@ -141,6 +156,10 @@ class CTARobot(BaseStrategyRobot):
         self.mtf_engine = MultiTimeframeSignalEngine(client, config)
         self.order_flow_sentinel = OrderFlowSentinel(client, config)
         self._last_signal_heartbeat_at = 0.0
+        self._near_miss_samples: list[CTANearMissSample] = []
+        self._near_miss_window_started_at: float | None = None
+        self._last_near_miss_report_at = 0.0
+        self._time_provider = time.time
 
     def should_notify_action(self, action: str) -> bool:
         if action in {
@@ -195,6 +214,8 @@ class CTARobot(BaseStrategyRobot):
             return "cta:insufficient_data"
 
         self._maybe_log_signal_heartbeat(signal)
+        self._collect_near_miss_sample(signal)
+        self._maybe_flush_near_miss_report()
 
         actions: list[str] = []
         closed_position = False
@@ -327,11 +348,69 @@ class CTARobot(BaseStrategyRobot):
         interval = float(getattr(self.config, "heartbeat_interval_seconds", 300.0) or 0.0)
         if interval <= 0:
             return
-        now = time.time()
+        now = self._time_provider()
         if now - float(self._last_signal_heartbeat_at) < interval:
             return
         self._last_signal_heartbeat_at = now
         logger.info("CTA signal heartbeat | %s", self._build_signal_heartbeat_payload(signal))
+
+    def _is_execution_near_ready(self, signal: TrendSignal) -> bool:
+        return bool(signal.bullish_ready and (signal.raw_direction > 0 or signal.execution_memory_active or signal.execution_breakout))
+
+    def _collect_near_miss_sample(self, signal: TrendSignal) -> None:
+        if signal.long_setup_reason != "obv_strength_not_confirmed":
+            return
+        if not self._is_execution_near_ready(signal):
+            return
+        threshold = float(self.config.obv_zscore_threshold)
+        sample = CTANearMissSample(
+            symbol=self.symbol,
+            captured_at=float(self._time_provider()),
+            execution_trigger_reason=str(signal.execution_trigger_reason),
+            execution_memory_active=bool(signal.execution_memory_active),
+            execution_memory_bars_ago=signal.execution_memory_bars_ago,
+            execution_breakout=bool(signal.execution_breakout),
+            execution_golden_cross=bool(signal.execution_golden_cross),
+            obv_zscore=float(signal.obv_confirmation.zscore),
+            obv_threshold=threshold,
+            obv_gap=float(threshold - float(signal.obv_confirmation.zscore)),
+            price=float(signal.price),
+        )
+        if self._near_miss_window_started_at is None:
+            self._near_miss_window_started_at = sample.captured_at
+        self._near_miss_samples.append(sample)
+        max_samples = max(1, int(getattr(self.config, "near_miss_report_max_samples", 5) or 5))
+        self._near_miss_samples = sorted(
+            self._near_miss_samples,
+            key=lambda item: (item.obv_gap, -item.obv_zscore, -item.captured_at),
+        )[: max_samples * 3]
+
+    def _maybe_flush_near_miss_report(self) -> None:
+        interval = float(getattr(self.config, "near_miss_report_interval_seconds", 3600.0) or 0.0)
+        if interval <= 0 or not self._near_miss_samples:
+            return
+        now = float(self._time_provider())
+        window_started_at = self._near_miss_window_started_at
+        if window_started_at is None or now - float(window_started_at) < interval:
+            return
+        samples = self._consume_near_miss_samples()
+        if not samples:
+            return
+        self._last_near_miss_report_at = now
+        if self.notifier is not None and hasattr(self.notifier, "notify_cta_near_miss_report"):
+            self.notifier.notify_cta_near_miss_report(symbol=self.symbol, samples=samples, window_seconds=interval)
+
+    def _consume_near_miss_samples(self) -> list[CTANearMissSample]:
+        if not self._near_miss_samples:
+            return []
+        max_samples = max(1, int(getattr(self.config, "near_miss_report_max_samples", 5) or 5))
+        samples = sorted(
+            self._near_miss_samples,
+            key=lambda item: (item.obv_gap, -item.obv_zscore, -item.captured_at),
+        )[:max_samples]
+        self._near_miss_samples = []
+        self._near_miss_window_started_at = None
+        return samples
 
     def _open_position(self, signal: TrendSignal) -> str:
         side = "buy" if signal.direction > 0 else "sell"

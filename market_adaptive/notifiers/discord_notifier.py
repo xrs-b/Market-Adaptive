@@ -44,6 +44,21 @@ class ProfitAggregationBucket:
     profits: list[dict[str, Any]]
 
 
+@dataclass
+class CTANearMissPayload:
+    symbol: str
+    captured_at: float
+    execution_trigger_reason: str
+    execution_memory_active: bool
+    execution_memory_bars_ago: int | None
+    execution_breakout: bool
+    execution_golden_cross: bool
+    obv_zscore: float
+    obv_threshold: float
+    obv_gap: float
+    price: float
+
+
 class DiscordNotifier:
     def __init__(self, config: DiscordNotificationConfig) -> None:
         self.config = config
@@ -157,6 +172,36 @@ class DiscordNotifier:
         if traceback:
             fields.append({"name": "堆栈", "value": self._truncate(str(traceback), 1000), "inline": False})
         payload = self._build_embed_payload(title="运行异常", description=description, color=EMBED_COLOR_ERROR, fields=fields)
+        return self._submit_coroutine(self._post_payload(payload))
+
+    def notify_cta_near_miss_report(self, *, symbol: str, samples: list[Any], window_seconds: float) -> bool:
+        if not self.enabled or not samples:
+            return False
+        normalized_samples = [self._coerce_near_miss_sample(symbol=symbol, sample=sample) for sample in samples]
+        closest = normalized_samples[0]
+        fields = [
+            {"name": "交易对", "value": str(symbol), "inline": True},
+            {"name": "近失机会数", "value": str(len(normalized_samples)), "inline": True},
+            {"name": "统计窗口", "value": self._format_window_seconds(window_seconds), "inline": True},
+            {"name": "最接近样本", "value": f"OBV Z-Score {closest.obv_zscore:.2f} / 阈值 {closest.obv_threshold:.2f} / 差距 {closest.obv_gap:.2f}", "inline": False},
+        ]
+        detail_lines = []
+        for index, sample in enumerate(normalized_samples, start=1):
+            memory_suffix = "未激活"
+            if sample.execution_memory_active:
+                bars_ago = sample.execution_memory_bars_ago
+                memory_suffix = f"激活（{bars_ago} 根前）" if bars_ago is not None else "激活"
+            detail_lines.append(
+                f"{index}. OBV Z-Score {sample.obv_zscore:.2f} / 阈值 {sample.obv_threshold:.2f} / 差距 {sample.obv_gap:.2f}\n"
+                f"   执行触发：{sample.execution_trigger_reason}｜Memory：{memory_suffix}｜突破：{'是' if sample.execution_breakout else '否'}｜KDJ 金叉：{'是' if sample.execution_golden_cross else '否'}"
+            )
+        fields.append({"name": "样本详情", "value": self._truncate("\n".join(detail_lines), 1000), "inline": False})
+        payload = self._build_embed_payload(
+            title="CTA 近失报告",
+            description="本小时 CTA 基础触发已接近成立，但被 OBV 强度确认拦住。可用来观察当前 OBV 阈值是否偏严。",
+            color=EMBED_COLOR_WARN,
+            fields=fields,
+        )
         return self._submit_coroutine(self._post_payload(payload))
 
     def close(self) -> None:
@@ -282,6 +327,32 @@ class DiscordNotifier:
             fields=fields,
         )
         await self._post_payload(payload)
+
+    def _coerce_near_miss_sample(self, *, symbol: str, sample: Any) -> CTANearMissPayload:
+        if isinstance(sample, CTANearMissPayload):
+            return sample
+        values = sample if isinstance(sample, dict) else vars(sample)
+        return CTANearMissPayload(
+            symbol=str(values.get("symbol") or symbol),
+            captured_at=float(values.get("captured_at") or 0.0),
+            execution_trigger_reason=str(values.get("execution_trigger_reason") or ""),
+            execution_memory_active=bool(values.get("execution_memory_active")),
+            execution_memory_bars_ago=values.get("execution_memory_bars_ago"),
+            execution_breakout=bool(values.get("execution_breakout")),
+            execution_golden_cross=bool(values.get("execution_golden_cross")),
+            obv_zscore=float(values.get("obv_zscore") or 0.0),
+            obv_threshold=float(values.get("obv_threshold") or 0.0),
+            obv_gap=float(values.get("obv_gap") or 0.0),
+            price=float(values.get("price") or 0.0),
+        )
+
+    def _format_window_seconds(self, seconds: float) -> str:
+        total = max(0, int(seconds))
+        if total % 3600 == 0 and total >= 3600:
+            return f"{total // 3600} 小时"
+        if total % 60 == 0 and total >= 60:
+            return f"{total // 60} 分钟"
+        return f"{total} 秒"
 
     def _build_embed_payload(
         self,
@@ -432,4 +503,8 @@ class NullNotifier:
 
     def notify_error(self, error_msg: str, traceback: str | None = None, module_name: str | None = None) -> bool:
         logger.debug("Error notification skipped: %s | %s | %s", module_name, error_msg, traceback)
+        return False
+
+    def notify_cta_near_miss_report(self, *, symbol: str, samples: list[Any], window_seconds: float) -> bool:
+        logger.debug("CTA near-miss notification skipped: %s %s %s", symbol, len(samples), window_seconds)
         return False

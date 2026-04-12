@@ -195,6 +195,7 @@ notification:
 - `CTARobot` 只在 `trend` 激活，并改为走三周期 `MTF Engine`：`4h` 用 `SuperTrend` 识别 major trend，`1h` 用 `RSI` 判定 swing readiness，`15m` 只负责 execution trigger（`KDJ` 金叉或突破最近 `execution_breakout_lookback` 根 K 线前高）
 - 当 `4h SuperTrend` 看多且 `1h RSI > swing_rsi_ready_threshold`（默认 `50`）时，CTA 进入 `bullish ready`；只有 `15m` 执行触发成立后，才允许进入后续多头过滤链路
 - 即使 MTF 已 ready / trigger，多头仍必须继续通过现有 CTA stack：`OBV` 信号线偏多、`OBV` z-score 强度高于 `obv_zscore_threshold`（默认 `1.0`，兼容保留 `obv_slope_*` 旧字段名与属性，但 CTA 入场核心已切到 z-score 语义），以及基于最近约 24 小时 intraday OHLCV 构造的 `Volume Profile` breakout 条件（突破 `POC` 并站上 `Value Area High`）；若价格仍在 value area 内或低于 POC，则直接跳过开仓
+- 当 `bullish ready` + execution trigger 已 ready / near-ready，但最终只差 `OBV` 强度确认时，CTA 会在策略侧收集 `near miss` 样本，并按 `near_miss_report_interval_seconds`（默认每小时）聚合最接近阈值的案例，通过 Discord `CTA 近失报告` 输出当前 `z-score / threshold / gap`，帮助评估 `OBV` 门槛是否过严
 - 当 `4h`、`1h` 与 `15m` 三层信号 fully aligned 时，CTA 会把单笔风险从基线 `risk_percent_per_trade`（默认 `2%`）提升到 `boosted_risk_percent_per_trade`（默认 `3%`），再交给 `RiskControlManager` / Hybrid Shield 做最终仓位约束
 - CTA 多头开仓前会额外读取 OKX 公共 `long_short_accounts_ratio`；当零售多头情绪比值大于 `2.5` 时，默认阻止买入信号（也可配置为把多头仓位减半）
 - Sentiment 通过后，CTA 还会触发 `Order Flow Sentinel` 做最后一跳秒级盘口确认：调用 OKX `fetchOrderBook` 读取前 `20` 档深度，计算 `bid_sum / ask_sum`；当该比值低于 `1.5` 时，直接拒绝本次多头开仓

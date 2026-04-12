@@ -10,7 +10,7 @@ from market_adaptive.db import DatabaseInitializer, MarketStatusRecord
 from market_adaptive.notifiers.discord_notifier import DiscordNotifier
 from market_adaptive.oracles.market_oracle import MarketOracle
 from market_adaptive.strategies import CTARobot, GridRobot
-from market_adaptive.strategies.cta_robot import ManagedPosition
+from market_adaptive.strategies.cta_robot import CTANearMissSample, ManagedPosition
 from market_adaptive.testsupport import DummyNotifier
 
 
@@ -199,7 +199,7 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(len(self.notifier.messages), 1)
         self.assertEqual(self.notifier.messages[0][0], '市场状态已切换')
 
-    def test_cta_robot_notifies_on_trade_action(self) -> None:
+    def test_cta_robot_suppresses_non_trade_bullish_ready_notification(self) -> None:
         client = DummyClient()
         notifier = self.notifier
         db = self.database
@@ -207,10 +207,11 @@ class NotificationTests(unittest.TestCase):
         self._set_bullish_ohlcv(client, lower_last_close=100.0)
 
         robot = CTARobot(client, db, CTAConfig(), ExecutionConfig(), notifier=notifier)
-        robot.run()
+        result = robot.run()
 
-        self.assertTrue(any(title == '策略动作通知' for title, _ in notifier.messages))
-        self.assertTrue(any('cta:open_long' in body for _, body in notifier.messages))
+        self.assertEqual(result.action, 'cta:bullish_ready')
+        self.assertFalse(any(title == '策略动作通知' for title, _ in notifier.messages))
+        self.assertEqual(client.market_orders, [])
 
     def test_grid_robot_does_not_notify_on_regular_grid_placement(self) -> None:
         client = DummyClient()
@@ -363,6 +364,39 @@ class NotificationTests(unittest.TestCase):
         field_map = {field['name']: field['value'] for field in embed['fields']}
         self.assertEqual(field_map['平仓笔数'], '2')
         self.assertEqual(field_map['累计已实现盈亏'], '+2.0000 USDT')
+
+
+    def test_discord_notifier_builds_cta_near_miss_report_payload(self) -> None:
+        notifier = CapturingDiscordNotifier()
+
+        notifier.notify_cta_near_miss_report(
+            symbol='BTC/USDT',
+            window_seconds=3600.0,
+            samples=[
+                CTANearMissSample(
+                    symbol='BTC/USDT',
+                    captured_at=1_700_000_000.0,
+                    execution_trigger_reason='Triggered via Memory Window: KDJ crossed 1 bars ago + Price Breakout NOW',
+                    execution_memory_active=True,
+                    execution_memory_bars_ago=1,
+                    execution_breakout=True,
+                    execution_golden_cross=False,
+                    obv_zscore=0.85,
+                    obv_threshold=1.0,
+                    obv_gap=0.15,
+                    price=70960.6,
+                )
+            ],
+        )
+
+        self.assertEqual(len(notifier.payloads), 1)
+        embed = notifier.payloads[0]['embeds'][0]
+        self.assertEqual(embed['title'], 'CTA 近失报告')
+        self.assertEqual(embed['color'], 0xFFFF00)
+        field_map = {field['name']: field['value'] for field in embed['fields']}
+        self.assertEqual(field_map['统计窗口'], '1 小时')
+        self.assertIn('OBV Z-Score 0.85 / 阈值 1.00 / 差距 0.15', field_map['最接近样本'])
+        self.assertIn('Triggered via Memory Window', field_map['样本详情'])
 
     def test_cta_take_profit_notifies_realized_profit(self) -> None:
         client = DummyClient()
