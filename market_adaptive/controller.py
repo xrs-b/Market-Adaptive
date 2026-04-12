@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
+import traceback
 
 import ccxt
 
@@ -205,8 +206,20 @@ class MainController:
                 logger.info("Cycle completed | result=%s", result)
             except (ccxt.NetworkError, ccxt.ExchangeError, TimeoutError, ValueError) as exc:
                 logger.warning("Transient worker error: %s", exc, exc_info=True)
+                if self.notifier is not None and hasattr(self.notifier, "notify_error"):
+                    self.notifier.notify_error(
+                        str(exc),
+                        traceback=traceback.format_exc(),
+                        module_name=f"market_adaptive.controller.{spec.name}",
+                    )
             except Exception as exc:  # pragma: no cover
                 logger.exception("Unexpected worker error: %s", exc)
+                if self.notifier is not None and hasattr(self.notifier, "notify_error"):
+                    self.notifier.notify_error(
+                        str(exc),
+                        traceback=traceback.format_exc(),
+                        module_name=f"market_adaptive.controller.{spec.name}",
+                    )
             elapsed = time.time() - started_at
             sleep_seconds = max(0.0, spec.interval_seconds - elapsed)
             if self.stop_event.wait(sleep_seconds):

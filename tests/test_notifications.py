@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
 
-from market_adaptive.config import CTAConfig, ExecutionConfig, GridConfig, MarketOracleConfig
+from market_adaptive.config import CTAConfig, DiscordNotificationConfig, ExecutionConfig, GridConfig, MarketOracleConfig
 from market_adaptive.db import DatabaseInitializer, MarketStatusRecord
+from market_adaptive.notifiers.discord_notifier import DiscordNotifier
 from market_adaptive.oracles.market_oracle import MarketOracle
 from market_adaptive.strategies import CTARobot, GridRobot
 from market_adaptive.testsupport import DummyNotifier
@@ -62,6 +64,38 @@ class DummyClient:
     def fetch_open_orders(self, symbol: str):
         del symbol
         return list(self.limit_orders)
+
+    def price_to_precision(self, symbol: str, price: float) -> float:
+        del symbol
+        return float(price)
+
+    def amount_to_precision(self, symbol: str, amount: float) -> float:
+        del symbol
+        return float(amount)
+
+
+class CapturingDiscordNotifier(DiscordNotifier):
+    def __init__(self) -> None:
+        super().__init__(DiscordNotificationConfig(enabled=True, webhook_url="https://example.invalid/webhook"))
+        self.payloads: list[dict] = []
+
+    async def _post_payload(self, payload: dict) -> bool:
+        self.payloads.append(payload)
+        return True
+
+    def submit_and_wait(self, coro) -> bool:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(coro)
+            return True
+        finally:
+            loop.close()
+
+    def _submit_coroutine(self, coro) -> bool:
+        if getattr(coro, "cr_code", None) is not None and coro.cr_code.co_name == "_flush_grid_trade_bucket_after_delay":
+            coro.close()
+            return True
+        return self.submit_and_wait(coro)
 
 
 class NotificationTests(unittest.TestCase):
@@ -205,6 +239,47 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(result.action.split('|')[0], 'grid:flash_crash_triggered')
         self.assertTrue(any(title == 'Grid Risk Alert' for title, _ in notifier.messages))
         self.assertTrue(any('flash_crash_triggered' in body for _, body in notifier.messages))
+
+    def test_discord_notifier_builds_embed_and_aggregates_grid_fills(self) -> None:
+        notifier = CapturingDiscordNotifier()
+
+        notifier.notify_trade("buy", 100.0, 0.2, "grid", "grid_fill_websocket")
+        notifier.notify_trade("buy", 102.0, 0.1, "grid", "grid_fill_websocket")
+
+        self.assertEqual(len(notifier.payloads), 0)
+        bucket_key = "grid::grid_fill_websocket::BUY"
+        notifier.submit_and_wait(notifier._flush_grid_trade_bucket_after_delay(bucket_key, 0.0))
+
+        self.assertEqual(len(notifier.payloads), 1)
+        embed = notifier.payloads[0]["embeds"][0]
+        self.assertEqual(embed["color"], 0x00FF00)
+        self.assertEqual(embed["title"], "GRID Grid Fill Summary")
+        field_map = {field["name"]: field["value"] for field in embed["fields"]}
+        self.assertEqual(field_map["Fills"], "2")
+        self.assertEqual(field_map["Total Notional"], "30.2000 USDT")
+
+    def test_grid_websocket_fill_calls_trade_notifier(self) -> None:
+        client = DummyClient()
+        notifier = DummyNotifier()
+        db = self.database
+        db.insert_market_status(MarketStatusRecord('2026-04-10T00:00:00+00:00', 'BTC/USDT', 'sideways', 10.0, 0.01))
+        client.ohlcv_by_timeframe['1h'] = [
+            [1_700_000_000_000 + i * 3_600_000, 100.0, 101.0, 99.0, 100.0, 120.0]
+            for i in range(80)
+        ]
+        robot = GridRobot(client, db, GridConfig(), ExecutionConfig(), notifier=notifier, market_oracle=None, use_dynamic_range=False)
+        robot._cached_context = robot._fallback_context(100.0, 2.0)
+        client.fetch_positions = lambda symbols=None: [{"contracts": 1.0, "side": "long", "entryPrice": 100.0}]
+        client.price_to_precision = lambda symbol, price: float(price)
+        client.amount_to_precision = lambda symbol, amount: float(amount)
+        client.fetch_order = lambda order_id, symbol: {"status": "open", "id": order_id, "symbol": symbol}
+        client.limit_orders.clear()
+
+        robot._on_ws_orders({"status": "filled", "filled": 0.5, "side": "buy", "average": 100.0, "id": "fill-1"})
+
+        self.assertEqual(len(notifier.trade_calls), 1)
+        self.assertEqual(notifier.trade_calls[0]["strategy"], "grid")
+        self.assertEqual(notifier.trade_calls[0]["signal"], "grid_fill_websocket")
 
 
 if __name__ == '__main__':

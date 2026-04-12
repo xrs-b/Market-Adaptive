@@ -62,6 +62,7 @@ class MarketOracle:
         self.database = database
         self.config = config
         self.notifier = notifier
+        self._last_snapshot: MultiTimeframeMarketSnapshot | None = None
 
     def collect_market_snapshot(self) -> MultiTimeframeMarketSnapshot:
         higher_ohlcv = self.client.fetch_ohlcv(
@@ -123,6 +124,7 @@ class MarketOracle:
     def run_once(self) -> MarketStatusRecord:
         previous = self.database.fetch_latest_market_status(self.config.symbol)
         snapshot = self.collect_market_snapshot()
+        self._last_snapshot = snapshot
         status = self.determine_status(snapshot)
         record = MarketStatusRecord(
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -185,6 +187,15 @@ class MarketOracle:
         if self.notifier is None:
             return
         old_status = previous_status or "none"
+        snapshot = self._last_snapshot
+        if snapshot is not None and hasattr(self.notifier, "notify_market_shift"):
+            reason = (
+                f"symbol={record.symbol}; adx={record.adx_value:.4f}; atr/volatility={record.volatility:.6f}; "
+                f"{self._indicator_summary(snapshot.higher_timeframe, snapshot.higher)}; "
+                f"{self._indicator_summary(snapshot.lower_timeframe, snapshot.lower)}"
+            )
+            self.notifier.notify_market_shift(old_status, record.status, reason)
+            return
         self.notifier.send(
             "Market Status Switched",
             (

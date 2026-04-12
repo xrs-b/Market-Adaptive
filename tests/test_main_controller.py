@@ -174,6 +174,5 @@ class MainControllerTests(unittest.TestCase):
         self.assertIn("BTC/USDT", controller.shutdown_client.closed_symbols)
         self.assertTrue(any(title == "System Stopped" for title, _ in controller.notifier.messages))
 
-
 if __name__ == "__main__":
     unittest.main()

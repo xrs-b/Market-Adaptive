@@ -994,6 +994,14 @@ class GridRobot(BaseStrategyRobot):
                 counter_price,
                 counter_amount,
             )
+            if self.notifier is not None and hasattr(self.notifier, "notify_trade"):
+                self.notifier.notify_trade(
+                    side=side,
+                    price=fill_price,
+                    size=counter_amount,
+                    strategy=self.strategy_name,
+                    signal="grid_fill_websocket",
+                )
             self._confirm_ws_hedge_order(response, counter_side=counter_side, counter_price=counter_price, amount=counter_amount)
 
     def _reset_ws_order_cycle(self, anchor_timestamp_ms: int | None) -> None:
