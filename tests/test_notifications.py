@@ -429,8 +429,40 @@ class NotificationTests(unittest.TestCase):
         field_map = {field['name']: field['value'] for field in embed['fields']}
         self.assertEqual(field_map['统计窗口'], '最近 10 个 CTA 周期')
         self.assertEqual(field_map['通过 Trigger'], '2/10 (20.0%)')
+        self.assertEqual(field_map['最近价格'], '70250.5000')
+        self.assertEqual(field_map['距离网格中心'], '-55.2000')
         self.assertIn('Blocked_By_OBV_STRENGTH_NOT_CONFIRMED × 4', field_map['主要拦截原因'])
         self.assertEqual(field_map['最近一次结果'], 'Blocked_By_BELOW_POC')
+
+    def test_discord_notifier_marks_unavailable_signal_profiler_values_truthfully(self) -> None:
+        notifier = CapturingDiscordNotifier()
+
+        notifier.notify_signal_profiler_summary(
+            symbol='BTC/USDT',
+            summary_interval=10,
+            summary={
+                'window_cycles': 10,
+                'total_cycles': 20,
+                'passed_regime': 8,
+                'passed_swing': 5,
+                'passed_trigger': 2,
+                'regime_pass_rate_pct': 80.0,
+                'swing_pass_rate_pct': 50.0,
+                'trigger_pass_rate_pct': 20.0,
+                'top_blockers': [('Blocked_By_OBV_STRENGTH_NOT_CONFIRMED', 4)],
+                'latest_blocker_reason': 'Blocked_By_BELOW_POC',
+                'latest_execution_obv_zscore': 0.73,
+                'latest_execution_obv_threshold': 1.0,
+                'latest_execution_price': None,
+                'latest_grid_center_gap': None,
+            },
+        )
+
+        self.assertEqual(len(notifier.payloads), 1)
+        embed = notifier.payloads[0]['embeds'][0]
+        field_map = {field['name']: field['value'] for field in embed['fields']}
+        self.assertEqual(field_map['最近价格'], '暂无有效样本')
+        self.assertEqual(field_map['距离网格中心'], '未进入执行层')
 
     def test_cta_take_profit_notifies_realized_profit(self) -> None:
         client = DummyClient()

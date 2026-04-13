@@ -28,7 +28,7 @@ class CycleAuditRecord:
     swing_rsi: float
     execution_obv_zscore: float
     execution_obv_threshold: float
-    execution_price: float
+    execution_price: float | None
     grid_center_price: float | None
     grid_center_gap: float | None
     atr_value: float
@@ -58,8 +58,26 @@ class FunnelWindowSummary:
     latest_blocker_reason: str
     latest_execution_obv_zscore: float
     latest_execution_obv_threshold: float
-    latest_execution_price: float
+    latest_execution_price: float | None
     latest_grid_center_gap: float | None
+
+    def as_notification_payload(self) -> dict[str, Any]:
+        return {
+            "window_cycles": self.window_cycles,
+            "total_cycles": self.total_cycles,
+            "passed_regime": self.passed_regime,
+            "passed_swing": self.passed_swing,
+            "passed_trigger": self.passed_trigger,
+            "regime_pass_rate_pct": self.regime_pass_rate_pct,
+            "swing_pass_rate_pct": self.swing_pass_rate_pct,
+            "trigger_pass_rate_pct": self.trigger_pass_rate_pct,
+            "top_blockers": list(self.top_blockers),
+            "latest_blocker_reason": self.latest_blocker_reason,
+            "latest_execution_obv_zscore": self.latest_execution_obv_zscore,
+            "latest_execution_obv_threshold": self.latest_execution_obv_threshold,
+            "latest_execution_price": self.latest_execution_price,
+            "latest_grid_center_gap": self.latest_grid_center_gap,
+        }
 
 
 @dataclass
@@ -69,6 +87,20 @@ class SignalProfiler:
     symbol: str = "BTC/USDT"
     counters: FunnelCounters = field(default_factory=FunnelCounters)
     _window_records: list[CycleAuditRecord] = field(default_factory=list)
+
+    def _normalize_execution_price(self, price: Any) -> float | None:
+        try:
+            numeric_price = float(price)
+        except (TypeError, ValueError):
+            return None
+        return numeric_price if numeric_price > 0 else None
+
+    def _latest_non_null(self, records: list[CycleAuditRecord], field_name: str) -> Any | None:
+        for record in reversed(records):
+            value = getattr(record, field_name)
+            if value is not None:
+                return value
+        return None
 
     def record(self, signal: "MTFSignal", *, grid_center_price: float | None = None, blocker_reason: str = "") -> CycleAuditRecord:
         self.counters.total_cycles += 1
@@ -86,6 +118,8 @@ class SignalProfiler:
         if grid_center_price is not None:
             gap = float(signal.current_price) - float(grid_center_price)
 
+        execution_price = self._normalize_execution_price(getattr(signal, "current_price", None))
+
         record = CycleAuditRecord(
             cycle=self.counters.total_cycles,
             server_time_iso=signal.server_time_iso,
@@ -95,7 +129,7 @@ class SignalProfiler:
             swing_rsi=float(signal.swing_rsi),
             execution_obv_zscore=float(signal.execution_obv_zscore),
             execution_obv_threshold=float(signal.execution_obv_threshold),
-            execution_price=float(signal.current_price),
+            execution_price=execution_price,
             grid_center_price=grid_center_price,
             grid_center_gap=gap,
             atr_value=float(signal.execution_atr),
@@ -121,7 +155,7 @@ class SignalProfiler:
             record.swing_rsi,
             record.execution_obv_zscore,
             record.execution_obv_threshold,
-            record.execution_price,
+            record.execution_price if record.execution_price is not None else float("nan"),
             f"{record.grid_center_price:.4f}" if record.grid_center_price is not None else "n/a",
             f"{record.grid_center_gap:.4f}" if record.grid_center_gap is not None else "n/a",
             record.atr_value,
@@ -165,8 +199,8 @@ class SignalProfiler:
             latest_blocker_reason=latest.blocker_reason,
             latest_execution_obv_zscore=latest.execution_obv_zscore,
             latest_execution_obv_threshold=latest.execution_obv_threshold,
-            latest_execution_price=latest.execution_price,
-            latest_grid_center_gap=latest.grid_center_gap,
+            latest_execution_price=self._latest_non_null(records, "execution_price"),
+            latest_grid_center_gap=self._latest_non_null(records, "grid_center_gap"),
         )
 
     def _notify_summary(self, summary: FunnelWindowSummary) -> None:
@@ -176,22 +210,7 @@ class SignalProfiler:
             self.notifier.notify_signal_profiler_summary(
                 symbol=self.symbol,
                 summary_interval=max(1, int(self.summary_interval)),
-                summary={
-                    "window_cycles": summary.window_cycles,
-                    "total_cycles": summary.total_cycles,
-                    "passed_regime": summary.passed_regime,
-                    "passed_swing": summary.passed_swing,
-                    "passed_trigger": summary.passed_trigger,
-                    "regime_pass_rate_pct": summary.regime_pass_rate_pct,
-                    "swing_pass_rate_pct": summary.swing_pass_rate_pct,
-                    "trigger_pass_rate_pct": summary.trigger_pass_rate_pct,
-                    "top_blockers": list(summary.top_blockers),
-                    "latest_blocker_reason": summary.latest_blocker_reason,
-                    "latest_execution_obv_zscore": summary.latest_execution_obv_zscore,
-                    "latest_execution_obv_threshold": summary.latest_execution_obv_threshold,
-                    "latest_execution_price": summary.latest_execution_price,
-                    "latest_grid_center_gap": summary.latest_grid_center_gap,
-                },
+                summary=summary.as_notification_payload(),
             )
         except Exception:  # pragma: no cover
             logger.exception("Signal profiler summary notification failed")

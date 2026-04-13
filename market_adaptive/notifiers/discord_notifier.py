@@ -210,7 +210,6 @@ class DiscordNotifier:
         blocker_lines = [f"{name} × {count}" for name, count in summary.get("top_blockers", [])]
         if not blocker_lines:
             blocker_lines = ["PASSED × 0"]
-        latest_gap = summary.get("latest_grid_center_gap")
         fields = [
             {"name": "交易对", "value": str(symbol), "inline": True},
             {"name": "统计窗口", "value": f"最近 {int(summary_interval)} 个 CTA 周期", "inline": True},
@@ -219,8 +218,8 @@ class DiscordNotifier:
             {"name": "通过 Swing", "value": f"{int(summary.get('passed_swing', 0))}/{int(summary.get('window_cycles', 0))} ({float(summary.get('swing_pass_rate_pct', 0.0)):.1f}%)", "inline": True},
             {"name": "通过 Trigger", "value": f"{int(summary.get('passed_trigger', 0))}/{int(summary.get('window_cycles', 0))} ({float(summary.get('trigger_pass_rate_pct', 0.0)):.1f}%)", "inline": True},
             {"name": "最近 OBV 强度", "value": f"{float(summary.get('latest_execution_obv_zscore', 0.0)):.2f} / 阈值 {float(summary.get('latest_execution_obv_threshold', 0.0)):.2f}", "inline": True},
-            {"name": "最近价格", "value": f"{float(summary.get('latest_execution_price', 0.0)):.4f}", "inline": True},
-            {"name": "距离网格中心", "value": f"{float(latest_gap):+.4f}" if latest_gap is not None else "n/a", "inline": True},
+            {"name": "最近价格", "value": self._format_signal_profiler_price(summary.get('latest_execution_price')), "inline": True},
+            {"name": "距离网格中心", "value": self._format_signal_profiler_gap(summary.get('latest_grid_center_gap')), "inline": True},
             {"name": "主要拦截原因", "value": self._truncate("\n".join(blocker_lines), 1000), "inline": False},
             {"name": "最近一次结果", "value": str(summary.get("latest_blocker_reason") or "PASSED"), "inline": False},
         ]
@@ -381,6 +380,22 @@ class DiscordNotifier:
         if total % 60 == 0 and total >= 60:
             return f"{total // 60} 分钟"
         return f"{total} 秒"
+
+    def _format_signal_profiler_price(self, value: Any) -> str:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return "暂无有效样本"
+        if numeric <= 0:
+            return "暂无有效样本"
+        return f"{numeric:.4f}"
+
+    def _format_signal_profiler_gap(self, value: Any) -> str:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return "未进入执行层"
+        return f"{numeric:+.4f}"
 
     def _build_embed_payload(
         self,
