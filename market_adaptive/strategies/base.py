@@ -35,6 +35,12 @@ class BaseStrategyRobot:
         self.symbol = symbol
         self.notifier = notifier
 
+    def _is_active_for_status(self, current_status: str) -> bool:
+        statuses = getattr(self, "activation_statuses", None)
+        if statuses is not None:
+            return current_status in set(statuses)
+        return current_status == self.activation_status
+
     def run(self) -> StrategyRunResult:
         market_status = self.database.fetch_latest_market_status(self.symbol)
         if market_status is None:
@@ -48,7 +54,7 @@ class BaseStrategyRobot:
             self.flatten_and_cancel_all(reason=f"status_switch:{previous_status}->{current_status}")
 
         action = "skip:inactive"
-        active = current_status == self.activation_status
+        active = self._is_active_for_status(current_status)
         if active:
             action = self.execute_active_cycle()
             if self.should_notify_action(action):

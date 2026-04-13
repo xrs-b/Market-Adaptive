@@ -1506,6 +1506,36 @@ class TheHandsTests(unittest.TestCase):
 
         self.assertEqual(risk_manager.cleanup_requests, [("grid", "status_switch:trend->sideways")])
 
+    def test_cta_robot_accepts_trend_impulse_status_for_activation(self) -> None:
+        self._insert_status("trend_impulse")
+        self._load_bullish_signal(lower_last_close=100.0)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+
+        result = robot.run()
+
+        self.assertTrue(result.active)
+        self.assertEqual(result.status, "trend_impulse")
+        self.assertEqual(result.action, "cta:open_long")
+
+    def test_cta_robot_uses_limit_entry_for_weak_bull_bias_path(self) -> None:
+        self._insert_status("trend")
+        major_closes = [200 - 0.5 * index for index in range(60)]
+        swing_closes = [100.0] * 20 + [100.2, 100.4, 100.7, 101.0, 101.3, 101.8, 102.2, 102.7, 103.1, 103.5, 103.9, 104.4, 104.8, 105.2, 105.7, 106.1, 106.5, 106.9, 107.2, 107.5, 107.9, 108.2, 108.5, 108.9, 109.2, 109.6, 110.0, 110.3, 110.7, 111.0, 111.4, 111.8, 112.2, 112.5, 112.9, 113.3, 113.6, 114.0, 114.4, 114.8]
+        execution_closes = [100.0] * 56 + [100.2, 100.3, 100.4, 100.5]
+        self._set_ohlcv("4h", major_closes, 14_400_000)
+        self._set_ohlcv("1h", swing_closes, 3_600_000)
+        self._set_ohlcv("15m", execution_closes, 900_000)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=2)
+
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            result = robot.run()
+
+        self.assertEqual(result.action, "cta:open_long_limit")
+        self.assertEqual(len(self.client.limit_orders), 1)
+        self.assertEqual(self.client.limit_orders[0]["params"]["executionMode"], "weak_bull_scale_in")
+        self.assertIsNotNone(robot.position)
+
     def test_hands_coordinator_runs_both_robots(self) -> None:
         self._insert_status("sideways")
         self._load_sideways_grid_data(center=100.0, width=4.0, length=120)

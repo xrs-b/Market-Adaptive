@@ -11,7 +11,7 @@ MARKET_STATUS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS market_status (
     timestamp TEXT PRIMARY KEY,
     symbol TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('trend', 'sideways')),
+    status TEXT NOT NULL CHECK(status IN ('trend', 'sideways', 'trend_impulse')),
     adx_value REAL NOT NULL,
     volatility REAL NOT NULL
 );
@@ -21,7 +21,7 @@ STRATEGY_RUNTIME_STATE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategy_runtime_state (
     strategy_name TEXT NOT NULL,
     symbol TEXT NOT NULL,
-    last_status TEXT NOT NULL CHECK(last_status IN ('trend', 'sideways')),
+    last_status TEXT NOT NULL CHECK(last_status IN ('trend', 'sideways', 'trend_impulse')),
     updated_at TEXT NOT NULL,
     PRIMARY KEY (strategy_name, symbol)
 );

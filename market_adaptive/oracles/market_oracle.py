@@ -97,6 +97,24 @@ class MarketOracle:
             lower=lower_snapshot,
         )
 
+    def _has_trend_impulse(self) -> bool:
+        candles = self.client.fetch_ohlcv(
+            symbol=self.config.symbol,
+            timeframe=self.config.impulse_timeframe,
+            limit=max(self.config.impulse_volume_window, self.config.impulse_consecutive_bars + 3),
+        )
+        if len(candles) < max(4, self.config.impulse_consecutive_bars + 1):
+            return False
+        frame = ohlcv_to_dataframe(candles)
+        recent = frame.tail(self.config.impulse_consecutive_bars)
+        baseline = frame.iloc[: -self.config.impulse_consecutive_bars] if len(frame) > self.config.impulse_consecutive_bars else frame
+        volume_mean = float(baseline["volume"].tail(self.config.impulse_volume_window).mean())
+        if volume_mean <= 0:
+            return False
+        bullish_bars = bool((recent["close"] > recent["open"]).all())
+        expanding_volume = bool((recent["volume"] >= volume_mean * float(self.config.impulse_volume_multiplier)).all())
+        return bullish_bars and expanding_volume
+
     def determine_status(self, snapshot: MultiTimeframeMarketSnapshot) -> str:
         trend_detected = any(
             self._indicator_confirms_trend(indicator)
@@ -113,6 +131,8 @@ class MarketOracle:
 
         if trend_detected:
             return "trend"
+        if sideways_detected and self._has_trend_impulse():
+            return "trend_impulse"
         if sideways_detected:
             return "sideways"
 

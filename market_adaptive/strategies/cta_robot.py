@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from market_adaptive.config import CTAConfig, ExecutionConfig
 from market_adaptive.indicators import (
@@ -27,24 +27,30 @@ class TrendSignal:
     direction: int
     raw_direction: int
     major_direction: int
-    swing_rsi: float
-    bullish_ready: bool
-    execution_golden_cross: bool
-    execution_breakout: bool
-    execution_memory_active: bool
-    execution_memory_bars_ago: int | None
-    execution_trigger_reason: str
-    mtf_aligned: bool
-    obv_bias: int
-    obv_confirmation: OBVConfirmationSnapshot
-    obv_confirmation_passed: bool
-    volume_filter_passed: bool
-    volume_profile: VolumeProfileSnapshot | None
-    long_setup_blocked: bool
-    long_setup_reason: str
-    price: float
-    atr: float
-    risk_percent: float
+    major_bias_score: float = 0.0
+    weak_bull_bias: bool = False
+    swing_rsi: float = 0.0
+    swing_rsi_slope: float = 0.0
+    bullish_score: float = 0.0
+    bullish_threshold: float = 0.0
+    bullish_ready: bool = False
+    execution_entry_mode: str = "breakout_confirmed"
+    execution_golden_cross: bool = False
+    execution_breakout: bool = False
+    execution_memory_active: bool = False
+    execution_memory_bars_ago: int | None = None
+    execution_trigger_reason: str = ""
+    mtf_aligned: bool = False
+    obv_bias: int = 0
+    obv_confirmation: OBVConfirmationSnapshot = field(default_factory=lambda: OBVConfirmationSnapshot(0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+    obv_confirmation_passed: bool = False
+    volume_filter_passed: bool = False
+    volume_profile: VolumeProfileSnapshot | None = None
+    long_setup_blocked: bool = False
+    long_setup_reason: str = ""
+    price: float = 0.0
+    atr: float = 0.0
+    risk_percent: float = 0.0
 
     @property
     def obv_signal_strength(self) -> float:
@@ -136,6 +142,7 @@ class ManagedPosition:
 class CTARobot(BaseStrategyRobot):
     strategy_name = "cta"
     activation_status = "trend"
+    activation_statuses = ("trend", "trend_impulse")
 
     def __init__(
         self,
@@ -299,8 +306,14 @@ class CTARobot(BaseStrategyRobot):
             direction=final_direction,
             raw_direction=raw_direction,
             major_direction=mtf_signal.major_direction,
+            major_bias_score=mtf_signal.major_bias_score,
+            weak_bull_bias=mtf_signal.weak_bull_bias,
             swing_rsi=mtf_signal.swing_rsi,
+            swing_rsi_slope=mtf_signal.swing_rsi_slope,
+            bullish_score=mtf_signal.bullish_score,
+            bullish_threshold=mtf_signal.bullish_threshold,
             bullish_ready=mtf_signal.bullish_ready,
+            execution_entry_mode=mtf_signal.execution_entry_mode,
             execution_golden_cross=mtf_signal.execution_trigger.kdj_golden_cross,
             execution_breakout=mtf_signal.execution_trigger.prior_high_break,
             execution_memory_active=mtf_signal.execution_trigger.bullish_memory_active,
@@ -324,8 +337,15 @@ class CTARobot(BaseStrategyRobot):
         return {
             "symbol": self.symbol,
             "bullish_ready": bool(signal.bullish_ready),
+            "bullish_score": float(signal.bullish_score),
+            "bullish_threshold": float(signal.bullish_threshold),
+            "major_bias_score": float(signal.major_bias_score),
+            "weak_bull_bias": bool(signal.weak_bull_bias),
+            "swing_rsi": float(signal.swing_rsi),
+            "swing_rsi_slope": float(signal.swing_rsi_slope),
             "raw_direction": int(signal.raw_direction),
             "direction": int(signal.direction),
+            "execution_entry_mode": str(signal.execution_entry_mode),
             "execution_trigger_reason": str(signal.execution_trigger_reason),
             "execution_memory_active": bool(signal.execution_memory_active),
             "execution_memory_bars_ago": signal.execution_memory_bars_ago,
@@ -437,7 +457,7 @@ class CTARobot(BaseStrategyRobot):
         order_flow_assessment: OrderFlowAssessment | None = None
         if side == "buy" and self.config.order_flow_enabled:
             order_flow_assessment = self.order_flow_sentinel.assess_entry(self.symbol, side, amount)
-            if not order_flow_assessment.entry_allowed:
+            if not order_flow_assessment.entry_allowed and signal.execution_entry_mode != "weak_bull_scale_in_limit":
                 self._publish_risk_profile(None)
                 return "cta:order_flow_blocked"
 
@@ -457,7 +477,7 @@ class CTARobot(BaseStrategyRobot):
                 self._publish_risk_profile(None)
                 return "cta:risk_blocked"
 
-        if signal.execution_memory_active and signal.execution_breakout:
+        if signal.execution_memory_active and (signal.execution_breakout or signal.weak_bull_bias):
             logger.info(
                 "CTA entry trigger | symbol=%s side=%s %s",
                 self.symbol,
@@ -469,6 +489,7 @@ class CTARobot(BaseStrategyRobot):
             side=side,
             amount=amount,
             order_flow_assessment=order_flow_assessment,
+            execution_entry_mode=signal.execution_entry_mode,
         )
         filled_amount = self._normalize_order_amount(entry_order.filled_amount)
         fill_ratio = (filled_amount / amount) if amount > 0 else 0.0
@@ -573,6 +594,7 @@ class CTARobot(BaseStrategyRobot):
         side: str,
         amount: float,
         order_flow_assessment: OrderFlowAssessment | None,
+        execution_entry_mode: str,
     ) -> EntryOrderResult:
         fallback_price = (
             order_flow_assessment.expected_average_price
@@ -583,19 +605,18 @@ class CTARobot(BaseStrategyRobot):
         if hasattr(self.client, "get_min_order_amount"):
             minimum_amount = float(self.client.get_min_order_amount(self.symbol))
 
-        aggressive_limit_price = self._resolve_aggressive_entry_price(side=side, order_flow_assessment=order_flow_assessment)
+        aggressive_limit_price = self._resolve_aggressive_entry_price(
+            side=side,
+            order_flow_assessment=order_flow_assessment,
+            execution_entry_mode=execution_entry_mode,
+        )
         if aggressive_limit_price is not None:
-            response = self.client.place_limit_order(
-                self.symbol,
-                side,
-                amount,
-                aggressive_limit_price,
-                params={
-                    "timeInForce": "IOC",
-                    "executionMode": "aggressive_limit",
-                    "orderFlowImbalance": round(order_flow_assessment.imbalance_ratio, 4) if order_flow_assessment is not None else None,
-                },
-            )
+            params = {"timeInForce": "IOC", "executionMode": "aggressive_limit"}
+            if execution_entry_mode == "weak_bull_scale_in_limit":
+                params["executionMode"] = "weak_bull_scale_in"
+            elif order_flow_assessment is not None:
+                params["orderFlowImbalance"] = round(order_flow_assessment.imbalance_ratio, 4)
+            response = self.client.place_limit_order(self.symbol, side, amount, aggressive_limit_price, params=params)
             limit_response = self._refresh_ioc_fill(response)
             limit_filled = self._normalize_order_amount(
                 self._extract_filled_amount(limit_response, 0.0, used_limit_order=True)
@@ -657,23 +678,38 @@ class CTARobot(BaseStrategyRobot):
         *,
         side: str,
         order_flow_assessment: OrderFlowAssessment | None,
+        execution_entry_mode: str,
     ) -> float | None:
-        if (
-            order_flow_assessment is None
-            or not order_flow_assessment.entry_allowed
-            or not order_flow_assessment.use_limit_order
-        ):
-            return None
-        reference_price = order_flow_assessment.best_ask if side == "buy" else order_flow_assessment.best_bid
+        if execution_entry_mode == "weak_bull_scale_in_limit":
+            reference_price = self._resolve_book_reference_price(side=side)
+        else:
+            if (
+                order_flow_assessment is None
+                or not order_flow_assessment.entry_allowed
+                or not order_flow_assessment.use_limit_order
+            ):
+                return None
+            reference_price = order_flow_assessment.best_ask if side == "buy" else order_flow_assessment.best_bid
         if reference_price in (None, 0, "0"):
             return None
         tick_size = self._estimate_tick_size(side=side)
         if tick_size <= 0:
             return None
-        aggressive_price = float(reference_price) + (2.0 * tick_size if side == "buy" else -2.0 * tick_size)
+        offset_ticks = 1.0 if execution_entry_mode == "weak_bull_scale_in_limit" else 2.0
+        aggressive_price = float(reference_price) + (offset_ticks * tick_size if side == "buy" else -offset_ticks * tick_size)
         if hasattr(self.client, "price_to_precision"):
             aggressive_price = float(self.client.price_to_precision(self.symbol, aggressive_price))
         return aggressive_price
+
+    def _resolve_book_reference_price(self, *, side: str) -> float | None:
+        try:
+            order_book = self.client.fetch_order_book(self.symbol, limit=1)
+        except Exception:
+            return None
+        levels = list((order_book.get("asks") if side == "buy" else order_book.get("bids")) or [])
+        if not levels:
+            return None
+        return float(levels[0][0])
 
     def _estimate_tick_size(self, *, side: str) -> float:
         try:
@@ -947,7 +983,7 @@ class CTARobot(BaseStrategyRobot):
 
     def _resolve_risk_percent(self, mtf_signal: MTFSignal) -> float:
         boosted_risk = max(float(self.config.risk_percent_per_trade), float(self.config.boosted_risk_percent_per_trade))
-        if mtf_signal.fully_aligned:
+        if mtf_signal.fully_aligned and not mtf_signal.weak_bull_bias:
             return boosted_risk
         return float(self.config.risk_percent_per_trade)
 

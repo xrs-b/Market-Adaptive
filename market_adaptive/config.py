@@ -109,6 +109,10 @@ class MarketOracleConfig:
     trend_adx_threshold: float = 25.0
     sideways_adx_threshold: float = 20.0
     trend_di_gap_threshold: float = 8.0
+    impulse_timeframe: str = "1m"
+    impulse_consecutive_bars: int = 3
+    impulse_volume_window: int = 12
+    impulse_volume_multiplier: float = 1.2
 
 
 @dataclass
@@ -134,6 +138,17 @@ class CTAConfig:
     supertrend_multiplier: float = 3.0
     swing_rsi_period: int = 14
     swing_rsi_ready_threshold: float = 50.0
+    dynamic_rsi_floor: float = 45.0
+    rsi_rebound_lookback: int = 6
+    rsi_oversold_threshold: float = 30.0
+    rsi_rebound_confirmation_level: float = 35.0
+    strong_bull_bias_score: float = 1.4
+    weak_bull_bias_score: float = 0.8
+    dynamic_rsi_trend_score: float = 0.8
+    dynamic_rsi_rebound_score: float = 0.9
+    bullish_ready_score_threshold: float = 1.6
+    weak_bias_fast_ema: int = 21
+    weak_bias_slow_ema: int = 55
     kdj_length: int = 9
     kdj_k_smoothing: int = 3
     kdj_d_smoothing: int = 3
@@ -198,6 +213,17 @@ class CTAConfig:
         if self.boosted_risk_percent_per_trade <= 0:
             self.boosted_risk_percent_per_trade = self.risk_percent_per_trade
         self.kdj_signal_memory_bars = max(1, int(self.kdj_signal_memory_bars))
+        self.dynamic_rsi_floor = float(self.dynamic_rsi_floor)
+        self.rsi_rebound_lookback = max(2, int(self.rsi_rebound_lookback))
+        self.rsi_oversold_threshold = float(self.rsi_oversold_threshold)
+        self.rsi_rebound_confirmation_level = float(self.rsi_rebound_confirmation_level)
+        self.strong_bull_bias_score = max(0.0, float(self.strong_bull_bias_score))
+        self.weak_bull_bias_score = max(0.0, float(self.weak_bull_bias_score))
+        self.dynamic_rsi_trend_score = max(0.0, float(self.dynamic_rsi_trend_score))
+        self.dynamic_rsi_rebound_score = max(0.0, float(self.dynamic_rsi_rebound_score))
+        self.bullish_ready_score_threshold = max(0.1, float(self.bullish_ready_score_threshold))
+        self.weak_bias_fast_ema = max(2, int(self.weak_bias_fast_ema))
+        self.weak_bias_slow_ema = max(self.weak_bias_fast_ema + 1, int(self.weak_bias_slow_ema))
         self.obv_signal_window = max(1, int(self.obv_signal_window))
         self.obv_signal_threshold_degrees = float(self.obv_signal_threshold_degrees)
         self.order_flow_depth_levels = max(1, int(self.order_flow_depth_levels))
@@ -401,6 +427,10 @@ def load_config(config_path: str | Path) -> AppConfig:
         trend_adx_threshold=float(market_oracle_payload.get("trend_adx_threshold", 25)),
         sideways_adx_threshold=float(market_oracle_payload.get("sideways_adx_threshold", 20)),
         trend_di_gap_threshold=float(market_oracle_payload.get("trend_di_gap_threshold", 8)),
+        impulse_timeframe=str(market_oracle_payload.get("impulse_timeframe", "1m")),
+        impulse_consecutive_bars=int(market_oracle_payload.get("impulse_consecutive_bars", 3)),
+        impulse_volume_window=int(market_oracle_payload.get("impulse_volume_window", 12)),
+        impulse_volume_multiplier=float(market_oracle_payload.get("impulse_volume_multiplier", 1.2)),
     )
     execution = ExecutionConfig(
         td_mode=str(execution_payload.get("td_mode", "isolated")),
@@ -433,6 +463,17 @@ def load_config(config_path: str | Path) -> AppConfig:
         supertrend_multiplier=float(cta_payload.get("supertrend_multiplier", 3.0)),
         swing_rsi_period=int(cta_payload.get("swing_rsi_period", 14)),
         swing_rsi_ready_threshold=float(cta_payload.get("swing_rsi_ready_threshold", 50.0)),
+        dynamic_rsi_floor=float(cta_payload.get("dynamic_rsi_floor", 45.0)),
+        rsi_rebound_lookback=int(cta_payload.get("rsi_rebound_lookback", 6)),
+        rsi_oversold_threshold=float(cta_payload.get("rsi_oversold_threshold", 30.0)),
+        rsi_rebound_confirmation_level=float(cta_payload.get("rsi_rebound_confirmation_level", 35.0)),
+        strong_bull_bias_score=float(cta_payload.get("strong_bull_bias_score", 1.4)),
+        weak_bull_bias_score=float(cta_payload.get("weak_bull_bias_score", 0.8)),
+        dynamic_rsi_trend_score=float(cta_payload.get("dynamic_rsi_trend_score", 0.8)),
+        dynamic_rsi_rebound_score=float(cta_payload.get("dynamic_rsi_rebound_score", 0.9)),
+        bullish_ready_score_threshold=float(cta_payload.get("bullish_ready_score_threshold", 1.6)),
+        weak_bias_fast_ema=int(cta_payload.get("weak_bias_fast_ema", cta_payload.get("fast_ema", 21))),
+        weak_bias_slow_ema=int(cta_payload.get("weak_bias_slow_ema", cta_payload.get("slow_ema", 55))),
         kdj_length=int(cta_payload.get("kdj_length", 9)),
         kdj_k_smoothing=int(cta_payload.get("kdj_k_smoothing", 3)),
         kdj_d_smoothing=int(cta_payload.get("kdj_d_smoothing", 3)),
