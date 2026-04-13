@@ -398,6 +398,40 @@ class NotificationTests(unittest.TestCase):
         self.assertIn('OBV Z-Score 0.85 / 阈值 1.00 / 差距 0.15', field_map['最接近样本'])
         self.assertIn('Triggered via Memory Window', field_map['样本详情'])
 
+    def test_discord_notifier_builds_signal_profiler_summary_payload(self) -> None:
+        notifier = CapturingDiscordNotifier()
+
+        notifier.notify_signal_profiler_summary(
+            symbol='BTC/USDT',
+            summary_interval=10,
+            summary={
+                'window_cycles': 10,
+                'total_cycles': 20,
+                'passed_regime': 8,
+                'passed_swing': 5,
+                'passed_trigger': 2,
+                'regime_pass_rate_pct': 80.0,
+                'swing_pass_rate_pct': 50.0,
+                'trigger_pass_rate_pct': 20.0,
+                'top_blockers': [('Blocked_By_OBV_STRENGTH_NOT_CONFIRMED', 4), ('PASSED', 2)],
+                'latest_blocker_reason': 'Blocked_By_BELOW_POC',
+                'latest_execution_obv_zscore': 0.73,
+                'latest_execution_obv_threshold': 1.0,
+                'latest_execution_price': 70250.5,
+                'latest_grid_center_gap': -55.2,
+            },
+        )
+
+        self.assertEqual(len(notifier.payloads), 1)
+        embed = notifier.payloads[0]['embeds'][0]
+        self.assertEqual(embed['title'], 'CTA 信号漏斗摘要')
+        self.assertEqual(embed['color'], 0xFFFF00)
+        field_map = {field['name']: field['value'] for field in embed['fields']}
+        self.assertEqual(field_map['统计窗口'], '最近 10 个 CTA 周期')
+        self.assertEqual(field_map['通过 Trigger'], '2/10 (20.0%)')
+        self.assertIn('Blocked_By_OBV_STRENGTH_NOT_CONFIRMED × 4', field_map['主要拦截原因'])
+        self.assertEqual(field_map['最近一次结果'], 'Blocked_By_BELOW_POC')
+
     def test_cta_take_profit_notifies_realized_profit(self) -> None:
         client = DummyClient()
         client.market_order_price = 102.0

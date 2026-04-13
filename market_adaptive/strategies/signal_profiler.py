@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from market_adaptive.strategies.mtf_engine import MTFSignal
@@ -45,9 +45,30 @@ class CycleAuditRecord:
 
 
 @dataclass
+class FunnelWindowSummary:
+    window_cycles: int
+    total_cycles: int
+    passed_regime: int
+    passed_swing: int
+    passed_trigger: int
+    regime_pass_rate_pct: float
+    swing_pass_rate_pct: float
+    trigger_pass_rate_pct: float
+    top_blockers: list[tuple[str, int]]
+    latest_blocker_reason: str
+    latest_execution_obv_zscore: float
+    latest_execution_obv_threshold: float
+    latest_execution_price: float
+    latest_grid_center_gap: float | None
+
+
+@dataclass
 class SignalProfiler:
     summary_interval: int = 10
+    notifier: Any | None = None
+    symbol: str = "BTC/USDT"
     counters: FunnelCounters = field(default_factory=FunnelCounters)
+    _window_records: list[CycleAuditRecord] = field(default_factory=list)
 
     def record(self, signal: "MTFSignal", *, grid_center_price: float | None = None, blocker_reason: str = "") -> CycleAuditRecord:
         self.counters.total_cycles += 1
@@ -89,6 +110,7 @@ class SignalProfiler:
             passed_swing=passed_swing,
             passed_trigger=passed_trigger,
         )
+        self._window_records.append(record)
         logger.info(
             "Strategy audit snapshot | cycle=%s server_time=%s local_time=%s skew_ms=%s 4h_supertrend=%s 1h_rsi=%.2f 15m_obv_z=%.2f/%.2f price=%.4f grid_center=%s grid_gap=%s atr=%.6f atr_price_pct=%.4f data_ok=%s mismatch_ms=%s blocker=%s",
             record.cycle,
@@ -109,6 +131,7 @@ class SignalProfiler:
             record.blocker_reason,
         )
         if record.cycle % max(1, int(self.summary_interval)) == 0:
+            summary = self._build_window_summary()
             logger.info(
                 "Strategy funnel summary | Total Cycles=%s Passed Regime=%s Passed Swing=%s Passed Trigger=%s",
                 self.counters.total_cycles,
@@ -116,4 +139,59 @@ class SignalProfiler:
                 self.counters.passed_swing,
                 self.counters.passed_trigger,
             )
+            self._notify_summary(summary)
+            self._window_records.clear()
         return record
+
+    def _build_window_summary(self) -> FunnelWindowSummary:
+        records = list(self._window_records)
+        latest = records[-1]
+        blocker_counts: dict[str, int] = {}
+        for record in records:
+            blocker = str(record.blocker_reason or "PASSED")
+            blocker_counts[blocker] = blocker_counts.get(blocker, 0) + 1
+        top_blockers = sorted(blocker_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
+        window_cycles = max(1, len(records))
+        return FunnelWindowSummary(
+            window_cycles=window_cycles,
+            total_cycles=self.counters.total_cycles,
+            passed_regime=sum(1 for record in records if record.passed_regime),
+            passed_swing=sum(1 for record in records if record.passed_swing),
+            passed_trigger=sum(1 for record in records if record.passed_trigger),
+            regime_pass_rate_pct=sum(1 for record in records if record.passed_regime) / window_cycles * 100,
+            swing_pass_rate_pct=sum(1 for record in records if record.passed_swing) / window_cycles * 100,
+            trigger_pass_rate_pct=sum(1 for record in records if record.passed_trigger) / window_cycles * 100,
+            top_blockers=top_blockers,
+            latest_blocker_reason=latest.blocker_reason,
+            latest_execution_obv_zscore=latest.execution_obv_zscore,
+            latest_execution_obv_threshold=latest.execution_obv_threshold,
+            latest_execution_price=latest.execution_price,
+            latest_grid_center_gap=latest.grid_center_gap,
+        )
+
+    def _notify_summary(self, summary: FunnelWindowSummary) -> None:
+        if self.notifier is None or not hasattr(self.notifier, "notify_signal_profiler_summary"):
+            return
+        try:
+            self.notifier.notify_signal_profiler_summary(
+                symbol=self.symbol,
+                summary_interval=max(1, int(self.summary_interval)),
+                summary={
+                    "window_cycles": summary.window_cycles,
+                    "total_cycles": summary.total_cycles,
+                    "passed_regime": summary.passed_regime,
+                    "passed_swing": summary.passed_swing,
+                    "passed_trigger": summary.passed_trigger,
+                    "regime_pass_rate_pct": summary.regime_pass_rate_pct,
+                    "swing_pass_rate_pct": summary.swing_pass_rate_pct,
+                    "trigger_pass_rate_pct": summary.trigger_pass_rate_pct,
+                    "top_blockers": list(summary.top_blockers),
+                    "latest_blocker_reason": summary.latest_blocker_reason,
+                    "latest_execution_obv_zscore": summary.latest_execution_obv_zscore,
+                    "latest_execution_obv_threshold": summary.latest_execution_obv_threshold,
+                    "latest_execution_price": summary.latest_execution_price,
+                    "latest_grid_center_gap": summary.latest_grid_center_gap,
+                },
+            )
+        except Exception:  # pragma: no cover
+            logger.exception("Signal profiler summary notification failed")

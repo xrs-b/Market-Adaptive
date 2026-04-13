@@ -53,7 +53,7 @@ class MainController:
         self.shutdown_client = OKXClient(config.okx, config.execution)
 
         self.sentiment_analyst = SentimentAnalyst(self.cta_client, config.sentiment)
-        self.signal_profiler = SignalProfiler(summary_interval=10)
+        self.signal_profiler = SignalProfiler(summary_interval=10, notifier=self.notifier, symbol=config.cta.symbol)
         self.market_oracle = MarketOracle(
             self.oracle_client,
             database,

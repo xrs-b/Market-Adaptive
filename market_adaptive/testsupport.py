@@ -9,6 +9,7 @@ class DummyNotifier:
         self.market_shift_calls: list[dict] = []
         self.error_calls: list[dict] = []
         self.near_miss_calls: list[dict] = []
+        self.signal_profiler_summary_calls: list[dict] = []
 
     def send(self, title: str, message: str) -> bool:
         self.messages.append((title, message))
@@ -44,5 +45,10 @@ class DummyNotifier:
     def notify_cta_near_miss_report(self, *, symbol: str, samples: list[object], window_seconds: float) -> bool:
         self.near_miss_calls.append({"symbol": symbol, "samples": samples, "window_seconds": window_seconds})
         self.messages.append(("CTA 近失报告", f"symbol={symbol} count={len(samples)} window={window_seconds}"))
+        return True
+
+    def notify_signal_profiler_summary(self, *, symbol: str, summary_interval: int, summary: dict) -> bool:
+        self.signal_profiler_summary_calls.append({"symbol": symbol, "summary_interval": summary_interval, "summary": summary})
+        self.messages.append(("CTA 信号漏斗摘要", f"symbol={symbol} interval={summary_interval} trigger={summary.get('passed_trigger', 0)}/{summary.get('window_cycles', 0)}"))
         return True
 
