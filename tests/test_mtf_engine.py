@@ -213,9 +213,12 @@ class MTFEngineTests(unittest.TestCase):
             execution_timeframe="15m",
             prefer_closed_major_timeframe_candles=False,
             prefer_closed_swing_timeframe_candles=False,
-            strong_bull_bias_score=0.7,
-            dynamic_rsi_trend_score=0.7,
-            bullish_ready_score_threshold=1.6,
+            strong_bull_bias_score=60.0,
+            swing_supertrend_bullish_score=30.0,
+            dynamic_rsi_trend_score=15.0,
+            kdj_memory_score_bonus=10.0,
+            magnetism_score_bonus=20.0,
+            bullish_ready_score_threshold=55.0,
             magnetism_obv_zscore_threshold=1.2,
             magnetism_rail_atr_multiplier=0.6,
         )
@@ -235,25 +238,24 @@ class MTFEngineTests(unittest.TestCase):
         self.assertIsNotNone(signal)
         assert signal is not None
         self.assertLess(signal.major_direction, 0)
+        self.assertEqual(signal.bullish_score, 65.0)
         self.assertTrue(signal.bullish_ready)
         self.assertFalse(signal.fully_aligned)
         self.assertIn("磁吸力预判：距离轨道", signal.execution_trigger.reason)
         self.assertIn("OBV 已确认", signal.execution_trigger.reason)
 
 
-    def test_engine_pulls_forward_bullish_ready_with_weak_bull_memory_bonus(self) -> None:
+    def test_engine_scores_weak_bull_stack_to_threshold_and_logs_breakdown(self) -> None:
         config = CTAConfig(
             symbol="BTC/USDT",
             major_timeframe="4h",
             swing_timeframe="1h",
             execution_timeframe="15m",
-            weak_bull_bias_score=20.0,
-            weak_bull_memory_score_bonus=10.0,
-            kdj_memory_score_bonus=20.0,
-            dynamic_rsi_trend_score=0.0,
-            dynamic_rsi_rebound_score=0.0,
             swing_supertrend_bullish_score=30.0,
-            bullish_ready_score_threshold=45.0,
+            dynamic_rsi_trend_score=15.0,
+            dynamic_rsi_rebound_score=15.0,
+            kdj_memory_score_bonus=10.0,
+            bullish_ready_score_threshold=55.0,
         )
         engine = MultiTimeframeSignalEngine(self.client, config)
         major_closes = [200 - 0.5 * index for index in range(60)]
@@ -264,15 +266,18 @@ class MTFEngineTests(unittest.TestCase):
         self._set_ohlcv("15m", execution_closes, 900_000)
         mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=2)
 
-        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
-            signal = engine.build_signal()
+        with self.assertLogs("market_adaptive.strategies.mtf_engine", level="INFO") as logs:
+            with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+                signal = engine.build_signal()
 
         self.assertIsNotNone(signal)
         assert signal is not None
         self.assertTrue(signal.weak_bull_bias)
         self.assertTrue(signal.execution_trigger.bullish_memory_active)
-        self.assertGreaterEqual(signal.bullish_score, 50.0)
+        self.assertEqual(signal.bullish_score, 55.0)
         self.assertTrue(signal.bullish_ready)
+        joined_logs = "\n".join(logs.output)
+        self.assertIn("Bullish Score: 55/55 [4H: 0, 1H: 30, Magnet: 0, RSI: 15, KDJ: 10]", joined_logs)
 
     def test_engine_scores_bullish_ready_before_major_flip_via_swing_and_memory_stack(self) -> None:
         config = CTAConfig(
@@ -280,10 +285,11 @@ class MTFEngineTests(unittest.TestCase):
             major_timeframe="4h",
             swing_timeframe="1h",
             execution_timeframe="15m",
-            strong_bull_bias_score=50.0,
+            strong_bull_bias_score=60.0,
             swing_supertrend_bullish_score=30.0,
-            kdj_memory_score_bonus=20.0,
-            bullish_ready_score_threshold=45.0,
+            dynamic_rsi_trend_score=15.0,
+            kdj_memory_score_bonus=10.0,
+            bullish_ready_score_threshold=55.0,
         )
         engine = MultiTimeframeSignalEngine(self.client, config)
         major_closes = [200 - 0.5 * index for index in range(60)]
@@ -300,7 +306,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertIsNotNone(signal)
         assert signal is not None
         self.assertLess(signal.major_direction, 0)
-        self.assertGreaterEqual(signal.bullish_score, 50.0)
+        self.assertEqual(signal.bullish_score, 55.0)
         self.assertTrue(signal.bullish_ready)
         self.assertTrue(signal.fully_aligned)
 

@@ -102,13 +102,13 @@ cta:
   rsi_rebound_lookback: 6
   rsi_oversold_threshold: 30.0
   rsi_rebound_confirmation_level: 35.0
-  strong_bull_bias_score: 1.4
+  strong_bull_bias_score: 60.0
   weak_bull_bias_score: 0.8
-  weak_bull_memory_score_bonus: 0.20
-  dynamic_rsi_trend_score: 0.8
-  dynamic_rsi_rebound_score: 0.9
-  early_bullish_score_bonus: 0.15
-  bullish_ready_score_threshold: 1.6
+  weak_bull_memory_score_bonus: 0.0
+  dynamic_rsi_trend_score: 15.0
+  dynamic_rsi_rebound_score: 15.0
+  early_bullish_score_bonus: 0.0
+  bullish_ready_score_threshold: 55.0
   weak_bias_fast_ema: 21
   weak_bias_slow_ema: 55
   kdj_length: 9

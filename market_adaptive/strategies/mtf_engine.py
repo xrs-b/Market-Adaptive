@@ -331,16 +331,12 @@ class MultiTimeframeSignalEngine:
         bullish_memory_active = bullish_cross_bars_ago is not None
         bearish_memory_active = bearish_cross_bars_ago is not None
 
-        bullish_score = major_bias_score + swing_score
-        if swing_direction > 0:
-            bullish_score += float(getattr(self.config, "swing_supertrend_bullish_score", 0.0))
-        if weak_bull_bias and bullish_memory_active:
-            bullish_score += float(getattr(self.config, "weak_bull_memory_score_bonus", 0.0))
-        if bullish_memory_active:
-            bullish_score += float(getattr(self.config, "kdj_memory_score_bonus", 0.0))
-        if early_bullish:
-            bullish_score += float(getattr(self.config, "early_bullish_score_bonus", 0.0))
-        bullish_ready = bullish_score >= float(self.config.bullish_ready_score_threshold)
+        score_4h = float(self.config.strong_bull_bias_score) if major_direction > 0 else 0.0
+        score_1h = float(getattr(self.config, "swing_supertrend_bullish_score", 0.0)) if score_4h <= 0.0 and swing_direction > 0 else 0.0
+        score_rsi = swing_score
+        score_kdj = float(getattr(self.config, "kdj_memory_score_bonus", 0.0)) if bullish_memory_active else 0.0
+        score_magnet = 0.0
+        bullish_score = score_4h + score_1h + score_rsi + score_kdj
 
         prior_high_series = execution_frame["high"].shift(1).rolling(
             max(1, int(self.config.execution_breakout_lookback)),
@@ -376,9 +372,6 @@ class MultiTimeframeSignalEngine:
             and (swing_direction > 0 or current_swing_rsi >= float(self.config.dynamic_rsi_floor))
             and (bullish_memory_active or kdj_golden_cross)
         )
-        if rail_momentum_ready:
-            bullish_score += float(getattr(self.config, "rail_momentum_score_bonus", 0.0))
-
         bullish_magnetism_ready = (
             major_direction <= 0
             and current_major_atr > 0.0
@@ -386,7 +379,8 @@ class MultiTimeframeSignalEngine:
             and magnetism_obv_ready
         )
         if bullish_magnetism_ready:
-            bullish_score += float(getattr(self.config, "magnetism_score_bonus", 0.0))
+            score_magnet = float(getattr(self.config, "magnetism_score_bonus", 0.0))
+            bullish_score += score_magnet
             logger.info(
                 "磁吸力预判：距离轨道 %.3f%%，OBV 已确认 | symbol=%s timeframe=%s rail=%.4f price=%.4f atr=%.4f obv_z=%.2f",
                 magnetism_distance_pct,
@@ -398,7 +392,23 @@ class MultiTimeframeSignalEngine:
                 float(execution_obv_confirmation.zscore),
             )
 
-        bullish_ready = bullish_score >= float(self.config.bullish_ready_score_threshold)
+        bullish_threshold = float(self.config.bullish_ready_score_threshold)
+        logger.info(
+            "Bullish Score: %.0f/%.0f [4H: %.0f, 1H: %.0f, Magnet: %.0f, RSI: %.0f, KDJ: %.0f] | symbol=%s major_dir=%s swing_dir=%s weak_bull=%s early_bullish=%s",
+            bullish_score,
+            bullish_threshold,
+            score_4h,
+            score_1h,
+            score_magnet,
+            score_rsi,
+            score_kdj,
+            self.config.symbol,
+            major_direction,
+            swing_direction,
+            weak_bull_bias,
+            early_bullish,
+        )
+        bullish_ready = bullish_score >= bullish_threshold
 
         execution_obv_ready = execution_obv_confirmation.buy_confirmed(
             zscore_threshold=float(self.config.obv_zscore_threshold),
