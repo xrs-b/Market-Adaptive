@@ -10,6 +10,8 @@ class DummyNotifier:
         self.error_calls: list[dict] = []
         self.near_miss_calls: list[dict] = []
         self.signal_profiler_summary_calls: list[dict] = []
+        self.strategy_cleanup_calls: list[dict] = []
+        self._pending_strategy_cleanup: dict[tuple[str, str], dict[str, dict]] = {}
 
     def send(self, title: str, message: str) -> bool:
         self.messages.append((title, message))
@@ -31,6 +33,38 @@ class DummyNotifier:
         self.profit_calls.append({"pnl": pnl, "roi": roi, "balance": balance, **kwargs})
         self.messages.append(("已实现盈亏更新", f"pnl={pnl} roi={roi} balance={balance}"))
         return True
+
+    def notify_strategy_cleanup(self, *, strategy: str, symbol: str, reason: str, result: str, overview: str | None = None) -> bool:
+        entry = {"strategy": strategy, "symbol": symbol, "reason": reason, "result": result, "overview": overview}
+        self.strategy_cleanup_calls.append(entry)
+        bucket = self._pending_strategy_cleanup.setdefault((symbol, reason), {})
+        bucket[str(strategy).lower()] = entry
+        return True
+
+    def flush_strategy_cleanup_notifications(self) -> None:
+        for (symbol, reason), bucket in list(self._pending_strategy_cleanup.items()):
+            strategies = [bucket[name] for name in sorted(bucket)]
+            if len(strategies) > 1:
+                strategy_names = '、'.join(item['strategy'] for item in strategies)
+                strategy_results = '；'.join(f"{item['strategy']}={item['result']}" for item in strategies)
+                message = (
+                    "检测到市场状态切换，相关策略已完成本轮切换清理。\n"
+                    f"交易对：{symbol}\n"
+                    f"切换原因：{reason}\n"
+                    f"清理策略：{strategy_names}\n"
+                    f"清理结果：{strategy_results}"
+                )
+            else:
+                item = strategies[0]
+                message = (
+                    f"{item['overview'] or '检测到市场状态切换，相关策略已完成本轮切换清理。'}\n"
+                    f"交易对：{symbol}\n"
+                    f"切换原因：{reason}\n"
+                    f"清理策略：{item['strategy']}\n"
+                    f"清理结果：{item['result']}"
+                )
+            self.messages.append(("策略切换清理", message))
+            del self._pending_strategy_cleanup[(symbol, reason)]
 
     def notify_market_shift(self, old_state: str | None, new_state: str, reason: str) -> bool:
         self.market_shift_calls.append({"old_state": old_state, "new_state": new_state, "reason": reason})

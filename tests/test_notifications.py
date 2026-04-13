@@ -113,7 +113,7 @@ class CapturingDiscordNotifier(DiscordNotifier):
             loop.close()
 
     def _submit_coroutine(self, coro) -> bool:
-        if getattr(coro, "cr_code", None) is not None and coro.cr_code.co_name in {"_flush_grid_trade_bucket_after_delay", "_flush_grid_profit_bucket_after_delay"}:
+        if getattr(coro, "cr_code", None) is not None and coro.cr_code.co_name in {"_flush_grid_trade_bucket_after_delay", "_flush_grid_profit_bucket_after_delay", "_flush_cleanup_bucket_after_delay"}:
             coro.close()
             return True
         return self.submit_and_wait(coro)
@@ -238,8 +238,9 @@ class NotificationTests(unittest.TestCase):
         robot.run()
         db.insert_market_status(MarketStatusRecord('2026-04-10T00:05:00+00:00', 'BTC/USDT', 'sideways', 10.0, 0.01))
         robot.run()
+        notifier.flush_strategy_cleanup_notifications()
 
-        self.assertTrue(any(title == '策略清理完成' for title, _ in notifier.messages))
+        self.assertTrue(any(title == '策略切换清理' for title, _ in notifier.messages))
 
     def test_grid_robot_notifies_on_flash_crash_trigger(self) -> None:
         client = DummyClient()
@@ -279,6 +280,55 @@ class NotificationTests(unittest.TestCase):
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
         self.assertEqual(field_map["成交笔数"], "2")
         self.assertEqual(field_map["累计成交额"], "30.2000 USDT")
+
+    def test_discord_notifier_merges_strategy_cleanup_for_same_status_switch(self) -> None:
+        notifier = CapturingDiscordNotifier()
+
+        notifier.notify_strategy_cleanup(
+            strategy="cta",
+            symbol="BTC/USDT",
+            reason="status_switch:trend->sideways",
+            result="cta:flatten_all",
+            overview="CTA 策略已完成状态切换清理。",
+        )
+        notifier.notify_strategy_cleanup(
+            strategy="grid",
+            symbol="BTC/USDT",
+            reason="status_switch:trend->sideways",
+            result="grid:regime_cleanup|market_long:0.10000000",
+            overview="网格策略已完成状态切换清理。",
+        )
+
+        self.assertEqual(len(notifier.payloads), 0)
+        notifier.submit_and_wait(notifier._flush_cleanup_bucket_after_delay("BTC/USDT::status_switch:trend->sideways", 0.0))
+
+        self.assertEqual(len(notifier.payloads), 1)
+        embed = notifier.payloads[0]["embeds"][0]
+        self.assertEqual(embed["title"], "策略切换清理")
+        field_map = {field["name"]: field["value"] for field in embed["fields"]}
+        self.assertEqual(field_map["状态切换"], "trend → sideways")
+        self.assertIn("CTA 策略、网格策略", field_map["清理策略"])
+        self.assertIn("CTA 策略：cta:flatten_all", field_map["清理结果"])
+        self.assertIn("网格策略：grid:regime_cleanup", field_map["清理结果"])
+
+    def test_discord_notifier_keeps_single_cleanup_notification_when_only_one_strategy_runs(self) -> None:
+        notifier = CapturingDiscordNotifier()
+
+        notifier.notify_strategy_cleanup(
+            strategy="grid",
+            symbol="BTC/USDT",
+            reason="status_switch:sideways->trend",
+            result="grid:regime_cleanup_idle",
+            overview="网格策略已完成状态切换清理。",
+        )
+        notifier.submit_and_wait(notifier._flush_cleanup_bucket_after_delay("BTC/USDT::status_switch:sideways->trend", 0.0))
+
+        self.assertEqual(len(notifier.payloads), 1)
+        embed = notifier.payloads[0]["embeds"][0]
+        self.assertEqual(embed["title"], "策略切换清理")
+        field_map = {field["name"]: field["value"] for field in embed["fields"]}
+        self.assertEqual(field_map["清理策略"], "网格策略")
+        self.assertIn("grid:regime_cleanup_idle", field_map["清理结果"])
 
     def test_grid_websocket_fill_calls_trade_notifier(self) -> None:
         client = DummyClient()

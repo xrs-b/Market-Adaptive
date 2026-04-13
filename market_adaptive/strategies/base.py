@@ -74,12 +74,22 @@ class BaseStrategyRobot:
         logger.info("%s flatten start: symbol=%s reason=%s", self.strategy_name, self.symbol, reason)
         self.client.cancel_all_orders(self.symbol)
         self.client.close_all_positions(self.symbol)
+        result = f"{self.strategy_name}:flatten_all"
         logger.info("%s flatten done: symbol=%s", self.strategy_name, self.symbol)
         if self.notifier is not None:
-            self.notifier.send(
-                "策略清理完成",
-                f"strategy={self.strategy_name} | symbol={self.symbol} | reason={reason}",
-            )
+            if hasattr(self.notifier, "notify_strategy_cleanup"):
+                self.notifier.notify_strategy_cleanup(
+                    strategy=self.strategy_name,
+                    symbol=self.symbol,
+                    reason=reason,
+                    result=result,
+                    overview="策略已完成状态切换清理。",
+                )
+            else:
+                self.notifier.send(
+                    "策略清理完成",
+                    f"strategy={self.strategy_name} | symbol={self.symbol} | reason={reason} | result={result}",
+                )
 
     def execute_active_cycle(self) -> str:
         raise NotImplementedError

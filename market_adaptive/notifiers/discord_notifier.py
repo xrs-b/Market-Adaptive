@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import logging
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
 from typing import Any
@@ -44,6 +44,25 @@ class ProfitAggregationBucket:
     profits: list[dict[str, Any]]
 
 
+
+
+@dataclass
+class StrategyCleanupEntry:
+    strategy: str
+    symbol: str
+    reason: str
+    result: str
+    overview: str | None = None
+
+
+@dataclass
+class StrategyCleanupBucket:
+    symbol: str
+    reason: str
+    flush_at: datetime
+    entries: dict[str, StrategyCleanupEntry] = field(default_factory=dict)
+
+
 @dataclass
 class CTANearMissPayload:
     symbol: str
@@ -67,6 +86,7 @@ class DiscordNotifier:
         self._ready = Event()
         self._trade_buckets: dict[str, TradeAggregationBucket] = {}
         self._profit_buckets: dict[str, ProfitAggregationBucket] = {}
+        self._cleanup_buckets: dict[str, StrategyCleanupBucket] = {}
 
     @property
     def enabled(self) -> bool:
@@ -147,6 +167,42 @@ class DiscordNotifier:
         ]
         payload = self._build_embed_payload(title=title, description="仓位已部分或全部平仓，以下为最新已实现盈亏。", color=EMBED_COLOR_GOOD, fields=fields)
         return self._submit_coroutine(self._post_payload(payload))
+
+    def notify_strategy_cleanup(
+        self,
+        *,
+        strategy: str,
+        symbol: str,
+        reason: str,
+        result: str,
+        overview: str | None = None,
+    ) -> bool:
+        if not self.enabled:
+            return False
+        normalized_reason = str(reason)
+        if not normalized_reason.startswith("status_switch:"):
+            payload = self._build_strategy_cleanup_payload(
+                symbol=str(symbol),
+                reason=normalized_reason,
+                entries=[StrategyCleanupEntry(strategy=str(strategy), symbol=str(symbol), reason=normalized_reason, result=str(result), overview=overview)],
+            )
+            return self._submit_coroutine(self._post_payload(payload))
+
+        bucket_key = f"{str(symbol).upper()}::{normalized_reason}"
+        bucket = self._cleanup_buckets.get(bucket_key)
+        now = datetime.now(timezone.utc)
+        if bucket is None or now >= bucket.flush_at:
+            bucket = StrategyCleanupBucket(symbol=str(symbol), reason=normalized_reason, flush_at=now + timedelta(seconds=1))
+            self._cleanup_buckets[bucket_key] = bucket
+            self._submit_coroutine(self._flush_cleanup_bucket_after_delay(bucket_key, 1.0))
+        bucket.entries[str(strategy).lower()] = StrategyCleanupEntry(
+            strategy=str(strategy),
+            symbol=str(symbol),
+            reason=normalized_reason,
+            result=str(result),
+            overview=overview,
+        )
+        return True
 
     def notify_market_shift(self, old_state: str | None, new_state: str, reason: str) -> bool:
         if not self.enabled:
@@ -241,6 +297,15 @@ class DiscordNotifier:
             self._thread.join(timeout=2.0)
             self._thread = None
         self._loop = None
+
+    async def _flush_cleanup_bucket_after_delay(self, bucket_key: str, delay_seconds: float) -> bool:
+        await asyncio.sleep(max(0.0, delay_seconds))
+        bucket = self._cleanup_buckets.pop(bucket_key, None)
+        if bucket is None or not bucket.entries:
+            return False
+        ordered_entries = [bucket.entries[name] for name in sorted(bucket.entries)]
+        payload = self._build_strategy_cleanup_payload(symbol=bucket.symbol, reason=bucket.reason, entries=ordered_entries)
+        return await self._post_payload(payload)
 
     def _queue_aggregated_grid_trade(self, strategy: str, signal: str, trade: dict[str, Any]) -> bool:
         now = datetime.now(timezone.utc)
@@ -526,6 +591,37 @@ class DiscordNotifier:
                 pass
         return "unknown"
 
+    def _build_strategy_cleanup_payload(self, *, symbol: str, reason: str, entries: list[StrategyCleanupEntry]) -> dict[str, Any]:
+        previous_status, new_status = self._parse_status_switch_reason(reason)
+        strategy_names = [self._display_strategy_name(entry.strategy) for entry in entries]
+        if len(entries) > 1:
+            description = "检测到市场状态切换，相关策略已完成本轮切换清理，以下为合并概览。"
+            strategy_value = "、".join(strategy_names)
+        else:
+            description = entries[0].overview or "检测到市场状态切换，相关策略已完成本轮切换清理。"
+            strategy_value = strategy_names[0]
+        result_lines = [f"{self._display_strategy_name(entry.strategy)}：{entry.result}" for entry in entries]
+        fields = [
+            {"name": "交易对", "value": str(symbol), "inline": True},
+            {"name": "清理策略", "value": strategy_value, "inline": True},
+            {"name": "切换原因", "value": str(reason), "inline": False},
+            {"name": "清理结果", "value": self._truncate("\n".join(result_lines), 1000), "inline": False},
+        ]
+        if previous_status is not None or new_status is not None:
+            fields.insert(1, {"name": "状态切换", "value": f"{previous_status or '未知'} → {new_status or '未知'}", "inline": True})
+        return self._build_embed_payload(title="策略切换清理", description=description, color=EMBED_COLOR_GOOD, fields=fields)
+
+    def _parse_status_switch_reason(self, reason: str) -> tuple[str | None, str | None]:
+        normalized = str(reason)
+        prefix = "status_switch:"
+        if not normalized.startswith(prefix):
+            return None, None
+        payload = normalized[len(prefix):]
+        if "->" not in payload:
+            return payload or None, None
+        previous, current = payload.split("->", 1)
+        return previous or None, current or None
+
     def _display_strategy_name(self, strategy: str | None) -> str:
         normalized = str(strategy or "").strip().lower()
         if normalized == "grid":
@@ -560,6 +656,10 @@ class DiscordNotifier:
 class NullNotifier:
     def send(self, title: str, message: str) -> bool:
         logger.debug("Notification skipped: %s | %s", title, message)
+        return False
+
+    def notify_strategy_cleanup(self, *, strategy: str, symbol: str, reason: str, result: str, overview: str | None = None) -> bool:
+        logger.debug("Strategy cleanup notification skipped: %s %s %s %s %s", strategy, symbol, reason, result, overview)
         return False
 
     def notify_trade(self, side: str, price: float, size: float, strategy: str, signal: str) -> bool:

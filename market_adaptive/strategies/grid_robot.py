@@ -257,16 +257,25 @@ class GridRobot(BaseStrategyRobot):
 
         result = "grid:regime_cleanup_idle" if not actions else "grid:regime_cleanup|" + "+".join(actions)
         if self.notifier is not None:
-            self.notifier.send(
-                "策略清理完成",
-                (
-                    "网格策略已完成状态切换清理。\n"
-                    f"策略：{self.strategy_name}\n"
-                    f"交易对：{self.symbol}\n"
-                    f"原因：{reason}\n"
-                    f"结果：{result}"
-                ),
-            )
+            if hasattr(self.notifier, "notify_strategy_cleanup"):
+                self.notifier.notify_strategy_cleanup(
+                    strategy=self.strategy_name,
+                    symbol=self.symbol,
+                    reason=reason,
+                    result=result,
+                    overview="网格策略已完成状态切换清理。",
+                )
+            else:
+                self.notifier.send(
+                    "策略清理完成",
+                    (
+                        "网格策略已完成状态切换清理。\n"
+                        f"策略：{self.strategy_name}\n"
+                        f"交易对：{self.symbol}\n"
+                        f"原因：{reason}\n"
+                        f"结果：{result}"
+                    ),
+                )
         return result
 
     def execute_active_cycle(self) -> str:
