@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from market_adaptive.config import MarketOracleConfig
 from market_adaptive.coordination import StrategyRuntimeContext
@@ -153,6 +154,29 @@ class MarketOracleTests(unittest.TestCase):
         self.assertGreater(market_state.bias_value, 0.0)
         self.assertTrue(runtime_context.urgent_wakeup.is_set())
         self.assertEqual(runtime_context.urgent_wakeup_reason, "market_regime_change:sideways->trend")
+
+    def test_collect_market_snapshot_prefers_closed_candles_for_higher_timeframes(self) -> None:
+        higher = self._impulse_payload(False)
+        lower = self._impulse_payload(True)
+        config = MarketOracleConfig(
+            prefer_closed_higher_timeframe_candles=True,
+            prefer_closed_lower_timeframe_candles=True,
+        )
+        oracle = MarketOracle(
+            client=DummyOKXClient({"1h": higher, "15m": lower, "1m": self._impulse_payload(False)}),
+            database=self.database,
+            config=config,
+        )
+
+        with patch("market_adaptive.oracles.market_oracle.compute_indicator_snapshot") as compute_snapshot:
+            sentinel = IndicatorSnapshot(20.0, 19.0, 18.0, 25.0, 15.0, 0.08, 0.07, 0.01)
+            compute_snapshot.side_effect = [sentinel, sentinel]
+            oracle.collect_market_snapshot()
+
+        higher_arg = compute_snapshot.call_args_list[0].args[0]
+        lower_arg = compute_snapshot.call_args_list[1].args[0]
+        self.assertEqual(higher_arg, higher[:-1])
+        self.assertEqual(lower_arg, lower[:-1])
 
 
 if __name__ == "__main__":

@@ -111,7 +111,10 @@ class MarketOracleConfig:
     trend_adx_threshold: float = 25.0
     sideways_adx_threshold: float = 20.0
     trend_di_gap_threshold: float = 8.0
+    prefer_closed_higher_timeframe_candles: bool = True
+    prefer_closed_lower_timeframe_candles: bool = True
     impulse_timeframe: str = "1m"
+    prefer_closed_impulse_candles: bool = False
     impulse_consecutive_bars: int = 3
     impulse_volume_window: int = 12
     impulse_volume_multiplier: float = 1.2
@@ -135,6 +138,9 @@ class CTAConfig:
     major_timeframe: str = "4h"
     swing_timeframe: str = "1h"
     execution_timeframe: str = "15m"
+    prefer_closed_major_timeframe_candles: bool = True
+    prefer_closed_swing_timeframe_candles: bool = True
+    prefer_closed_execution_timeframe_candles: bool = False
     lookback_limit: int = 200
     supertrend_period: int = 10
     supertrend_multiplier: float = 3.0
@@ -479,7 +485,10 @@ def load_config(config_path: str | Path) -> AppConfig:
         trend_adx_threshold=float(market_oracle_payload.get("trend_adx_threshold", 25)),
         sideways_adx_threshold=float(market_oracle_payload.get("sideways_adx_threshold", 20)),
         trend_di_gap_threshold=float(market_oracle_payload.get("trend_di_gap_threshold", 8)),
+        prefer_closed_higher_timeframe_candles=bool(market_oracle_payload.get("prefer_closed_higher_timeframe_candles", True)),
+        prefer_closed_lower_timeframe_candles=bool(market_oracle_payload.get("prefer_closed_lower_timeframe_candles", True)),
         impulse_timeframe=str(market_oracle_payload.get("impulse_timeframe", "1m")),
+        prefer_closed_impulse_candles=bool(market_oracle_payload.get("prefer_closed_impulse_candles", False)),
         impulse_consecutive_bars=int(market_oracle_payload.get("impulse_consecutive_bars", 3)),
         impulse_volume_window=int(market_oracle_payload.get("impulse_volume_window", 12)),
         impulse_volume_multiplier=float(market_oracle_payload.get("impulse_volume_multiplier", 1.2)),
@@ -510,6 +519,9 @@ def load_config(config_path: str | Path) -> AppConfig:
         major_timeframe=str(cta_payload.get("major_timeframe", "4h")),
         swing_timeframe=cta_swing_timeframe,
         execution_timeframe=cta_execution_timeframe,
+        prefer_closed_major_timeframe_candles=bool(cta_payload.get("prefer_closed_major_timeframe_candles", True)),
+        prefer_closed_swing_timeframe_candles=bool(cta_payload.get("prefer_closed_swing_timeframe_candles", True)),
+        prefer_closed_execution_timeframe_candles=bool(cta_payload.get("prefer_closed_execution_timeframe_candles", False)),
         lookback_limit=int(cta_payload.get("lookback_limit", 200)),
         supertrend_period=int(cta_payload.get("supertrend_period", 10)),
         supertrend_multiplier=float(cta_payload.get("supertrend_multiplier", 3.0)),

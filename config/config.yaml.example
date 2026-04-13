@@ -52,6 +52,8 @@ market_oracle:
   polling_interval_seconds: 300
   higher_timeframe: "1h"
   lower_timeframe: "15m"
+  prefer_closed_higher_timeframe_candles: true
+  prefer_closed_lower_timeframe_candles: true
   lookback_limit: 200
   adx_length: 14
   bb_length: 20
@@ -60,6 +62,7 @@ market_oracle:
   sideways_adx_threshold: 20
   trend_di_gap_threshold: 8
   impulse_timeframe: "1m"
+  prefer_closed_impulse_candles: false
   impulse_consecutive_bars: 3
   impulse_volume_window: 12
   impulse_volume_multiplier: 1.2
@@ -82,6 +85,9 @@ cta:
   major_timeframe: "4h"
   swing_timeframe: "1h"
   execution_timeframe: "15m"
+  prefer_closed_major_timeframe_candles: true
+  prefer_closed_swing_timeframe_candles: true
+  prefer_closed_execution_timeframe_candles: false
   # 兼容旧配置：execution_timeframe = lower_timeframe，swing_timeframe = higher_timeframe
   lower_timeframe: "15m"
   higher_timeframe: "1h"

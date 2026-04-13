@@ -206,6 +206,8 @@ class MTFEngineTests(unittest.TestCase):
             major_timeframe="4h",
             swing_timeframe="1h",
             execution_timeframe="15m",
+            prefer_closed_major_timeframe_candles=False,
+            prefer_closed_swing_timeframe_candles=False,
             strong_bull_bias_score=0.7,
             dynamic_rsi_trend_score=0.7,
             bullish_ready_score_threshold=1.6,
@@ -232,6 +234,31 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.fully_aligned)
         self.assertIn("磁吸力预判：距离轨道", signal.execution_trigger.reason)
         self.assertIn("OBV 已确认", signal.execution_trigger.reason)
+
+    def test_engine_prefers_closed_major_and_swing_candles_but_keeps_live_execution_by_default(self) -> None:
+        config = CTAConfig(
+            symbol="BTC/USDT",
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            prefer_closed_major_timeframe_candles=True,
+            prefer_closed_swing_timeframe_candles=True,
+            prefer_closed_execution_timeframe_candles=False,
+        )
+        engine = MultiTimeframeSignalEngine(self.client, config)
+        self._set_ohlcv("4h", [200.0 + index for index in range(60)] + [999.0], 14_400_000)
+        self._set_ohlcv("1h", [100.0 + index for index in range(60)] + [777.0], 3_600_000)
+        self._set_ohlcv("15m", [50.0 + index for index in range(60)] + [555.0], 900_000)
+        mocked_kdj = self._mock_execution_kdj(bars=61, golden_cross_bar_from_end=10)
+
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(float(signal.major_frame["close"].iloc[-1]), 259.0)
+        self.assertEqual(float(signal.swing_frame["close"].iloc[-1]), 159.0)
+        self.assertEqual(float(signal.execution_frame["close"].iloc[-1]), 555.0)
 
     def _mock_execution_kdj(self, bars: int, golden_cross_bar_from_end: int):
         k_values = [40.0] * bars

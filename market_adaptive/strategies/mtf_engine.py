@@ -14,6 +14,7 @@ from market_adaptive.indicators import (
     compute_supertrend,
     ohlcv_to_dataframe,
 )
+from market_adaptive.timeframe_utils import maybe_use_closed_candles
 
 logger = logging.getLogger(__name__)
 
@@ -143,20 +144,29 @@ class MultiTimeframeSignalEngine:
         return current_price > current_lower_band and lower_band_slope >= minimum_slope
 
     def build_signal(self) -> MTFSignal | None:
-        execution_ohlcv = self.client.fetch_ohlcv(
-            symbol=self.config.symbol,
-            timeframe=self.config.execution_timeframe,
-            limit=self.config.lookback_limit,
+        execution_ohlcv = maybe_use_closed_candles(
+            self.client.fetch_ohlcv(
+                symbol=self.config.symbol,
+                timeframe=self.config.execution_timeframe,
+                limit=self.config.lookback_limit,
+            ),
+            enabled=self.config.prefer_closed_execution_timeframe_candles,
         )
-        swing_ohlcv = self.client.fetch_ohlcv(
-            symbol=self.config.symbol,
-            timeframe=self.config.swing_timeframe,
-            limit=self.config.lookback_limit,
+        swing_ohlcv = maybe_use_closed_candles(
+            self.client.fetch_ohlcv(
+                symbol=self.config.symbol,
+                timeframe=self.config.swing_timeframe,
+                limit=self.config.lookback_limit,
+            ),
+            enabled=self.config.prefer_closed_swing_timeframe_candles,
         )
-        major_ohlcv = self.client.fetch_ohlcv(
-            symbol=self.config.symbol,
-            timeframe=self.config.major_timeframe,
-            limit=self.config.lookback_limit,
+        major_ohlcv = maybe_use_closed_candles(
+            self.client.fetch_ohlcv(
+                symbol=self.config.symbol,
+                timeframe=self.config.major_timeframe,
+                limit=self.config.lookback_limit,
+            ),
+            enabled=self.config.prefer_closed_major_timeframe_candles,
         )
 
         if (

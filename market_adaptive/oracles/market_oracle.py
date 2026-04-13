@@ -13,6 +13,7 @@ from market_adaptive.config import MarketOracleConfig
 from market_adaptive.coordination import StrategyRuntimeContext
 from market_adaptive.db import DatabaseInitializer, MarketStatusRecord
 from market_adaptive.indicators import IndicatorSnapshot, compute_atr, compute_indicator_snapshot, ohlcv_to_dataframe
+from market_adaptive.timeframe_utils import maybe_use_closed_candles
 
 logger = logging.getLogger(__name__)
 
@@ -75,15 +76,21 @@ class MarketOracle:
         self._last_snapshot: MultiTimeframeMarketSnapshot | None = None
 
     def collect_market_snapshot(self) -> MultiTimeframeMarketSnapshot:
-        higher_ohlcv = self.client.fetch_ohlcv(
-            symbol=self.config.symbol,
-            timeframe=self.config.higher_timeframe,
-            limit=self.config.lookback_limit,
+        higher_ohlcv = maybe_use_closed_candles(
+            self.client.fetch_ohlcv(
+                symbol=self.config.symbol,
+                timeframe=self.config.higher_timeframe,
+                limit=self.config.lookback_limit,
+            ),
+            enabled=self.config.prefer_closed_higher_timeframe_candles,
         )
-        lower_ohlcv = self.client.fetch_ohlcv(
-            symbol=self.config.symbol,
-            timeframe=self.config.lower_timeframe,
-            limit=self.config.lookback_limit,
+        lower_ohlcv = maybe_use_closed_candles(
+            self.client.fetch_ohlcv(
+                symbol=self.config.symbol,
+                timeframe=self.config.lower_timeframe,
+                limit=self.config.lookback_limit,
+            ),
+            enabled=self.config.prefer_closed_lower_timeframe_candles,
         )
 
         higher_snapshot = compute_indicator_snapshot(
@@ -108,10 +115,13 @@ class MarketOracle:
         )
 
     def _has_trend_impulse(self) -> bool:
-        candles = self.client.fetch_ohlcv(
-            symbol=self.config.symbol,
-            timeframe=self.config.impulse_timeframe,
-            limit=max(self.config.impulse_volume_window, self.config.impulse_consecutive_bars + 3),
+        candles = maybe_use_closed_candles(
+            self.client.fetch_ohlcv(
+                symbol=self.config.symbol,
+                timeframe=self.config.impulse_timeframe,
+                limit=max(self.config.impulse_volume_window, self.config.impulse_consecutive_bars + 3),
+            ),
+            enabled=self.config.prefer_closed_impulse_candles,
         )
         if len(candles) < max(4, self.config.impulse_consecutive_bars + 1):
             return False
@@ -192,10 +202,13 @@ class MarketOracle:
 
     def get_hourly_atr(self, symbol: str | None = None) -> float:
         target_symbol = symbol or self.config.symbol
-        ohlcv = self.client.fetch_ohlcv(
-            symbol=target_symbol,
-            timeframe=self.config.higher_timeframe,
-            limit=max(self.config.adx_length * 4, 80),
+        ohlcv = maybe_use_closed_candles(
+            self.client.fetch_ohlcv(
+                symbol=target_symbol,
+                timeframe=self.config.higher_timeframe,
+                limit=max(self.config.adx_length * 4, 80),
+            ),
+            enabled=self.config.prefer_closed_higher_timeframe_candles,
         )
         frame = ohlcv_to_dataframe(ohlcv)
         atr_series = compute_atr(frame, length=self.config.adx_length)
