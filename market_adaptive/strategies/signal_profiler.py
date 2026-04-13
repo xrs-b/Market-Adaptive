@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from market_adaptive.strategies.mtf_engine import MTFSignal
@@ -55,6 +55,10 @@ class FunnelWindowSummary:
     swing_pass_rate_pct: float
     trigger_pass_rate_pct: float
     top_blockers: list[tuple[str, int]]
+    dominant_blocking_layer: str
+    dominant_blocking_label: str
+    dominant_blocking_count: int
+    blocking_layer_counts: dict[str, int]
     latest_blocker_reason: str
     latest_execution_obv_zscore: float
     latest_execution_obv_threshold: float
@@ -72,6 +76,10 @@ class FunnelWindowSummary:
             "swing_pass_rate_pct": self.swing_pass_rate_pct,
             "trigger_pass_rate_pct": self.trigger_pass_rate_pct,
             "top_blockers": list(self.top_blockers),
+            "dominant_blocking_layer": self.dominant_blocking_layer,
+            "dominant_blocking_label": self.dominant_blocking_label,
+            "dominant_blocking_count": self.dominant_blocking_count,
+            "blocking_layer_counts": dict(self.blocking_layer_counts),
             "latest_blocker_reason": self.latest_blocker_reason,
             "latest_execution_obv_zscore": self.latest_execution_obv_zscore,
             "latest_execution_obv_threshold": self.latest_execution_obv_threshold,
@@ -87,6 +95,65 @@ class SignalProfiler:
     symbol: str = "BTC/USDT"
     counters: FunnelCounters = field(default_factory=FunnelCounters)
     _window_records: list[CycleAuditRecord] = field(default_factory=list)
+
+    _BLOCKING_LAYER_PRIORITY: ClassVar[dict[str, int]] = {
+        "REGIME": 0,
+        "SWING": 1,
+        "TRIGGER": 2,
+        "OBV": 3,
+        "DATA": 4,
+        "PASSED": 5,
+        "OTHER": 6,
+    }
+
+    def _classify_blocking_layer(self, blocker_reason: str) -> tuple[str, str]:
+        reason = str(blocker_reason or "PASSED")
+        normalized = reason.upper()
+        if normalized == "PASSED":
+            return "PASSED", "已通过"
+        if normalized == "DATA_MISMATCH_WARNING":
+            return "DATA", "数据同步"
+        if normalized == "BLOCKED_BY_SUPERTREND_REGIME":
+            return "REGIME", "Regime（趋势层）"
+        if normalized in {"BLOCKED_BY_RSI_THRESHOLD", "BLOCKED_BY_BULLISH_SCORE"}:
+            return "SWING", "Swing（摆动层）"
+        if normalized.startswith("BLOCKED_BY_TRIGGER:"):
+            return "TRIGGER", "Trigger（触发层）"
+        if normalized.startswith("BLOCKED_BY_"):
+            post_trigger_suffix = normalized[len("BLOCKED_BY_") :]
+            if post_trigger_suffix.startswith("OBV_") or post_trigger_suffix in {
+                "BELOW_POC",
+                "INSIDE_VALUE_AREA",
+                "BELOW_VALUE_AREA_HIGH",
+                "MISSING_VOLUME_PROFILE",
+            }:
+                return "OBV", "OBV（执行过滤层）"
+        return "OTHER", "其他"
+
+    def _resolve_dominant_blocking_layer(self, records: list[CycleAuditRecord]) -> tuple[str, str, int, dict[str, int]]:
+        layer_counts: dict[str, int] = {}
+        layer_labels: dict[str, str] = {}
+        latest_layer = "PASSED"
+        for record in records:
+            layer, label = self._classify_blocking_layer(record.blocker_reason)
+            layer_labels[layer] = label
+            if record is records[-1]:
+                latest_layer = layer
+            if layer == "PASSED":
+                continue
+            layer_counts[layer] = layer_counts.get(layer, 0) + 1
+        if not layer_counts:
+            return "PASSED", layer_labels.get("PASSED", "已通过"), 0, {}
+        dominant_layer, dominant_count = sorted(
+            layer_counts.items(),
+            key=lambda item: (
+                -item[1],
+                0 if item[0] == latest_layer else 1,
+                self._BLOCKING_LAYER_PRIORITY.get(item[0], 999),
+                item[0],
+            ),
+        )[0]
+        return dominant_layer, layer_labels.get(dominant_layer, dominant_layer), dominant_count, layer_counts
 
     def _normalize_execution_price(self, price: Any) -> float | None:
         try:
@@ -185,6 +252,7 @@ class SignalProfiler:
             blocker = str(record.blocker_reason or "PASSED")
             blocker_counts[blocker] = blocker_counts.get(blocker, 0) + 1
         top_blockers = sorted(blocker_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
+        dominant_layer, dominant_label, dominant_count, layer_counts = self._resolve_dominant_blocking_layer(records)
         window_cycles = max(1, len(records))
         return FunnelWindowSummary(
             window_cycles=window_cycles,
@@ -196,6 +264,10 @@ class SignalProfiler:
             swing_pass_rate_pct=sum(1 for record in records if record.passed_swing) / window_cycles * 100,
             trigger_pass_rate_pct=sum(1 for record in records if record.passed_trigger) / window_cycles * 100,
             top_blockers=top_blockers,
+            dominant_blocking_layer=dominant_layer,
+            dominant_blocking_label=dominant_label,
+            dominant_blocking_count=dominant_count,
+            blocking_layer_counts=layer_counts,
             latest_blocker_reason=latest.blocker_reason,
             latest_execution_obv_zscore=latest.execution_obv_zscore,
             latest_execution_obv_threshold=latest.execution_obv_threshold,

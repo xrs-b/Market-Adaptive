@@ -414,6 +414,9 @@ class NotificationTests(unittest.TestCase):
                 'swing_pass_rate_pct': 50.0,
                 'trigger_pass_rate_pct': 20.0,
                 'top_blockers': [('Blocked_By_OBV_STRENGTH_NOT_CONFIRMED', 4), ('PASSED', 2)],
+                'dominant_blocking_layer': 'OBV',
+                'dominant_blocking_label': 'OBV（执行过滤层）',
+                'dominant_blocking_count': 4,
                 'latest_blocker_reason': 'Blocked_By_BELOW_POC',
                 'latest_execution_obv_zscore': 0.73,
                 'latest_execution_obv_threshold': 1.0,
@@ -424,9 +427,10 @@ class NotificationTests(unittest.TestCase):
 
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]['embeds'][0]
-        self.assertEqual(embed['title'], 'CTA 信号漏斗摘要')
+        self.assertEqual(embed['title'], 'CTA 信号漏斗摘要｜主阻塞：OBV（执行过滤层）')
         self.assertEqual(embed['color'], 0xFFFF00)
         field_map = {field['name']: field['value'] for field in embed['fields']}
+        self.assertEqual(field_map['当前主阻塞层'], 'OBV（执行过滤层）（4 次）')
         self.assertEqual(field_map['统计窗口'], '最近 10 个 CTA 周期')
         self.assertEqual(field_map['通过 Trigger'], '2/10 (20.0%)')
         self.assertEqual(field_map['最近价格'], '70250.5000')
@@ -450,6 +454,9 @@ class NotificationTests(unittest.TestCase):
                 'swing_pass_rate_pct': 50.0,
                 'trigger_pass_rate_pct': 20.0,
                 'top_blockers': [('Blocked_By_OBV_STRENGTH_NOT_CONFIRMED', 4)],
+                'dominant_blocking_layer': 'OBV',
+                'dominant_blocking_label': 'OBV（执行过滤层）',
+                'dominant_blocking_count': 4,
                 'latest_blocker_reason': 'Blocked_By_BELOW_POC',
                 'latest_execution_obv_zscore': 0.73,
                 'latest_execution_obv_threshold': 1.0,

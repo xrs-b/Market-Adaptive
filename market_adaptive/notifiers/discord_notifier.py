@@ -210,22 +210,25 @@ class DiscordNotifier:
         blocker_lines = [f"{name} × {count}" for name, count in summary.get("top_blockers", [])]
         if not blocker_lines:
             blocker_lines = ["PASSED × 0"]
+        dominant_label = self._format_signal_profiler_blocking_label(summary)
+        dominant_count = max(0, int(summary.get("dominant_blocking_count", 0)))
         fields = [
+            {"name": "当前主阻塞层", "value": f"{dominant_label}（{dominant_count} 次）", "inline": False},
             {"name": "交易对", "value": str(symbol), "inline": True},
             {"name": "统计窗口", "value": f"最近 {int(summary_interval)} 个 CTA 周期", "inline": True},
             {"name": "累计周期", "value": str(int(summary.get("total_cycles", 0))), "inline": True},
             {"name": "通过 Regime", "value": f"{int(summary.get('passed_regime', 0))}/{int(summary.get('window_cycles', 0))} ({float(summary.get('regime_pass_rate_pct', 0.0)):.1f}%)", "inline": True},
             {"name": "通过 Swing", "value": f"{int(summary.get('passed_swing', 0))}/{int(summary.get('window_cycles', 0))} ({float(summary.get('swing_pass_rate_pct', 0.0)):.1f}%)", "inline": True},
             {"name": "通过 Trigger", "value": f"{int(summary.get('passed_trigger', 0))}/{int(summary.get('window_cycles', 0))} ({float(summary.get('trigger_pass_rate_pct', 0.0)):.1f}%)", "inline": True},
-            {"name": "最近 OBV 强度", "value": f"{float(summary.get('latest_execution_obv_zscore', 0.0)):.2f} / 阈值 {float(summary.get('latest_execution_obv_threshold', 0.0)):.2f}", "inline": True},
+            {"name": "最近 OBV 强度", "value": self._format_signal_profiler_obv(summary), "inline": True},
             {"name": "最近价格", "value": self._format_signal_profiler_price(summary.get('latest_execution_price')), "inline": True},
             {"name": "距离网格中心", "value": self._format_signal_profiler_gap(summary.get('latest_grid_center_gap')), "inline": True},
             {"name": "主要拦截原因", "value": self._truncate("\n".join(blocker_lines), 1000), "inline": False},
             {"name": "最近一次结果", "value": str(summary.get("latest_blocker_reason") or "PASSED"), "inline": False},
         ]
         payload = self._build_embed_payload(
-            title="CTA 信号漏斗摘要",
-            description="按周期汇总 SignalProfiler 漏斗表现，只推送关键统计，避免逐轮刷屏。",
+            title=f"CTA 信号漏斗摘要｜主阻塞：{dominant_label}",
+            description=f"按周期汇总 SignalProfiler 漏斗表现，当前主阻塞层：{dominant_label}。只推送关键统计，避免逐轮刷屏。",
             color=EMBED_COLOR_WARN,
             fields=fields,
         )
@@ -396,6 +399,33 @@ class DiscordNotifier:
         except (TypeError, ValueError):
             return "未进入执行层"
         return f"{numeric:+.4f}"
+
+    def _format_signal_profiler_blocking_label(self, summary: dict[str, Any]) -> str:
+        label = str(summary.get("dominant_blocking_label") or "").strip()
+        if label:
+            return label
+        layer = str(summary.get("dominant_blocking_layer") or "PASSED").upper()
+        fallback = {
+            "REGIME": "Regime（趋势层）",
+            "SWING": "Swing（摆动层）",
+            "TRIGGER": "Trigger（触发层）",
+            "OBV": "OBV（执行过滤层）",
+            "DATA": "数据同步",
+            "PASSED": "已通过",
+        }
+        return fallback.get(layer, layer or "已通过")
+
+    def _format_signal_profiler_obv(self, summary: dict[str, Any]) -> str:
+        try:
+            zscore_raw = summary.get('latest_execution_obv_zscore')
+            threshold_raw = summary.get('latest_execution_obv_threshold')
+            if zscore_raw in (None, '') or threshold_raw in (None, ''):
+                return '未进入执行层'
+            zscore = float(zscore_raw)
+            threshold = float(threshold_raw)
+        except (TypeError, ValueError):
+            return '未进入执行层'
+        return f"{zscore:.2f} / 阈值 {threshold:.2f}"
 
     def _build_embed_payload(
         self,
