@@ -240,6 +240,73 @@ class MTFEngineTests(unittest.TestCase):
         self.assertIn("磁吸力预判：距离轨道", signal.execution_trigger.reason)
         self.assertIn("OBV 已确认", signal.execution_trigger.reason)
 
+
+    def test_engine_pulls_forward_bullish_ready_with_weak_bull_memory_bonus(self) -> None:
+        config = CTAConfig(
+            symbol="BTC/USDT",
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            weak_bull_bias_score=0.8,
+            weak_bull_memory_score_bonus=0.25,
+            dynamic_rsi_trend_score=0.0,
+            dynamic_rsi_rebound_score=0.0,
+            bullish_ready_score_threshold=1.0,
+        )
+        engine = MultiTimeframeSignalEngine(self.client, config)
+        major_closes = [200 - 0.5 * index for index in range(60)]
+        swing_closes = [100.0] * 20 + [100.2, 100.4, 100.7, 101.0, 101.3, 101.8, 102.2, 102.7, 103.1, 103.5, 103.9, 104.4, 104.8, 105.2, 105.7, 106.1, 106.5, 106.9, 107.2, 107.5, 107.9, 108.2, 108.5, 108.9, 109.2, 109.6, 110.0, 110.3, 110.7, 111.0, 111.4, 111.8, 112.2, 112.5, 112.9, 113.3, 113.6, 114.0, 114.4, 114.8]
+        execution_closes = [100.0] * 56 + [100.2, 100.3, 100.4, 100.5]
+        self._set_ohlcv("4h", major_closes, 14_400_000)
+        self._set_ohlcv("1h", swing_closes, 3_600_000)
+        self._set_ohlcv("15m", execution_closes, 900_000)
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=2)
+
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.weak_bull_bias)
+        self.assertTrue(signal.execution_trigger.bullish_memory_active)
+        self.assertAlmostEqual(signal.bullish_score, 1.05, places=6)
+        self.assertTrue(signal.bullish_ready)
+
+    def test_engine_flags_starter_frontrun_when_breakout_is_within_last_point_two_percent(self) -> None:
+        config = CTAConfig(
+            symbol="BTC/USDT",
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            starter_frontrun_enabled=True,
+            starter_frontrun_fraction=0.2,
+            starter_frontrun_breakout_buffer_ratio=0.002,
+            starter_frontrun_impulse_bars=3,
+            starter_frontrun_volume_window=12,
+            starter_frontrun_volume_multiplier=1.1,
+            prefer_closed_execution_timeframe_candles=False,
+        )
+        engine = MultiTimeframeSignalEngine(self.client, config)
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.25 for index in range(54)] + [103.8, 104.3, 104.9, 105.4, 105.8, 105.99]
+        execution_volumes = [100.0 + index for index in range(54)] + [160.0, 170.0, 180.0, 220.0, 235.0, 250.0]
+        self._set_ohlcv("15m", execution_closes, 900_000, volumes=execution_volumes)
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=2)
+
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.execution_trigger.frontrun_near_breakout)
+        self.assertTrue(signal.execution_trigger.frontrun_impulse_confirmed)
+        self.assertTrue(signal.execution_trigger.frontrun_obv_confirmed)
+        self.assertTrue(signal.execution_trigger.frontrun_ready)
+        self.assertTrue(signal.fully_aligned)
+        self.assertEqual(signal.execution_entry_mode, "starter_frontrun_limit")
+        self.assertAlmostEqual(signal.entry_size_multiplier, 0.2)
+        self.assertIn("starter_frontrun", signal.execution_trigger.reason)
+
     def test_engine_prefers_closed_major_and_swing_candles_but_keeps_live_execution_by_default(self) -> None:
         config = CTAConfig(
             symbol="BTC/USDT",

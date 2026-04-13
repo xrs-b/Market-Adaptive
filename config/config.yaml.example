@@ -102,8 +102,10 @@ cta:
   rsi_rebound_confirmation_level: 35.0
   strong_bull_bias_score: 1.4
   weak_bull_bias_score: 0.8
+  weak_bull_memory_score_bonus: 0.20
   dynamic_rsi_trend_score: 0.8
   dynamic_rsi_rebound_score: 0.9
+  early_bullish_score_bonus: 0.15
   bullish_ready_score_threshold: 1.6
   weak_bias_fast_ema: 21
   weak_bias_slow_ema: 55
@@ -140,6 +142,12 @@ cta:
   heartbeat_interval_seconds: 300.0
   near_miss_report_interval_seconds: 3600.0
   near_miss_report_max_samples: 5
+  starter_frontrun_enabled: true
+  starter_frontrun_fraction: 0.20
+  starter_frontrun_breakout_buffer_ratio: 0.002
+  starter_frontrun_impulse_bars: 3
+  starter_frontrun_volume_window: 12
+  starter_frontrun_volume_multiplier: 1.15
   polling_interval_seconds: 60
   cta_assist_trim_ratio: 0.25
   # 兼容旧配置，留空即可
@@ -173,6 +181,8 @@ grid:
   fee_rate: 0.001
   directional_skew_enabled: true
   directional_bias_threshold: 0.20
+  sideways_neutral_bias_threshold: 0.12
+  bearish_directional_bias_threshold: 0.30
   bullish_buy_levels: 6
   bullish_sell_levels: 2
   bullish_buy_spacing_ratio: 0.005

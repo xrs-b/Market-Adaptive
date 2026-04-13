@@ -1894,6 +1894,47 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(result.status, "trend_impulse")
         self.assertEqual(result.action, "cta:open_long")
 
+
+    def test_cta_robot_uses_limit_entry_for_starter_frontrun_path_with_starter_size(self) -> None:
+        self._insert_status("trend")
+        self.cta_config.starter_frontrun_fraction = 0.2
+        self._set_bullish_higher_timeframes()
+        execution_closes = [90 + index * 0.25 for index in range(54)] + [103.8, 104.3, 104.9, 105.4, 105.8, 105.99]
+        base = 1_700_000_000_000
+        payload = []
+        volumes = [100.0 + index for index in range(54)] + [160.0, 170.0, 180.0, 220.0, 235.0, 250.0]
+        for index, close in enumerate(execution_closes):
+            open_price = close - 0.35 if index >= len(execution_closes) - 3 else close - 0.2
+            payload.append([base + index * 900_000, open_price, close + 0.4, open_price - 0.3, close, volumes[index]])
+        self.client.ohlcv_by_timeframe["15m"] = payload
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=2)
+
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            result = robot.run()
+
+        self.assertEqual(result.action, "cta:open_long_limit")
+        self.assertEqual(len(self.client.limit_orders), 1)
+        self.assertEqual(self.client.limit_orders[0]["params"]["executionMode"], "starter_frontrun")
+        expected_normal_amount = robot._calculate_entry_amount(execution_closes[-1])
+        self.assertAlmostEqual(
+            self.client.limit_orders[0]["amount"],
+            round(expected_normal_amount * self.cta_config.starter_frontrun_fraction, 8),
+        )
+
+    def test_grid_robot_restores_balanced_levels_when_bearish_bias_is_not_strong_enough(self) -> None:
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, market_oracle=None, use_dynamic_range=False)
+        robot._resolve_bias_value = lambda: -0.24
+
+        profile = robot._resolve_grid_bias_profile(atr_value=10.0)
+        buy_prices, sell_prices = robot._derive_layer_prices(96.0, 100.0, 104.0, bias_profile=profile)
+
+        self.assertEqual(profile.center_shift, 0.0)
+        self.assertEqual(profile.buy_levels, 0)
+        self.assertEqual(profile.sell_levels, 0)
+        self.assertEqual(len(buy_prices), 4)
+        self.assertEqual(len(sell_prices), 4)
+
     def test_cta_robot_uses_limit_entry_for_weak_bull_bias_path(self) -> None:
         self._insert_status("trend")
         major_closes = [200 - 0.5 * index for index in range(60)]

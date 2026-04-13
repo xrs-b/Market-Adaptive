@@ -645,6 +645,8 @@ class GridRobot(BaseStrategyRobot):
             return GridBiasProfile()
         bias_value = self._resolve_bias_value()
         threshold = float(getattr(self.config, "directional_bias_threshold", 0.20))
+        neutral_threshold = float(getattr(self.config, "sideways_neutral_bias_threshold", 0.12))
+        bearish_threshold = float(getattr(self.config, "bearish_directional_bias_threshold", max(threshold, 0.30)))
 
         def _normalize_levels(buy_levels: int, sell_levels: int) -> tuple[int, int]:
             buy_levels = max(1, int(buy_levels))
@@ -659,6 +661,9 @@ class GridRobot(BaseStrategyRobot):
                     buy_levels = max(1, self.config.levels - sell_levels)
             return buy_levels, sell_levels
 
+        if abs(bias_value) < neutral_threshold:
+            return GridBiasProfile(bias_value=0.0)
+
         if bias_value >= threshold:
             buy_levels, sell_levels = _normalize_levels(
                 getattr(self.config, "bullish_buy_levels", max(1, self.config.levels - 2)),
@@ -672,7 +677,7 @@ class GridRobot(BaseStrategyRobot):
                 buy_spacing_ratio=max(0.0, float(getattr(self.config, "bullish_buy_spacing_ratio", 0.0))),
                 sell_spacing_ratio=max(0.0, float(getattr(self.config, "bullish_sell_spacing_ratio", 0.0))),
             )
-        elif bias_value <= -threshold:
+        elif bias_value <= -bearish_threshold:
             buy_levels, sell_levels = _normalize_levels(
                 getattr(self.config, "bearish_buy_levels", 2),
                 getattr(self.config, "bearish_sell_levels", max(1, self.config.levels - 2)),

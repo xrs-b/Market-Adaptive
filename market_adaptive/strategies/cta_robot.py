@@ -513,7 +513,7 @@ class CTARobot(BaseStrategyRobot):
         order_flow_assessment: OrderFlowAssessment | None = None
         if side == "buy" and self.config.order_flow_enabled:
             order_flow_assessment = self.order_flow_sentinel.assess_entry(self.symbol, side, amount)
-            if not order_flow_assessment.entry_allowed and signal.execution_entry_mode not in {"weak_bull_scale_in_limit", "early_bullish_starter_limit"}:
+            if not order_flow_assessment.entry_allowed and signal.execution_entry_mode not in {"weak_bull_scale_in_limit", "early_bullish_starter_limit", "starter_frontrun_limit"}:
                 self._publish_risk_profile(None)
                 return "cta:order_flow_blocked"
 
@@ -672,6 +672,8 @@ class CTARobot(BaseStrategyRobot):
                 params["executionMode"] = "weak_bull_scale_in"
             elif execution_entry_mode == "early_bullish_starter_limit":
                 params["executionMode"] = "early_bullish_starter"
+            elif execution_entry_mode == "starter_frontrun_limit":
+                params["executionMode"] = "starter_frontrun"
             elif order_flow_assessment is not None:
                 params["orderFlowImbalance"] = round(order_flow_assessment.imbalance_ratio, 4)
             response = self.client.place_limit_order(self.symbol, side, amount, aggressive_limit_price, params=params)
@@ -738,7 +740,7 @@ class CTARobot(BaseStrategyRobot):
         order_flow_assessment: OrderFlowAssessment | None,
         execution_entry_mode: str,
     ) -> float | None:
-        if execution_entry_mode in {"weak_bull_scale_in_limit", "early_bullish_starter_limit"}:
+        if execution_entry_mode in {"weak_bull_scale_in_limit", "early_bullish_starter_limit", "starter_frontrun_limit"}:
             reference_price = self._resolve_book_reference_price(side=side)
         else:
             if (
@@ -754,6 +756,8 @@ class CTARobot(BaseStrategyRobot):
         if tick_size <= 0:
             return None
         offset_ticks = 1.0 if execution_entry_mode == "weak_bull_scale_in_limit" else 2.0
+        if execution_entry_mode == "starter_frontrun_limit":
+            offset_ticks = 1.5
         aggressive_price = float(reference_price) + (offset_ticks * tick_size if side == "buy" else -offset_ticks * tick_size)
         if hasattr(self.client, "price_to_precision"):
             aggressive_price = float(self.client.price_to_precision(self.symbol, aggressive_price))

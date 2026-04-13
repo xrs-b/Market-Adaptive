@@ -152,8 +152,10 @@ class CTAConfig:
     rsi_rebound_confirmation_level: float = 35.0
     strong_bull_bias_score: float = 1.4
     weak_bull_bias_score: float = 0.8
+    weak_bull_memory_score_bonus: float = 0.20
     dynamic_rsi_trend_score: float = 0.8
     dynamic_rsi_rebound_score: float = 0.9
+    early_bullish_score_bonus: float = 0.15
     bullish_ready_score_threshold: float = 1.6
     weak_bias_fast_ema: int = 21
     weak_bias_slow_ema: int = 55
@@ -193,6 +195,12 @@ class CTAConfig:
     near_miss_report_max_samples: int = 5
     early_bullish_starter_fraction: float = 0.30
     early_bullish_lower_band_slope_atr_threshold: float = 0.05
+    starter_frontrun_enabled: bool = True
+    starter_frontrun_fraction: float = 0.20
+    starter_frontrun_breakout_buffer_ratio: float = 0.002
+    starter_frontrun_impulse_bars: int = 3
+    starter_frontrun_volume_window: int = 12
+    starter_frontrun_volume_multiplier: float = 1.15
     fast_ema: int = 7  # legacy compatibility
     slow_ema: int = 21  # legacy compatibility
     polling_interval_seconds: int = 60
@@ -232,8 +240,10 @@ class CTAConfig:
         self.rsi_rebound_confirmation_level = float(self.rsi_rebound_confirmation_level)
         self.strong_bull_bias_score = max(0.0, float(self.strong_bull_bias_score))
         self.weak_bull_bias_score = max(0.0, float(self.weak_bull_bias_score))
+        self.weak_bull_memory_score_bonus = max(0.0, float(self.weak_bull_memory_score_bonus))
         self.dynamic_rsi_trend_score = max(0.0, float(self.dynamic_rsi_trend_score))
         self.dynamic_rsi_rebound_score = max(0.0, float(self.dynamic_rsi_rebound_score))
+        self.early_bullish_score_bonus = max(0.0, float(self.early_bullish_score_bonus))
         self.bullish_ready_score_threshold = max(0.1, float(self.bullish_ready_score_threshold))
         self.weak_bias_fast_ema = max(2, int(self.weak_bias_fast_ema))
         self.weak_bias_slow_ema = max(self.weak_bias_fast_ema + 1, int(self.weak_bias_slow_ema))
@@ -318,6 +328,8 @@ class GridConfig:
     fee_rate: float = 0.001
     directional_skew_enabled: bool = True
     directional_bias_threshold: float = 0.20
+    sideways_neutral_bias_threshold: float = 0.12
+    bearish_directional_bias_threshold: float = 0.30
     bullish_buy_levels: int = 6
     bullish_sell_levels: int = 2
     bullish_buy_spacing_ratio: float = 0.005
@@ -360,6 +372,11 @@ class GridConfig:
             self.bearish_sell_levels = max(1, int(round(self.bearish_sell_levels * scale)))
             self.bearish_buy_levels = max(1, self.levels - self.bearish_sell_levels)
         self.directional_bias_threshold = max(0.0, float(self.directional_bias_threshold))
+        self.sideways_neutral_bias_threshold = max(0.0, float(self.sideways_neutral_bias_threshold))
+        self.bearish_directional_bias_threshold = max(
+            self.directional_bias_threshold,
+            float(self.bearish_directional_bias_threshold),
+        )
         self.bullish_buy_spacing_ratio = max(0.0, float(self.bullish_buy_spacing_ratio))
         self.bullish_sell_spacing_ratio = max(0.0, float(self.bullish_sell_spacing_ratio))
         self.bullish_center_shift_atr_ratio = max(0.0, float(self.bullish_center_shift_atr_ratio))
@@ -533,8 +550,10 @@ def load_config(config_path: str | Path) -> AppConfig:
         rsi_rebound_confirmation_level=float(cta_payload.get("rsi_rebound_confirmation_level", 35.0)),
         strong_bull_bias_score=float(cta_payload.get("strong_bull_bias_score", 1.4)),
         weak_bull_bias_score=float(cta_payload.get("weak_bull_bias_score", 0.8)),
+        weak_bull_memory_score_bonus=float(cta_payload.get("weak_bull_memory_score_bonus", 0.20)),
         dynamic_rsi_trend_score=float(cta_payload.get("dynamic_rsi_trend_score", 0.8)),
         dynamic_rsi_rebound_score=float(cta_payload.get("dynamic_rsi_rebound_score", 0.9)),
+        early_bullish_score_bonus=float(cta_payload.get("early_bullish_score_bonus", 0.15)),
         bullish_ready_score_threshold=float(cta_payload.get("bullish_ready_score_threshold", 1.6)),
         weak_bias_fast_ema=int(cta_payload.get("weak_bias_fast_ema", cta_payload.get("fast_ema", 21))),
         weak_bias_slow_ema=int(cta_payload.get("weak_bias_slow_ema", cta_payload.get("slow_ema", 55))),
@@ -575,6 +594,12 @@ def load_config(config_path: str | Path) -> AppConfig:
         early_bullish_lower_band_slope_atr_threshold=float(
             cta_payload.get("early_bullish_lower_band_slope_atr_threshold", 0.05)
         ),
+        starter_frontrun_enabled=bool(cta_payload.get("starter_frontrun_enabled", True)),
+        starter_frontrun_fraction=float(cta_payload.get("starter_frontrun_fraction", 0.20)),
+        starter_frontrun_breakout_buffer_ratio=float(cta_payload.get("starter_frontrun_breakout_buffer_ratio", 0.002)),
+        starter_frontrun_impulse_bars=int(cta_payload.get("starter_frontrun_impulse_bars", 3)),
+        starter_frontrun_volume_window=int(cta_payload.get("starter_frontrun_volume_window", 12)),
+        starter_frontrun_volume_multiplier=float(cta_payload.get("starter_frontrun_volume_multiplier", 1.15)),
         fast_ema=int(cta_payload.get("fast_ema", 7)),
         slow_ema=int(cta_payload.get("slow_ema", 21)),
         polling_interval_seconds=int(cta_payload.get("polling_interval_seconds", 60)),
@@ -607,6 +632,8 @@ def load_config(config_path: str | Path) -> AppConfig:
         fee_rate=float(grid_payload.get("fee_rate", 0.001)),
         directional_skew_enabled=bool(grid_payload.get("directional_skew_enabled", True)),
         directional_bias_threshold=float(grid_payload.get("directional_bias_threshold", 0.20)),
+        sideways_neutral_bias_threshold=float(grid_payload.get("sideways_neutral_bias_threshold", 0.12)),
+        bearish_directional_bias_threshold=float(grid_payload.get("bearish_directional_bias_threshold", 0.30)),
         bullish_buy_levels=int(grid_payload.get("bullish_buy_levels", 6)),
         bullish_sell_levels=int(grid_payload.get("bullish_sell_levels", 2)),
         bullish_buy_spacing_ratio=float(grid_payload.get("bullish_buy_spacing_ratio", 0.005)),

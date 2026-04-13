@@ -43,7 +43,11 @@ class ExecutionTriggerSnapshot:
     prior_low_break: bool
     prior_high: float | None
     prior_low: float | None
-    reason: str
+    frontrun_near_breakout: bool = False
+    frontrun_impulse_confirmed: bool = False
+    frontrun_obv_confirmed: bool = False
+    frontrun_ready: bool = False
+    reason: str = ""
 
 
 @dataclass
@@ -209,6 +213,22 @@ class MultiTimeframeSignalEngine:
             return float(self.config.dynamic_rsi_rebound_score), rsi_slope
         return 0.0, rsi_slope
 
+
+    def _has_starter_frontrun_impulse(self, execution_frame: pd.DataFrame) -> bool:
+        impulse_bars = max(2, int(getattr(self.config, "starter_frontrun_impulse_bars", 3)))
+        volume_window = max(impulse_bars + 1, int(getattr(self.config, "starter_frontrun_volume_window", 12)))
+        if len(execution_frame) < volume_window:
+            return False
+        recent = execution_frame.tail(impulse_bars)
+        baseline = execution_frame.iloc[:-impulse_bars].tail(volume_window)
+        volume_mean = float(baseline["volume"].mean()) if not baseline.empty else 0.0
+        if volume_mean <= 0:
+            return False
+        bullish_bars = bool((recent["close"] > recent["open"]).all())
+        volume_multiplier = float(getattr(self.config, "starter_frontrun_volume_multiplier", 1.15))
+        supported_volume = bool((recent["volume"] >= volume_mean * volume_multiplier).all())
+        return bullish_bars and supported_volume
+
     def _resolve_early_bullish(self, major_frame: pd.DataFrame, swing_frame: pd.DataFrame, major_supertrend: pd.DataFrame) -> bool:
         if len(major_frame) < 2 or len(swing_frame) < 1 or len(major_supertrend) < 2:
             return False
@@ -293,8 +313,6 @@ class MultiTimeframeSignalEngine:
         early_bullish = major_direction <= 0 and self._resolve_early_bullish(major_frame, swing_frame, major_supertrend)
         major_bias_score, weak_bull_bias = self._resolve_major_bias(major_direction, swing_frame)
         swing_score, swing_rsi_slope = self._resolve_swing_readiness(swing_rsi)
-        bullish_score = major_bias_score + swing_score
-        bullish_ready = bullish_score >= float(self.config.bullish_ready_score_threshold)
 
         current_k = float(execution_kdj["k"].iloc[-1])
         current_d = float(execution_kdj["d"].iloc[-1])
@@ -312,6 +330,13 @@ class MultiTimeframeSignalEngine:
         bullish_memory_active = bullish_cross_bars_ago is not None
         bearish_memory_active = bearish_cross_bars_ago is not None
 
+        bullish_score = major_bias_score + swing_score
+        if weak_bull_bias and bullish_memory_active:
+            bullish_score += float(getattr(self.config, "weak_bull_memory_score_bonus", 0.0))
+        if early_bullish:
+            bullish_score += float(getattr(self.config, "early_bullish_score_bonus", 0.0))
+        bullish_ready = bullish_score >= float(self.config.bullish_ready_score_threshold)
+
         prior_high_series = execution_frame["high"].shift(1).rolling(
             max(1, int(self.config.execution_breakout_lookback)),
             min_periods=max(1, int(self.config.execution_breakout_lookback)),
@@ -327,6 +352,11 @@ class MultiTimeframeSignalEngine:
         current_price = float(execution_frame["close"].iloc[-1])
         prior_high_break = prior_high is not None and current_price > prior_high + 1e-12
         prior_low_break = prior_low is not None and current_price < prior_low - 1e-12
+        frontrun_gap_ratio = 0.0
+        frontrun_near_breakout = False
+        if prior_high is not None and prior_high > 0 and current_price < prior_high:
+            frontrun_gap_ratio = max(0.0, (prior_high - current_price) / prior_high)
+            frontrun_near_breakout = frontrun_gap_ratio <= float(getattr(self.config, "starter_frontrun_breakout_buffer_ratio", 0.002))
 
         current_major_atr = float(major_supertrend["atr"].iloc[-1])
         relevant_rail = float(major_supertrend["upper_band"].iloc[-1] if major_direction <= 0 else major_supertrend["lower_band"].iloc[-1])
@@ -355,10 +385,25 @@ class MultiTimeframeSignalEngine:
                 float(execution_obv_confirmation.zscore),
             )
 
+        execution_obv_ready = execution_obv_confirmation.buy_confirmed(
+            zscore_threshold=float(self.config.obv_zscore_threshold),
+        )
+        frontrun_impulse_confirmed = self._has_starter_frontrun_impulse(execution_frame)
+        starter_frontrun_ready = bool(
+            getattr(self.config, "starter_frontrun_enabled", True)
+            and execution_obv_ready
+            and frontrun_near_breakout
+            and frontrun_impulse_confirmed
+            and (bullish_memory_active or kdj_golden_cross)
+        )
+
         execution_entry_mode = "breakout_confirmed"
         entry_size_multiplier = 1.0
         if weak_bull_bias:
             execution_entry_mode = "weak_bull_scale_in_limit"
+        if starter_frontrun_ready:
+            execution_entry_mode = "starter_frontrun_limit"
+            entry_size_multiplier = max(0.0, min(1.0, float(getattr(self.config, "starter_frontrun_fraction", 0.20))))
         if early_bullish:
             execution_entry_mode = "early_bullish_starter_limit"
             entry_size_multiplier = max(0.0, min(1.0, float(self.config.early_bullish_starter_fraction)))
@@ -367,6 +412,8 @@ class MultiTimeframeSignalEngine:
             reason = "early_bullish: 1h supertrend bullish + price above 4h lower band + 4h lower band slope flattening"
         elif bullish_memory_active and prior_high_break:
             reason = f"Triggered via Memory Window: KDJ crossed {bullish_cross_bars_ago} bars ago + Price Breakout NOW"
+        elif starter_frontrun_ready:
+            reason = f"starter_frontrun: gap={frontrun_gap_ratio * 100:.3f}% + 1m {int(getattr(self.config, 'starter_frontrun_impulse_bars', 3))} bullish bars + OBV confirmed"
         elif weak_bull_bias and bullish_memory_active:
             reason = f"Weak bull bias active: KDJ crossed {bullish_cross_bars_ago} bars ago + scale-in allowed before breakout"
         elif bullish_magnetism_ready:
@@ -389,9 +436,13 @@ class MultiTimeframeSignalEngine:
             prior_low_break=prior_low_break,
             prior_high=prior_high,
             prior_low=prior_low,
+            frontrun_near_breakout=frontrun_near_breakout,
+            frontrun_impulse_confirmed=frontrun_impulse_confirmed,
+            frontrun_obv_confirmed=execution_obv_ready,
+            frontrun_ready=starter_frontrun_ready,
             reason=reason,
         )
-        fully_aligned = early_bullish or (
+        fully_aligned = early_bullish or starter_frontrun_ready or (
             bullish_ready and (
                 (weak_bull_bias and bullish_memory_active)
                 or (not weak_bull_bias and prior_high_break and (bullish_memory_active or kdj_golden_cross))
