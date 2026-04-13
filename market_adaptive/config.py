@@ -160,6 +160,8 @@ class CTAConfig:
     obv_sma_period: int = 50
     obv_zscore_window: int = 100
     obv_zscore_threshold: float = 1.0
+    magnetism_obv_zscore_threshold: float = 1.2
+    magnetism_rail_atr_multiplier: float = 0.6
     atr_period: int = 14
     atr_trailing_multiplier: float = 2.5
     stop_loss_atr: float = 2.0
@@ -484,6 +486,8 @@ def load_config(config_path: str | Path) -> AppConfig:
         obv_sma_period=int(cta_payload.get("obv_sma_period", 50)),
         obv_zscore_window=int(cta_payload.get("obv_zscore_window", 100)),
         obv_zscore_threshold=float(cta_payload.get("obv_zscore_threshold", 1.0)),
+        magnetism_obv_zscore_threshold=float(cta_payload.get("magnetism_obv_zscore_threshold", 1.2)),
+        magnetism_rail_atr_multiplier=float(cta_payload.get("magnetism_rail_atr_multiplier", 0.6)),
         atr_period=int(cta_payload.get("atr_period", 14)),
         atr_trailing_multiplier=float(cta_payload.get("atr_trailing_multiplier", 2.5)),
         stop_loss_atr=float(cta_payload.get("stop_loss_atr", 2.0)),

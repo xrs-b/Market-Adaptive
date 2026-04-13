@@ -118,6 +118,39 @@ class MTFEngineTests(unittest.TestCase):
         self.assertGreater(signal.swing_rsi_slope, 0.0)
         self.assertTrue(signal.bullish_ready)
 
+    def test_engine_allows_magnetism_ready_before_major_supertrend_flip(self) -> None:
+        config = CTAConfig(
+            symbol="BTC/USDT",
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            strong_bull_bias_score=0.7,
+            dynamic_rsi_trend_score=0.7,
+            bullish_ready_score_threshold=1.6,
+            magnetism_obv_zscore_threshold=1.2,
+            magnetism_rail_atr_multiplier=0.6,
+        )
+        engine = MultiTimeframeSignalEngine(self.client, config)
+        major_closes = [200 - 0.5 * index for index in range(60)]
+        swing_closes = [100.0] * 45 + [99.8, 99.9, 100.0, 100.1, 100.3, 100.6, 100.9, 101.2, 101.6, 102.0, 102.3, 102.7, 103.0, 103.3, 103.6]
+        execution_closes = [100.0] * 59 + [173.2]
+        execution_volumes = [100.0] * 59 + [1000.0]
+        self._set_ohlcv("4h", major_closes, 14_400_000)
+        self._set_ohlcv("1h", swing_closes, 3_600_000)
+        self._set_ohlcv("15m", execution_closes, 900_000, volumes=execution_volumes)
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=10)
+
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertLess(signal.major_direction, 0)
+        self.assertTrue(signal.bullish_ready)
+        self.assertFalse(signal.fully_aligned)
+        self.assertIn("磁吸力预判：距离轨道", signal.execution_trigger.reason)
+        self.assertIn("OBV 已确认", signal.execution_trigger.reason)
+
     def _mock_execution_kdj(self, bars: int, golden_cross_bar_from_end: int):
         k_values = [40.0] * bars
         d_values = [50.0] * bars

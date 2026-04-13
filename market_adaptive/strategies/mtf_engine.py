@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import pandas as pd
 
 from market_adaptive.config import CTAConfig
-from market_adaptive.indicators import compute_kdj, compute_rsi, compute_supertrend, ohlcv_to_dataframe
+from market_adaptive.indicators import (
+    compute_kdj,
+    compute_obv,
+    compute_obv_confirmation_snapshot,
+    compute_rsi,
+    compute_supertrend,
+    ohlcv_to_dataframe,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -149,6 +159,13 @@ class MultiTimeframeSignalEngine:
             k_smoothing=self.config.kdj_k_smoothing,
             d_smoothing=self.config.kdj_d_smoothing,
         )
+        execution_obv = compute_obv(execution_frame)
+        execution_obv_confirmation = compute_obv_confirmation_snapshot(
+            execution_frame,
+            obv=execution_obv,
+            sma_period=self.config.obv_sma_period,
+            zscore_window=self.config.obv_zscore_window,
+        )
 
         major_direction = int(major_supertrend["direction"].iloc[-1])
         current_swing_rsi = float(swing_rsi.iloc[-1])
@@ -189,6 +206,33 @@ class MultiTimeframeSignalEngine:
         prior_high_break = prior_high is not None and current_price > prior_high + 1e-12
         prior_low_break = prior_low is not None and current_price < prior_low - 1e-12
 
+        current_major_atr = float(major_supertrend["atr"].iloc[-1])
+        relevant_rail = float(major_supertrend["upper_band"].iloc[-1] if major_direction <= 0 else major_supertrend["lower_band"].iloc[-1])
+        rail_distance = abs(current_price - relevant_rail)
+        magnetism_limit = float(self.config.magnetism_rail_atr_multiplier) * current_major_atr
+        magnetism_distance_pct = (rail_distance / relevant_rail * 100.0) if abs(relevant_rail) > 1e-12 else 0.0
+        magnetism_obv_ready = execution_obv_confirmation.zscore > float(self.config.magnetism_obv_zscore_threshold)
+        bullish_magnetism_ready = (
+            major_direction <= 0
+            and not bullish_ready
+            and current_major_atr > 0.0
+            and rail_distance < magnetism_limit
+            and magnetism_obv_ready
+        )
+        if bullish_magnetism_ready:
+            bullish_ready = True
+            bullish_score = max(bullish_score, float(self.config.bullish_ready_score_threshold))
+            logger.info(
+                "磁吸力预判：距离轨道 %.3f%%，OBV 已确认 | symbol=%s timeframe=%s rail=%.4f price=%.4f atr=%.4f obv_z=%.2f",
+                magnetism_distance_pct,
+                self.config.symbol,
+                self.config.major_timeframe,
+                relevant_rail,
+                current_price,
+                current_major_atr,
+                float(execution_obv_confirmation.zscore),
+            )
+
         execution_entry_mode = "breakout_confirmed"
         if weak_bull_bias:
             execution_entry_mode = "weak_bull_scale_in_limit"
@@ -197,6 +241,8 @@ class MultiTimeframeSignalEngine:
             reason = f"Triggered via Memory Window: KDJ crossed {bullish_cross_bars_ago} bars ago + Price Breakout NOW"
         elif weak_bull_bias and bullish_memory_active:
             reason = f"Weak bull bias active: KDJ crossed {bullish_cross_bars_ago} bars ago + scale-in allowed before breakout"
+        elif bullish_magnetism_ready:
+            reason = f"磁吸力预判：距离轨道 {magnetism_distance_pct:.3f}%，OBV 已确认"
         elif kdj_golden_cross:
             reason = "kdj_golden_cross_waiting_breakout"
         elif prior_high_break:
