@@ -422,6 +422,12 @@ class MultiTimeframeSignalEngine:
             and frontrun_impulse_confirmed
             and (bullish_memory_active or kdj_golden_cross)
         )
+        major_bull_retest_ready = bool(
+            major_direction > 0
+            and bullish_ready
+            and frontrun_near_breakout
+            and bullish_memory_active
+        )
 
         execution_entry_mode = "breakout_confirmed"
         entry_size_multiplier = 1.0
@@ -440,6 +446,8 @@ class MultiTimeframeSignalEngine:
             reason = f"Triggered via Memory Window: KDJ crossed {bullish_cross_bars_ago} bars ago + Price Breakout NOW"
         elif starter_frontrun_ready:
             reason = f"starter_frontrun: gap={frontrun_gap_ratio * 100:.3f}% + 1m {int(getattr(self.config, 'starter_frontrun_impulse_bars', 3))} bullish bars + OBV confirmed"
+        elif major_bull_retest_ready:
+            reason = f"major_bull_retest_ready: gap={frontrun_gap_ratio * 100:.3f}% + KDJ memory {bullish_cross_bars_ago} bars ago"
         elif rail_momentum_ready:
             reason = "rail_momentum_ready: near major rail + 15m momentum confirmation"
         elif weak_bull_bias and bullish_memory_active:
@@ -470,7 +478,7 @@ class MultiTimeframeSignalEngine:
             frontrun_ready=starter_frontrun_ready,
             reason=reason,
         )
-        fully_aligned = early_bullish or starter_frontrun_ready or (
+        fully_aligned = early_bullish or starter_frontrun_ready or major_bull_retest_ready or (
             bullish_ready and (
                 ((swing_direction > 0) and prior_high_break and (bullish_memory_active or kdj_golden_cross))
                 or (weak_bull_bias and bullish_memory_active)

@@ -86,6 +86,41 @@ class MTFEngineTests(unittest.TestCase):
         self.assertTrue(signal.fully_aligned)
         self.assertIn("Price Breakout NOW", signal.execution_trigger.reason)
 
+    def test_engine_allows_major_bull_retest_entry_when_kdj_memory_is_fresh_and_price_is_near_breakout(self) -> None:
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.25 for index in range(54)] + [103.8, 104.3, 104.9, 105.4, 105.8, 105.99]
+        self._set_ohlcv("15m", execution_closes, 900_000)
+
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=2)
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = self.engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.bullish_ready)
+        self.assertFalse(signal.execution_trigger.prior_high_break)
+        self.assertTrue(signal.execution_trigger.bullish_memory_active)
+        self.assertTrue(signal.fully_aligned)
+        self.assertIn("major_bull_retest_ready", signal.execution_trigger.reason)
+
+    def test_engine_keeps_major_bull_retest_blocked_when_kdj_memory_has_expired_even_if_price_is_near_breakout(self) -> None:
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.25 for index in range(54)] + [103.8, 104.3, 104.9, 105.4, 105.8, 105.99]
+        self._set_ohlcv("15m", execution_closes, 900_000)
+
+        import pandas as pd
+        mocked_kdj = pd.DataFrame({"k": [56.0] * 60, "d": [51.0] * 60})
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = self.engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.bullish_ready)
+        self.assertFalse(signal.execution_trigger.bullish_memory_active)
+        self.assertFalse(signal.execution_trigger.prior_high_break)
+        self.assertFalse(signal.fully_aligned)
+        self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger")
+
     def test_engine_allows_weak_bull_bias_before_major_supertrend_flip(self) -> None:
         major_closes = [200 - 0.5 * index for index in range(60)]
         swing_closes = [100.0] * 20 + [100.2, 100.4, 100.7, 101.0, 101.3, 101.8, 102.2, 102.7, 103.1, 103.5, 103.9, 104.4, 104.8, 105.2, 105.7, 106.1, 106.5, 106.9, 107.2, 107.5, 107.9, 108.2, 108.5, 108.9, 109.2, 109.6, 110.0, 110.3, 110.7, 111.0, 111.4, 111.8, 112.2, 112.5, 112.9, 113.3, 113.6, 114.0, 114.4, 114.8]

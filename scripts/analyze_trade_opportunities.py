@@ -185,18 +185,25 @@ def replay_cta(config_path: Path, hours: int) -> dict:
         bullish_memory_active = bullish_cross_bars_ago is not None
         prior_high = exec_frame["high"].shift(1).rolling(max(1, int(cta.execution_breakout_lookback)), min_periods=max(1, int(cta.execution_breakout_lookback))).max().iloc[-1]
         prior_high_break = not pd.isna(prior_high) and current_price > float(prior_high)
+        frontrun_gap_ratio = 999.0
+        if not pd.isna(prior_high) and abs(float(prior_high)) > 1e-12:
+            frontrun_gap_ratio = max(0.0, (float(prior_high) - current_price) / float(prior_high))
+        frontrun_near_breakout = frontrun_gap_ratio <= float(getattr(cta, "starter_frontrun_breakout_buffer_ratio", 0.002))
+        major_bull_retest_ready = bool(major_direction > 0 and bullish_ready and frontrun_near_breakout and bullish_memory_active)
         trigger_reason = "waiting_execution_trigger"
         if early_bullish:
             trigger_reason = "early_bullish"
         elif bullish_memory_active and prior_high_break:
             trigger_reason = "memory+breakout"
+        elif major_bull_retest_ready:
+            trigger_reason = "major_bull_retest_ready"
         elif weak_bull_bias and bullish_memory_active:
             trigger_reason = "weak_bias_scale_in"
         elif kdj_golden_cross:
             trigger_reason = "kdj_cross_wait_breakout"
         elif prior_high_break:
             trigger_reason = "breakout_wait_memory"
-        fully_aligned = early_bullish or (bullish_ready and ((weak_bull_bias and bullish_memory_active) or ((not weak_bull_bias) and prior_high_break and (bullish_memory_active or kdj_golden_cross))))
+        fully_aligned = early_bullish or major_bull_retest_ready or (bullish_ready and ((weak_bull_bias and bullish_memory_active) or ((not weak_bull_bias) and prior_high_break and (bullish_memory_active or kdj_golden_cross))))
 
         major_ts = int(pd.Timestamp(major_frame["timestamp"].iloc[-1]).value // 1_000_000)
         swing_ts = int(pd.Timestamp(swing_frame["timestamp"].iloc[-1]).value // 1_000_000)
