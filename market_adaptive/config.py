@@ -366,6 +366,7 @@ class GridConfig:
     bearish_center_shift_atr_ratio: float = 0.003
     atr_regrid_change_ratio: float = 0.10
     regrid_trigger_atr_ratio: float = 0.30
+    hard_reanchor_atr_ratio: float = 1.20
     min_grid_lifetime_seconds: int = 300
     flash_crash_enabled: bool = True
     flash_crash_timeframe: str = "1m"
@@ -684,6 +685,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         bearish_center_shift_atr_ratio=float(grid_payload.get("bearish_center_shift_atr_ratio", 0.003)),
         atr_regrid_change_ratio=float(grid_payload.get("atr_regrid_change_ratio", 0.10)),
         regrid_trigger_atr_ratio=float(grid_payload.get("regrid_trigger_atr_ratio", 0.30)),
+        hard_reanchor_atr_ratio=float(grid_payload.get("hard_reanchor_atr_ratio", 1.20)),
         min_grid_lifetime_seconds=int(grid_payload.get("min_grid_lifetime_seconds", 300)),
         flash_crash_enabled=bool(grid_payload.get("flash_crash_enabled", True)),
         flash_crash_timeframe=str(grid_payload.get("flash_crash_timeframe", "1m")),

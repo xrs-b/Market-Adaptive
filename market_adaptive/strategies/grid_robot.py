@@ -708,6 +708,27 @@ class GridRobot(BaseStrategyRobot):
         else:
             return GridBiasProfile(bias_value=bias_value)
 
+    def _hard_reanchor_triggered(self, context: GridContext, current_price: float) -> bool:
+        previous = self._cached_context
+        if previous is None:
+            return False
+        grid_center = self.current_grid_center if self.current_grid_center is not None else previous.center_price
+        if grid_center <= 0:
+            return False
+        hard_reanchor_distance = max(0.0, float(context.atr_value) * float(getattr(self.config, "hard_reanchor_atr_ratio", 1.20)))
+        if hard_reanchor_distance <= 0:
+            return False
+        price_shift = abs(current_price - grid_center)
+        if price_shift > hard_reanchor_distance:
+            logger.info(
+                "[grid_robot] _should_regrid: hard re-anchor triggered price_shift=%.2f hard_distance=%.2f center=%.2f",
+                price_shift,
+                hard_reanchor_distance,
+                grid_center,
+            )
+            return True
+        return False
+
     def _should_regrid(self, context: GridContext, current_price: float, now: datetime) -> bool:
         previous = self._cached_context
         if previous is None:
@@ -730,13 +751,15 @@ class GridRobot(BaseStrategyRobot):
         if trigger_distance <= 0:
             trigger_distance = abs(grid_center) * 0.001
         price_shift = abs(current_price - grid_center)
+        hard_reanchor = self._hard_reanchor_triggered(context, current_price)
         logger.info(
-            "[grid_robot] _should_regrid: price_shift=%.2f trigger_distance=%.2f center=%.2f",
+            "[grid_robot] _should_regrid: price_shift=%.2f trigger_distance=%.2f center=%.2f hard_reanchor=%s",
             price_shift,
             trigger_distance,
             grid_center,
+            hard_reanchor,
         )
-        if self.current_grid_center is not None and price_shift <= trigger_distance:
+        if self.current_grid_center is not None and price_shift <= trigger_distance and not hard_reanchor:
             logger.info("[grid_robot] _should_regrid: spatial lock active")
             return False
 
@@ -745,6 +768,10 @@ class GridRobot(BaseStrategyRobot):
         atr_regrid_change_ratio = float(getattr(self.config, "atr_regrid_change_ratio", 0.10))
         if atr_diff_ratio > atr_regrid_change_ratio:
             logger.info("[grid_robot] _should_regrid: ATR change %.1f%% > threshold %.1f%%, triggering regrid", atr_diff_ratio * 100, atr_regrid_change_ratio * 100)
+            return True
+
+        if hard_reanchor:
+            logger.info("[grid_robot] _should_regrid: hard re-anchor forces regrid")
             return True
 
         if price_shift > trigger_distance:

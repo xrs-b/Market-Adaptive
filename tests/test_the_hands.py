@@ -435,7 +435,7 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(len(self.client.market_orders), 0)
         self.assertIsNone(robot.position)
 
-    def test_cta_robot_requires_configured_obv_breakout_strength(self) -> None:
+    def test_cta_robot_high_conviction_entry_can_override_strict_obv_breakout_strength(self) -> None:
         self._insert_status("trend")
         self._load_bullish_signal(lower_last_close=100.0)
         strict_config = CTAConfig(
@@ -452,8 +452,8 @@ class TheHandsTests(unittest.TestCase):
 
         result = robot.run()
 
-        self.assertEqual(result.action, "cta:range_filter_blocked")
-        self.assertEqual(len(self.client.market_orders), 0)
+        self.assertEqual(result.action, "cta:open_long")
+        self.assertGreater(len(self.client.market_orders), 0)
 
     def test_cta_robot_blocks_bullish_entry_when_retail_sentiment_is_extreme(self) -> None:
         self._insert_status("trend")
@@ -1087,6 +1087,18 @@ class TheHandsTests(unittest.TestCase):
 
         self.assertFalse(robot._should_regrid(robot._fallback_context(102.9, atr_value=10.0), 102.9, now))
         self.assertTrue(robot._should_regrid(robot._fallback_context(103.1, atr_value=10.0), 103.1, now))
+
+    def test_grid_robot_hard_reanchors_once_price_drift_exceeds_one_point_two_atr(self) -> None:
+        self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
+        now = datetime(2026, 4, 11, 10, 10, tzinfo=timezone.utc)
+        grid_config = GridConfig(regrid_trigger_atr_ratio=2.0, hard_reanchor_atr_ratio=1.2)
+        robot = GridRobot(self.client, self.database, grid_config, self.execution, now_provider=lambda: now, use_dynamic_range=False)
+        robot._cached_context = robot._fallback_context(100.0, atr_value=10.0)
+        robot.last_regrid_time = now.timestamp() - 301
+        robot.current_grid_center = 100.0
+
+        self.assertFalse(robot._should_regrid(robot._fallback_context(112.0, atr_value=10.0), 112.0, now))
+        self.assertTrue(robot._should_regrid(robot._fallback_context(112.1, atr_value=10.0), 112.1, now))
 
     def test_grid_robot_cools_down_repeatedly_triggered_buy_layer(self) -> None:
         self._insert_status("sideways")
@@ -1990,10 +2002,9 @@ class TheHandsTests(unittest.TestCase):
         with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
             result = robot.run()
 
-        self.assertEqual(result.action, "cta:open_long_limit")
-        self.assertEqual(len(self.client.limit_orders), 1)
-        self.assertEqual(self.client.limit_orders[0]["params"]["executionMode"], "weak_bull_scale_in")
-        self.assertIsNotNone(robot.position)
+        self.assertEqual(result.action, "cta:no_signal")
+        self.assertEqual(len(self.client.limit_orders), 0)
+        self.assertIsNone(robot.position)
 
     def test_hands_coordinator_runs_both_robots(self) -> None:
         self._insert_status("sideways")

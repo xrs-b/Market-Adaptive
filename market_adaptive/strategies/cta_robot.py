@@ -47,6 +47,7 @@ class TrendSignal:
     mtf_aligned: bool = False
     obv_bias: int = 0
     obv_confirmation: OBVConfirmationSnapshot = field(default_factory=lambda: OBVConfirmationSnapshot(0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+    obv_threshold: float = 0.0
     obv_confirmation_passed: bool = False
     volume_filter_passed: bool = False
     volume_profile: VolumeProfileSnapshot | None = None
@@ -183,6 +184,15 @@ class CTARobot(BaseStrategyRobot):
         self._last_near_miss_report_at = 0.0
         self._time_provider = time.time
 
+    def _resolve_obv_gate(self, signal: MTFSignal) -> tuple[float, bool]:
+        bias_score = float(signal.bullish_score)
+        strict_threshold = min(float(self.config.obv_zscore_threshold), 0.60)
+        if bias_score >= 80.0:
+            return -1.0, True
+        if bias_score >= 65.0:
+            return 0.0, False
+        return strict_threshold, False
+
     def should_notify_action(self, action: str) -> bool:
         if action in {
             "cta:hold",
@@ -282,8 +292,9 @@ class CTARobot(BaseStrategyRobot):
         )
         obv_bias = 1 if obv_confirmation.above_sma else -1 if obv_confirmation.below_sma else 0
         raw_direction = 1 if mtf_signal.fully_aligned else 0
-        volume_filter_passed = raw_direction > 0 and obv_confirmation.buy_confirmed(
-            zscore_threshold=self.config.obv_zscore_threshold,
+        obv_threshold, obv_exempt = self._resolve_obv_gate(mtf_signal)
+        volume_filter_passed = raw_direction > 0 and (
+            obv_exempt or obv_confirmation.buy_confirmed(zscore_threshold=obv_threshold)
         )
         current_price = float(execution_frame["close"].iloc[-1])
         volume_profile = compute_volume_profile(
@@ -300,10 +311,10 @@ class CTARobot(BaseStrategyRobot):
 
         if raw_direction > 0:
             obv_confirmation_passed = volume_filter_passed
-            if not obv_confirmation.above_sma:
+            if not obv_exempt and not obv_confirmation.above_sma:
                 long_setup_blocked = True
                 long_setup_reason = "obv_below_sma"
-            elif not obv_confirmation_passed:
+            elif not obv_exempt and not obv_confirmation_passed:
                 long_setup_blocked = True
                 long_setup_reason = "obv_strength_not_confirmed"
             elif volume_profile is None:
@@ -351,6 +362,7 @@ class CTARobot(BaseStrategyRobot):
             mtf_aligned=mtf_signal.fully_aligned,
             obv_bias=obv_bias,
             obv_confirmation=obv_confirmation,
+            obv_threshold=obv_threshold,
             obv_confirmation_passed=obv_confirmation_passed,
             volume_filter_passed=volume_filter_passed,
             volume_profile=volume_profile,
@@ -364,8 +376,14 @@ class CTARobot(BaseStrategyRobot):
             data_mismatch_ms=mtf_signal.data_mismatch_ms,
         )
 
+    def _effective_signal_obv_threshold(self, signal: TrendSignal) -> float:
+        if signal.obv_threshold != 0.0:
+            return float(signal.obv_threshold)
+        return float(self.config.obv_zscore_threshold)
+
     def _build_signal_heartbeat_payload(self, signal: TrendSignal) -> dict[str, float | str | bool]:
         obv = signal.obv_confirmation
+        threshold = self._effective_signal_obv_threshold(signal)
         return {
             "symbol": self.symbol,
             "bullish_ready": bool(signal.bullish_ready),
@@ -390,8 +408,8 @@ class CTARobot(BaseStrategyRobot):
             "obv_increment_mean": float(obv.increment_mean),
             "obv_increment_std": float(obv.increment_std),
             "obv_zscore": float(obv.zscore),
-            "obv_zscore_threshold": float(self.config.obv_zscore_threshold),
-            "obv_zscore_gap": float(obv.zscore - float(self.config.obv_zscore_threshold)),
+            "obv_zscore_threshold": float(threshold),
+            "obv_zscore_gap": float(obv.zscore - float(threshold)),
             "obv_confirmation_passed": bool(signal.obv_confirmation_passed),
             "long_setup_reason": str(signal.long_setup_reason),
             "price": float(signal.price),
@@ -437,7 +455,7 @@ class CTARobot(BaseStrategyRobot):
             return
         if not self._is_execution_near_ready(signal):
             return
-        threshold = float(self.config.obv_zscore_threshold)
+        threshold = self._effective_signal_obv_threshold(signal)
         sample = CTANearMissSample(
             symbol=self.symbol,
             captured_at=float(self._time_provider()),
