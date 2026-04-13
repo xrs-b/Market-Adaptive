@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -13,10 +14,21 @@ from market_adaptive.indicators import (
     compute_rsi,
     compute_supertrend,
     ohlcv_to_dataframe,
+    compute_atr,
 )
 from market_adaptive.timeframe_utils import maybe_use_closed_candles
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TimeframeAlignmentCheck:
+    major_timestamp_ms: int
+    swing_timestamp_ms: int
+    execution_timestamp_ms: int
+    max_gap_ms: int
+    valid: bool
+
 
 
 @dataclass
@@ -53,6 +65,19 @@ class MTFSignal:
     execution_trigger: ExecutionTriggerSnapshot
     fully_aligned: bool
     current_price: float
+    execution_obv_zscore: float
+    execution_obv_threshold: float
+    execution_atr: float
+    atr_price_ratio_pct: float
+    server_time_iso: str
+    local_time_iso: str
+    server_local_skew_ms: int | None
+    major_timestamp_ms: int
+    swing_timestamp_ms: int
+    execution_timestamp_ms: int
+    data_alignment_valid: bool
+    data_mismatch_ms: int
+    blocker_reason: str
     major_frame: pd.DataFrame
     swing_frame: pd.DataFrame
     execution_frame: pd.DataFrame
@@ -71,6 +96,68 @@ class MultiTimeframeSignalEngine:
             if value:
                 return bars_ago
         return None
+
+
+    @staticmethod
+    def _timeframe_to_milliseconds(timeframe: str) -> int:
+        units = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
+        raw = str(timeframe).strip().lower()
+        if len(raw) < 2 or raw[-1] not in units:
+            return 900_000
+        try:
+            return max(1, int(raw[:-1])) * units[raw[-1]]
+        except ValueError:
+            return 900_000
+
+    def _check_timeframe_alignment(self, major_frame: pd.DataFrame, swing_frame: pd.DataFrame, execution_frame: pd.DataFrame) -> TimeframeAlignmentCheck:
+        major_ts = int(pd.Timestamp(major_frame["timestamp"].iloc[-1]).value // 1_000_000)
+        swing_ts = int(pd.Timestamp(swing_frame["timestamp"].iloc[-1]).value // 1_000_000)
+        execution_ts = int(pd.Timestamp(execution_frame["timestamp"].iloc[-1]).value // 1_000_000)
+        swing_tf_ms = self._timeframe_to_milliseconds(self.config.swing_timeframe)
+        execution_tf_ms = self._timeframe_to_milliseconds(self.config.execution_timeframe)
+        tolerance_ms = execution_tf_ms
+
+        def boundary_residual(diff_ms: int, boundary_ms: int) -> int:
+            remainder = abs(diff_ms) % boundary_ms
+            return min(remainder, boundary_ms - remainder if remainder else 0)
+
+        major_vs_swing = boundary_residual(major_ts - swing_ts, swing_tf_ms)
+        swing_vs_execution = boundary_residual(swing_ts - execution_ts, execution_tf_ms)
+        major_vs_execution = boundary_residual(major_ts - execution_ts, execution_tf_ms)
+        max_gap_ms = max(major_vs_swing, swing_vs_execution, major_vs_execution)
+        valid = max_gap_ms <= tolerance_ms
+        if not valid:
+            logger.warning(
+                "DATA_MISMATCH_WARNING | major_ts=%s swing_ts=%s execution_ts=%s residual_major_swing=%s residual_swing_execution=%s residual_major_execution=%s max_gap_ms=%s tolerance_ms=%s",
+                major_ts,
+                swing_ts,
+                execution_ts,
+                major_vs_swing,
+                swing_vs_execution,
+                major_vs_execution,
+                max_gap_ms,
+                tolerance_ms,
+            )
+        return TimeframeAlignmentCheck(
+            major_timestamp_ms=major_ts,
+            swing_timestamp_ms=swing_ts,
+            execution_timestamp_ms=execution_ts,
+            max_gap_ms=max_gap_ms,
+            valid=valid,
+        )
+
+    def _resolve_blocker_reason(self, *, data_alignment_valid: bool, major_direction: int, weak_bull_bias: bool, early_bullish: bool, swing_score: float, bullish_ready: bool, fully_aligned: bool, execution_reason: str) -> str:
+        if not data_alignment_valid:
+            return "DATA_MISMATCH_WARNING"
+        if not (major_direction > 0 or weak_bull_bias or early_bullish):
+            return "Blocked_By_SuperTrend_Regime"
+        if swing_score <= 0.0:
+            return "Blocked_By_RSI_Threshold"
+        if not bullish_ready:
+            return "Blocked_By_Bullish_Score"
+        if not fully_aligned:
+            return f"Blocked_By_Trigger:{execution_reason}"
+        return "PASSED"
 
     @property
     def minimum_bars(self) -> int:
@@ -201,6 +288,7 @@ class MultiTimeframeSignalEngine:
         )
 
         major_direction = int(major_supertrend["direction"].iloc[-1])
+        alignment = self._check_timeframe_alignment(major_frame, swing_frame, execution_frame)
         current_swing_rsi = float(swing_rsi.iloc[-1])
         early_bullish = major_direction <= 0 and self._resolve_early_bullish(major_frame, swing_frame, major_supertrend)
         major_bias_score, weak_bull_bias = self._resolve_major_bias(major_direction, swing_frame)
@@ -309,6 +397,25 @@ class MultiTimeframeSignalEngine:
                 or (not weak_bull_bias and prior_high_break and (bullish_memory_active or kdj_golden_cross))
             )
         )
+        if not alignment.valid:
+            bullish_ready = False
+            fully_aligned = False
+
+        execution_atr = float(compute_atr(execution_frame, length=self.config.atr_period).iloc[-1])
+        atr_price_ratio_pct = (execution_atr / current_price * 100.0) if abs(current_price) > 1e-12 else 0.0
+        local_dt = datetime.now(timezone.utc)
+        server_ts = self.client.fetch_server_time() if hasattr(self.client, "fetch_server_time") else None
+        server_dt = datetime.fromtimestamp(server_ts / 1000.0, tz=timezone.utc) if server_ts else None
+        blocker_reason = self._resolve_blocker_reason(
+            data_alignment_valid=alignment.valid,
+            major_direction=major_direction,
+            weak_bull_bias=weak_bull_bias,
+            early_bullish=early_bullish,
+            swing_score=swing_score,
+            bullish_ready=bullish_ready,
+            fully_aligned=fully_aligned,
+            execution_reason=reason,
+        )
 
         return MTFSignal(
             major_timeframe=self.config.major_timeframe,
@@ -328,6 +435,19 @@ class MultiTimeframeSignalEngine:
             execution_trigger=execution_trigger,
             fully_aligned=fully_aligned,
             current_price=current_price,
+            execution_obv_zscore=float(execution_obv_confirmation.zscore),
+            execution_obv_threshold=float(self.config.obv_zscore_threshold),
+            execution_atr=execution_atr,
+            atr_price_ratio_pct=atr_price_ratio_pct,
+            server_time_iso=server_dt.isoformat() if server_dt is not None else "",
+            local_time_iso=local_dt.isoformat(),
+            server_local_skew_ms=(int((local_dt - server_dt).total_seconds() * 1000) if server_dt is not None else None),
+            major_timestamp_ms=alignment.major_timestamp_ms,
+            swing_timestamp_ms=alignment.swing_timestamp_ms,
+            execution_timestamp_ms=alignment.execution_timestamp_ms,
+            data_alignment_valid=alignment.valid,
+            data_mismatch_ms=alignment.max_gap_ms,
+            blocker_reason=blocker_reason,
             major_frame=major_frame,
             swing_frame=swing_frame,
             execution_frame=execution_frame,

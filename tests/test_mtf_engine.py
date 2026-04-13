@@ -10,10 +10,14 @@ from market_adaptive.strategies.mtf_engine import MultiTimeframeSignalEngine
 class DummyClient:
     def __init__(self) -> None:
         self.ohlcv_by_timeframe: dict[str, list[list[float]]] = {}
+        self.server_time_ms: int | None = 1_700_000_123_000
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 200, since=None):
         del symbol, since
         return self.ohlcv_by_timeframe.get(timeframe, [])[-limit:]
+
+    def fetch_server_time(self) -> int | None:
+        return self.server_time_ms
 
 
 class MTFEngineTests(unittest.TestCase):
@@ -30,7 +34,8 @@ class MTFEngineTests(unittest.TestCase):
         self.engine = MultiTimeframeSignalEngine(self.client, self.config)
 
     def _set_ohlcv(self, timeframe: str, closes: list[float], step_ms: int, volumes: list[float] | None = None) -> None:
-        base = 1_700_000_000_000
+        common_end = 1_700_086_400_000
+        base = common_end - len(closes) * step_ms
         payload = []
         for index, close in enumerate(closes):
             volume = volumes[index] if volumes is not None else 100 + index * 5
@@ -273,6 +278,45 @@ class MTFEngineTests(unittest.TestCase):
             d_values[index] = 51.0
         import pandas as pd
         return pd.DataFrame({"k": k_values, "d": d_values})
+
+    def test_engine_flags_data_mismatch_and_safe_gates_entry(self) -> None:
+        self._load_bullish_major_and_swing()
+        execution_closes = [100.0 + index * 0.2 for index in range(60)]
+        self._set_ohlcv("15m", execution_closes, 900_000)
+        # push the major frame far enough ahead to exceed one 15m period
+        shifted_major = []
+        for row in self.client.ohlcv_by_timeframe["4h"]:
+            shifted_major.append([row[0] + 1_800_000, *row[1:]])
+        self.client.ohlcv_by_timeframe["4h"] = shifted_major
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=1)
+
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = self.engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertFalse(signal.data_alignment_valid)
+        self.assertGreater(signal.data_mismatch_ms, 900_000)
+        self.assertFalse(signal.bullish_ready)
+        self.assertFalse(signal.fully_aligned)
+        self.assertEqual(signal.blocker_reason, "DATA_MISMATCH_WARNING")
+
+    def test_engine_exposes_audit_fields_for_profiler(self) -> None:
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.25 for index in range(55)] + [104.0, 103.4, 102.9, 102.4, 101.9]
+        self._set_ohlcv("15m", execution_closes, 900_000)
+
+        signal = self.engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertIsInstance(signal.major_timestamp_ms, int)
+        self.assertIsInstance(signal.swing_timestamp_ms, int)
+        self.assertIsInstance(signal.execution_timestamp_ms, int)
+        self.assertTrue(signal.data_alignment_valid)
+        self.assertIsInstance(signal.server_local_skew_ms, int)
+        self.assertGreater(signal.execution_atr, 0.0)
+        self.assertGreaterEqual(signal.atr_price_ratio_pct, 0.0)
 
 
 if __name__ == "__main__":

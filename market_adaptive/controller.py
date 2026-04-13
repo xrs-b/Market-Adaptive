@@ -25,6 +25,7 @@ from market_adaptive.oracles import MarketOracle
 from market_adaptive.risk import LogicalPositionSnapshot, RiskControlManager
 from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies import CTARobot, GridRobot
+from market_adaptive.strategies.signal_profiler import SignalProfiler
 
 
 @dataclass
@@ -52,6 +53,7 @@ class MainController:
         self.shutdown_client = OKXClient(config.okx, config.execution)
 
         self.sentiment_analyst = SentimentAnalyst(self.cta_client, config.sentiment)
+        self.signal_profiler = SignalProfiler(summary_interval=10)
         self.market_oracle = MarketOracle(
             self.oracle_client,
             database,
@@ -67,6 +69,8 @@ class MainController:
             notifier=self.notifier,
             sentiment_analyst=self.sentiment_analyst,
             runtime_context=self.runtime_context,
+            signal_profiler=self.signal_profiler,
+            grid_center_provider=lambda: self.grid_robot.current_grid_center if hasattr(self, "grid_robot") else None,
         )
         self.grid_robot = GridRobot(
             self.grid_client,

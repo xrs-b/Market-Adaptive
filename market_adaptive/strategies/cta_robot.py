@@ -19,6 +19,7 @@ from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies.base import BaseStrategyRobot
 from market_adaptive.strategies.mtf_engine import MTFSignal, MultiTimeframeSignalEngine
 from market_adaptive.strategies.order_flow_sentinel import OrderFlowAssessment, OrderFlowSentinel
+from market_adaptive.strategies.signal_profiler import SignalProfiler
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,9 @@ class TrendSignal:
     price: float = 0.0
     atr: float = 0.0
     risk_percent: float = 0.0
+    blocker_reason: str = ""
+    data_alignment_valid: bool = True
+    data_mismatch_ms: int = 0
 
     @property
     def obv_signal_strength(self) -> float:
@@ -157,6 +161,8 @@ class CTARobot(BaseStrategyRobot):
         risk_manager=None,
         sentiment_analyst: SentimentAnalyst | None = None,
         runtime_context: StrategyRuntimeContext | None = None,
+        signal_profiler: SignalProfiler | None = None,
+        grid_center_provider=None,
     ) -> None:
         super().__init__(client=client, database=database, symbol=config.symbol, notifier=notifier)
         self.config = config
@@ -164,6 +170,8 @@ class CTARobot(BaseStrategyRobot):
         self.risk_manager = risk_manager
         self.sentiment_analyst = sentiment_analyst
         self.runtime_context = runtime_context
+        self.signal_profiler = signal_profiler
+        self.grid_center_provider = grid_center_provider
         self.position: ManagedPosition | None = None
         self.mtf_engine = MultiTimeframeSignalEngine(client, config)
         self.order_flow_sentinel = OrderFlowSentinel(client, config)
@@ -314,6 +322,13 @@ class CTARobot(BaseStrategyRobot):
             if long_setup_blocked:
                 final_direction = 0
 
+        blocker_reason = mtf_signal.blocker_reason
+        if long_setup_blocked:
+            blocker_reason = f"Blocked_By_{str(long_setup_reason).upper()}"
+        if self.signal_profiler is not None:
+            grid_center = self.grid_center_provider() if callable(self.grid_center_provider) else None
+            self.signal_profiler.record(mtf_signal, grid_center_price=grid_center, blocker_reason=blocker_reason)
+
         return TrendSignal(
             direction=final_direction,
             raw_direction=raw_direction,
@@ -344,6 +359,9 @@ class CTARobot(BaseStrategyRobot):
             price=current_price,
             atr=float(atr_series.iloc[-1]),
             risk_percent=self._resolve_risk_percent(mtf_signal),
+            blocker_reason=blocker_reason,
+            data_alignment_valid=mtf_signal.data_alignment_valid,
+            data_mismatch_ms=mtf_signal.data_mismatch_ms,
         )
 
     def _build_signal_heartbeat_payload(self, signal: TrendSignal) -> dict[str, float | str | bool]:
@@ -378,6 +396,9 @@ class CTARobot(BaseStrategyRobot):
             "long_setup_reason": str(signal.long_setup_reason),
             "price": float(signal.price),
             "atr": float(signal.atr),
+            "blocker_reason": str(signal.blocker_reason),
+            "data_alignment_valid": bool(signal.data_alignment_valid),
+            "data_mismatch_ms": int(signal.data_mismatch_ms),
         }
 
     def _maybe_log_signal_heartbeat(self, signal: TrendSignal) -> None:

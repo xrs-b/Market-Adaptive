@@ -104,6 +104,13 @@ class OKXClient:
     def fetch_ticker(self, symbol: str) -> dict[str, Any]:
         return self.exchange.fetch_ticker(self._normalize_symbol(symbol))
 
+    def fetch_server_time(self) -> int | None:
+        fetch_time = getattr(self.exchange, "fetch_time", None)
+        if not callable(fetch_time):
+            return None
+        timestamp = fetch_time()
+        return None if timestamp is None else int(timestamp)
+
     def fetch_order_book(self, symbol: str, limit: int | None = None) -> dict[str, Any]:
         return self.exchange.fetch_order_book(self._normalize_symbol(symbol), limit=limit)
 
