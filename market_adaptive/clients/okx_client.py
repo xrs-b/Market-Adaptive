@@ -64,9 +64,13 @@ class OKXClient:
         account_data = (balance_info.get("data") or [{}])[0]
         raw_margin_ratio = self._extract_margin_ratio(balance, positions)
         maintenance_margin = self._extract_maintenance_margin(account_data, positions)
-        total_notional = 0.0
+        position_notional = 0.0
         for position in positions:
-            total_notional += self.position_notional(position.get("symbol") or symbols[0] if symbols else "BTC/USDT", position)
+            position_notional += self.position_notional(position.get("symbol") or symbols[0] if symbols else "BTC/USDT", position)
+        open_order_notional = 0.0
+        for symbol in symbols or self._extract_open_order_symbols(positions):
+            open_order_notional += self.fetch_symbol_open_order_notional(symbol)
+        total_notional = position_notional + open_order_notional
 
         margin_ratio = 0.0
         if equity > 0 and maintenance_margin > 0:
@@ -78,6 +82,8 @@ class OKXClient:
             "equity": equity,
             "margin_ratio": max(0.0, margin_ratio),
             "maintenance_margin": max(0.0, maintenance_margin),
+            "position_notional": max(0.0, position_notional),
+            "open_order_notional": max(0.0, open_order_notional),
             "total_notional": max(0.0, total_notional),
         }
 
@@ -163,8 +169,7 @@ class OKXClient:
         total = 0.0
         last_price = None
         for order in self.fetch_open_orders(symbol):
-            reduce_only = bool(order.get("reduceOnly") or order.get("reduce_only") or order.get("info", {}).get("reduceOnly"))
-            if reduce_only:
+            if self._is_reduce_only_order(order):
                 continue
             amount = order.get("remaining") or order.get("amount") or order.get("info", {}).get("sz") or 0.0
             price = order.get("price")
@@ -358,6 +363,32 @@ class OKXClient:
             if info.get(key) not in (None, "", 0, "0"):
                 return abs(float(info.get(key)))
         return None
+
+    def _extract_open_order_symbols(self, positions: list[dict[str, Any]]) -> list[str]:
+        symbols: list[str] = []
+        for position in positions:
+            symbol = position.get("symbol")
+            if symbol:
+                symbols.append(str(symbol))
+        return list(dict.fromkeys(symbols))
+
+    @staticmethod
+    def _safe_bool(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return bool(value)
+
+    def _is_reduce_only_order(self, order: dict[str, Any]) -> bool:
+        info = order.get("info", {})
+        for value in (
+            order.get("reduceOnly"),
+            order.get("reduce_only"),
+            info.get("reduceOnly"),
+            info.get("reduce_only"),
+        ):
+            if value not in (None, ""):
+                return self._safe_bool(value)
+        return False
 
     def _merge_order_params(
         self,

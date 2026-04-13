@@ -40,6 +40,8 @@ class AccountRiskSnapshot:
     total_unrealized_pnl: float
     margin_ratio: float
     maintenance_margin: float
+    position_notional: float
+    open_order_notional: float
     total_notional: float
     new_openings_blocked: bool = False
     block_reason: str | None = None
@@ -162,7 +164,9 @@ class RiskControlManager:
         risk_payload = self.client.fetch_account_risk_snapshot(self.symbols)
         margin_ratio = max(0.0, float(risk_payload.get("margin_ratio", 0.0)))
         maintenance_margin = max(0.0, float(risk_payload.get("maintenance_margin", 0.0)))
-        total_notional = max(0.0, float(risk_payload.get("total_notional", 0.0)))
+        position_notional = max(0.0, float(risk_payload.get("position_notional", 0.0)))
+        open_order_notional = max(0.0, float(risk_payload.get("open_order_notional", 0.0)))
+        total_notional = max(0.0, float(risk_payload.get("total_notional", position_notional + open_order_notional)))
 
         assert self.daily_start_equity is not None
         daily_drawdown = 0.0
@@ -186,6 +190,8 @@ class RiskControlManager:
             total_unrealized_pnl=self.latest_total_pnl,
             margin_ratio=margin_ratio,
             maintenance_margin=maintenance_margin,
+            position_notional=position_notional,
+            open_order_notional=open_order_notional,
             total_notional=total_notional,
             new_openings_blocked=margin_blocked,
             block_reason=block_reason,
@@ -195,12 +201,14 @@ class RiskControlManager:
         self._apply_grid_risk_controls(snapshot)
 
         logger.info(
-            "Risk heartbeat | equity=%.4f daily_start=%.4f drawdown=%.2f%% unrealized_pnl=%.4f margin_ratio=%.2f%% total_notional=%.4f blocked=%s",
+            "Risk heartbeat | equity=%.4f daily_start=%.4f drawdown=%.2f%% unrealized_pnl=%.4f margin_ratio=%.2f%% position_notional=%.4f open_order_notional=%.4f total_notional=%.4f blocked=%s",
             snapshot.equity,
             snapshot.daily_start_equity,
             snapshot.daily_drawdown * 100,
             snapshot.total_unrealized_pnl,
             snapshot.margin_ratio * 100,
+            snapshot.position_notional,
+            snapshot.open_order_notional,
             snapshot.total_notional,
             snapshot.new_openings_blocked,
         )

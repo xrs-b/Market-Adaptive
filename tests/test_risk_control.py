@@ -50,7 +50,9 @@ class DummyRiskClient:
             "equity": self.equity,
             "margin_ratio": self.margin_ratio,
             "maintenance_margin": self.maintenance_margin,
-            "total_notional": self.position_notional_value,
+            "position_notional": self.position_notional_value,
+            "open_order_notional": self.order_notional_value,
+            "total_notional": self.position_notional_value + self.order_notional_value,
         }
 
     def fetch_last_price(self, symbol: str) -> float:
@@ -204,6 +206,34 @@ class RiskControlManagerTests(unittest.TestCase):
         self.assertEqual(snapshot.block_reason, reason)
         self.assertEqual(self.database.get_system_state("risk_new_openings").state_value, "OFF")
         self.assertEqual(self.grid_reduce_events, [])
+
+    def test_monitor_once_reports_positions_only_exposure(self) -> None:
+        self.client.position_notional_value = 250.0
+
+        snapshot = self.manager.monitor_once()
+
+        self.assertAlmostEqual(snapshot.position_notional, 250.0)
+        self.assertAlmostEqual(snapshot.open_order_notional, 0.0)
+        self.assertAlmostEqual(snapshot.total_notional, 250.0)
+
+    def test_monitor_once_reports_open_orders_only_exposure(self) -> None:
+        self.client.order_notional_value = 180.0
+
+        snapshot = self.manager.monitor_once()
+
+        self.assertAlmostEqual(snapshot.position_notional, 0.0)
+        self.assertAlmostEqual(snapshot.open_order_notional, 180.0)
+        self.assertAlmostEqual(snapshot.total_notional, 180.0)
+
+    def test_symbol_notional_limit_counts_positions_and_open_orders_together(self) -> None:
+        self.manager.config.default_symbol_max_notional = 1_000.0
+        self.client.position_notional_value = 600.0
+        self.client.order_notional_value = 250.0
+
+        allowed, reason = self.manager.check_symbol_notional_limit("BTC/USDT", 200.0)
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "symbol_limit=1000.0000")
 
     def test_tiny_maintenance_margin_does_not_block_new_openings(self) -> None:
         self.client.equity = 95_495.6007

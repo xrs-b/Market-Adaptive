@@ -15,6 +15,7 @@ class MockExchange:
         self.order_book_calls = []
         self.raise_on_set_margin_mode = None
         self.open_orders = []
+        self.ticker = {"last": 100.0}
         self.cancel_order_calls = []
         self.raise_on_cancel_order = None
         self.balance = {}
@@ -55,6 +56,17 @@ class MockExchange:
     def fetch_order_book(self, symbol: str, limit=None) -> dict:
         self.order_book_calls.append((symbol, limit))
         return {"bids": [[100.0, 1.0]], "asks": [[100.1, 1.0]]}
+
+    def fetch_ticker(self, symbol: str) -> dict:
+        del symbol
+        return dict(self.ticker)
+
+    def load_markets(self) -> None:
+        return None
+
+    def market(self, symbol: str) -> dict:
+        del symbol
+        return {"contractSize": 1.0}
 
     def price_to_precision(self, symbol: str, price: float) -> str:
         del symbol
@@ -170,8 +182,44 @@ class OKXClientTests(unittest.TestCase):
         snapshot = client.fetch_account_risk_snapshot(["BTC/USDT"])
 
         self.assertAlmostEqual(snapshot["maintenance_margin"], 0.0584584)
+        self.assertAlmostEqual(snapshot["position_notional"], 14.6181)
+        self.assertAlmostEqual(snapshot["open_order_notional"], 0.0)
         self.assertAlmostEqual(snapshot["total_notional"], 14.6181)
         self.assertAlmostEqual(snapshot["margin_ratio"], 0.0584584 / 95_495.6007)
+
+
+    def test_fetch_account_risk_snapshot_includes_opening_order_notional(self) -> None:
+        client = DummyOKXClient(
+            OKXConfig(api_key="", api_secret="", passphrase="", default_type="swap"),
+            ExecutionConfig(),
+        )
+        client.exchange.balance = {
+            "total": {"USDT": 1_000.0},
+            "info": {"data": [{"details": [{"ccy": "USDT", "eq": "1000"}]}]},
+        }
+        client.exchange.positions = [{"symbol": "BTC/USDT:USDT", "notional": 120.0, "info": {}}]
+        client.exchange.open_orders = [
+            {"amount": 2.0, "price": 50.0, "reduceOnly": False},
+            {"amount": 1.0, "price": 80.0, "reduceOnly": True},
+        ]
+
+        snapshot = client.fetch_account_risk_snapshot(["BTC/USDT"])
+
+        self.assertAlmostEqual(snapshot["position_notional"], 120.0)
+        self.assertAlmostEqual(snapshot["open_order_notional"], 100.0)
+        self.assertAlmostEqual(snapshot["total_notional"], 220.0)
+
+    def test_fetch_symbol_open_order_notional_excludes_string_false_reduce_only_bug_and_true_reduce_only(self) -> None:
+        client = DummyOKXClient(
+            OKXConfig(api_key="", api_secret="", passphrase="", default_type="swap"),
+            ExecutionConfig(),
+        )
+        client.exchange.open_orders = [
+            {"amount": 2.0, "price": 50.0, "reduceOnly": "false", "info": {"reduceOnly": "false"}},
+            {"amount": 1.0, "price": 80.0, "reduceOnly": "true", "info": {"reduceOnly": "true"}},
+        ]
+
+        self.assertAlmostEqual(client.fetch_symbol_open_order_notional("BTC/USDT"), 100.0)
 
     def test_fetch_account_risk_snapshot_falls_back_to_decimal_ratio_when_no_maintenance_margin(self) -> None:
         client = DummyOKXClient(

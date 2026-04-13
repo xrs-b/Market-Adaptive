@@ -49,6 +49,8 @@ class DummyAccountClient:
             "equity": self.equity,
             "margin_ratio": self.margin_ratio,
             "maintenance_margin": self.margin_ratio * self.equity,
+            "position_notional": 0.0,
+            "open_order_notional": 0.0,
             "total_notional": 0.0,
         }
 
