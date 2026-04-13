@@ -82,6 +82,14 @@ class MarketOracleTests(unittest.TestCase):
         )
         self.assertEqual(oracle.determine_status(snapshot), "trend_impulse")
 
+    def test_determine_status_returns_range_breakout_ready_for_wide_sideways_state(self) -> None:
+        oracle = MarketOracle(client=DummyOKXClient({"1m": self._impulse_payload(False)}), database=self.database, config=self.config)
+        snapshot = self._snapshot(
+            higher=IndicatorSnapshot(14.0, 14.5, 15.0, 18.0, 17.0, 0.12, 0.11, 0.018),
+            lower=IndicatorSnapshot(13.5, 14.0, 14.5, 17.5, 16.5, 0.08, 0.08, 0.012),
+        )
+        self.assertEqual(oracle.determine_status(snapshot), "range_breakout_ready")
+
     def test_determine_status_falls_back_to_previous_status_when_signal_is_mixed(self) -> None:
         self.database.insert_market_status(
             MarketStatusRecord(

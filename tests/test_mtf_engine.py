@@ -247,11 +247,13 @@ class MTFEngineTests(unittest.TestCase):
             major_timeframe="4h",
             swing_timeframe="1h",
             execution_timeframe="15m",
-            weak_bull_bias_score=0.8,
-            weak_bull_memory_score_bonus=0.25,
+            weak_bull_bias_score=20.0,
+            weak_bull_memory_score_bonus=10.0,
+            kdj_memory_score_bonus=20.0,
             dynamic_rsi_trend_score=0.0,
             dynamic_rsi_rebound_score=0.0,
-            bullish_ready_score_threshold=1.0,
+            swing_supertrend_bullish_score=30.0,
+            bullish_ready_score_threshold=45.0,
         )
         engine = MultiTimeframeSignalEngine(self.client, config)
         major_closes = [200 - 0.5 * index for index in range(60)]
@@ -269,8 +271,38 @@ class MTFEngineTests(unittest.TestCase):
         assert signal is not None
         self.assertTrue(signal.weak_bull_bias)
         self.assertTrue(signal.execution_trigger.bullish_memory_active)
-        self.assertAlmostEqual(signal.bullish_score, 1.05, places=6)
+        self.assertGreaterEqual(signal.bullish_score, 50.0)
         self.assertTrue(signal.bullish_ready)
+
+    def test_engine_scores_bullish_ready_before_major_flip_via_swing_and_memory_stack(self) -> None:
+        config = CTAConfig(
+            symbol="BTC/USDT",
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            strong_bull_bias_score=50.0,
+            swing_supertrend_bullish_score=30.0,
+            kdj_memory_score_bonus=20.0,
+            bullish_ready_score_threshold=45.0,
+        )
+        engine = MultiTimeframeSignalEngine(self.client, config)
+        major_closes = [200 - 0.5 * index for index in range(60)]
+        swing_closes = [100.0 + 0.35 * index for index in range(60)]
+        execution_closes = [100.0] * 56 + [100.2, 100.35, 100.5, 100.65]
+        self._set_ohlcv("4h", major_closes, 14_400_000)
+        self._set_ohlcv("1h", swing_closes, 3_600_000)
+        self._set_ohlcv("15m", execution_closes, 900_000)
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=2)
+
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertLess(signal.major_direction, 0)
+        self.assertGreaterEqual(signal.bullish_score, 50.0)
+        self.assertTrue(signal.bullish_ready)
+        self.assertTrue(signal.fully_aligned)
 
     def test_engine_flags_starter_frontrun_when_breakout_is_within_last_point_two_percent(self) -> None:
         config = CTAConfig(

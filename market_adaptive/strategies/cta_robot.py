@@ -149,7 +149,7 @@ class ManagedPosition:
 class CTARobot(BaseStrategyRobot):
     strategy_name = "cta"
     activation_status = "trend"
-    activation_statuses = ("trend", "trend_impulse")
+    activation_statuses = ("trend", "trend_impulse", "range_breakout_ready")
 
     def __init__(
         self,

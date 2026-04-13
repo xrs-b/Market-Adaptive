@@ -43,7 +43,7 @@ class MultiTimeframeMarketSnapshot:
 
 
 class MarketOracle:
-    """Market sensing bot that classifies BTC/USDT as trend or sideways."""
+    """Market sensing bot that classifies BTC/USDT as trend, impulse, or active range breakout."""
 
     def _indicator_confirms_trend(self, indicator: IndicatorSnapshot) -> bool:
         trend_adx_threshold = float(self.config.trend_adx_threshold)
@@ -147,24 +147,33 @@ class MarketOracle:
         expanding_volume = bool((recent["volume"] >= volume_mean * float(self.config.impulse_volume_multiplier)).all())
         return bullish_bars and expanding_volume
 
-    def determine_status(self, snapshot: MultiTimeframeMarketSnapshot) -> str:
-        trend_detected = any(
-            self._indicator_confirms_trend(indicator)
-            for indicator in (snapshot.higher, snapshot.lower)
+    def _indicator_range_breakout_ready(self, indicator: IndicatorSnapshot) -> bool:
+        return bool(
+            indicator.bb_width >= float(getattr(self.config, "range_breakout_bb_width_threshold", 0.10))
+            or indicator.volatility >= float(getattr(self.config, "range_breakout_volatility_threshold", 0.015))
         )
+
+    def determine_status(self, snapshot: MultiTimeframeMarketSnapshot) -> str:
+        indicators = (snapshot.higher, snapshot.lower)
+        trend_detected = any(self._indicator_confirms_trend(indicator) for indicator in indicators)
         sideways_detected = all(
             (
                 indicator.adx_value < float(self.config.sideways_adx_threshold)
                 or not indicator.adx_rising
                 or indicator.di_gap < float(self.config.trend_di_gap_threshold)
             )
-            for indicator in (snapshot.higher, snapshot.lower)
+            for indicator in indicators
         )
+        range_breakout_ready = sideways_detected and all(
+            indicator.adx_value < float(self.config.trend_adx_threshold) for indicator in indicators
+        ) and any(self._indicator_range_breakout_ready(indicator) for indicator in indicators)
 
         if trend_detected:
             return "trend"
         if sideways_detected and self._has_trend_impulse():
             return "trend_impulse"
+        if range_breakout_ready:
+            return "range_breakout_ready"
         if sideways_detected:
             return "sideways"
 

@@ -177,15 +177,10 @@ class MultiTimeframeSignalEngine:
             self.config.rsi_rebound_lookback + 3,
         )
 
-    def _resolve_major_bias(self, major_direction: int, swing_frame: pd.DataFrame) -> tuple[float, bool]:
+    def _resolve_major_bias(self, major_direction: int, swing_frame: pd.DataFrame, swing_supertrend: pd.DataFrame) -> tuple[float, bool]:
         if major_direction > 0:
             return float(self.config.strong_bull_bias_score), False
 
-        swing_supertrend = compute_supertrend(
-            swing_frame,
-            length=self.config.supertrend_period,
-            multiplier=self.config.supertrend_multiplier,
-        )
         price_above_swing_supertrend = float(swing_frame["close"].iloc[-1]) > float(swing_supertrend["supertrend"].iloc[-1])
         fast_ema = swing_frame["close"].ewm(span=self.config.weak_bias_fast_ema, adjust=False).mean()
         slow_ema = swing_frame["close"].ewm(span=self.config.weak_bias_slow_ema, adjust=False).mean()
@@ -292,6 +287,11 @@ class MultiTimeframeSignalEngine:
             length=self.config.supertrend_period,
             multiplier=self.config.supertrend_multiplier,
         )
+        swing_supertrend = compute_supertrend(
+            swing_frame,
+            length=self.config.supertrend_period,
+            multiplier=self.config.supertrend_multiplier,
+        )
         swing_rsi = compute_rsi(swing_frame, length=self.config.swing_rsi_period)
         execution_kdj = compute_kdj(
             execution_frame,
@@ -308,10 +308,11 @@ class MultiTimeframeSignalEngine:
         )
 
         major_direction = int(major_supertrend["direction"].iloc[-1])
+        swing_direction = int(swing_supertrend["direction"].iloc[-1])
         alignment = self._check_timeframe_alignment(major_frame, swing_frame, execution_frame)
         current_swing_rsi = float(swing_rsi.iloc[-1])
         early_bullish = major_direction <= 0 and self._resolve_early_bullish(major_frame, swing_frame, major_supertrend)
-        major_bias_score, weak_bull_bias = self._resolve_major_bias(major_direction, swing_frame)
+        major_bias_score, weak_bull_bias = self._resolve_major_bias(major_direction, swing_frame, swing_supertrend)
         swing_score, swing_rsi_slope = self._resolve_swing_readiness(swing_rsi)
 
         current_k = float(execution_kdj["k"].iloc[-1])
@@ -331,8 +332,12 @@ class MultiTimeframeSignalEngine:
         bearish_memory_active = bearish_cross_bars_ago is not None
 
         bullish_score = major_bias_score + swing_score
+        if swing_direction > 0:
+            bullish_score += float(getattr(self.config, "swing_supertrend_bullish_score", 0.0))
         if weak_bull_bias and bullish_memory_active:
             bullish_score += float(getattr(self.config, "weak_bull_memory_score_bonus", 0.0))
+        if bullish_memory_active:
+            bullish_score += float(getattr(self.config, "kdj_memory_score_bonus", 0.0))
         if early_bullish:
             bullish_score += float(getattr(self.config, "early_bullish_score_bonus", 0.0))
         bullish_ready = bullish_score >= float(self.config.bullish_ready_score_threshold)
@@ -364,16 +369,24 @@ class MultiTimeframeSignalEngine:
         magnetism_limit = float(self.config.magnetism_rail_atr_multiplier) * current_major_atr
         magnetism_distance_pct = (rail_distance / relevant_rail * 100.0) if abs(relevant_rail) > 1e-12 else 0.0
         magnetism_obv_ready = execution_obv_confirmation.zscore > float(self.config.magnetism_obv_zscore_threshold)
+        rail_momentum_ready = bool(
+            major_direction <= 0
+            and current_major_atr > 0.0
+            and rail_distance <= magnetism_limit
+            and (swing_direction > 0 or current_swing_rsi >= float(self.config.dynamic_rsi_floor))
+            and (bullish_memory_active or kdj_golden_cross)
+        )
+        if rail_momentum_ready:
+            bullish_score += float(getattr(self.config, "rail_momentum_score_bonus", 0.0))
+
         bullish_magnetism_ready = (
             major_direction <= 0
-            and not bullish_ready
             and current_major_atr > 0.0
-            and rail_distance < magnetism_limit
+            and rail_distance <= magnetism_limit
             and magnetism_obv_ready
         )
         if bullish_magnetism_ready:
-            bullish_ready = True
-            bullish_score = max(bullish_score, float(self.config.bullish_ready_score_threshold))
+            bullish_score += float(getattr(self.config, "magnetism_score_bonus", 0.0))
             logger.info(
                 "磁吸力预判：距离轨道 %.3f%%，OBV 已确认 | symbol=%s timeframe=%s rail=%.4f price=%.4f atr=%.4f obv_z=%.2f",
                 magnetism_distance_pct,
@@ -385,12 +398,15 @@ class MultiTimeframeSignalEngine:
                 float(execution_obv_confirmation.zscore),
             )
 
+        bullish_ready = bullish_score >= float(self.config.bullish_ready_score_threshold)
+
         execution_obv_ready = execution_obv_confirmation.buy_confirmed(
             zscore_threshold=float(self.config.obv_zscore_threshold),
         )
         frontrun_impulse_confirmed = self._has_starter_frontrun_impulse(execution_frame)
         starter_frontrun_ready = bool(
             getattr(self.config, "starter_frontrun_enabled", True)
+            and bullish_ready
             and execution_obv_ready
             and frontrun_near_breakout
             and frontrun_impulse_confirmed
@@ -414,6 +430,8 @@ class MultiTimeframeSignalEngine:
             reason = f"Triggered via Memory Window: KDJ crossed {bullish_cross_bars_ago} bars ago + Price Breakout NOW"
         elif starter_frontrun_ready:
             reason = f"starter_frontrun: gap={frontrun_gap_ratio * 100:.3f}% + 1m {int(getattr(self.config, 'starter_frontrun_impulse_bars', 3))} bullish bars + OBV confirmed"
+        elif rail_momentum_ready:
+            reason = "rail_momentum_ready: near major rail + 15m momentum confirmation"
         elif weak_bull_bias and bullish_memory_active:
             reason = f"Weak bull bias active: KDJ crossed {bullish_cross_bars_ago} bars ago + scale-in allowed before breakout"
         elif bullish_magnetism_ready:
@@ -444,7 +462,9 @@ class MultiTimeframeSignalEngine:
         )
         fully_aligned = early_bullish or starter_frontrun_ready or (
             bullish_ready and (
-                (weak_bull_bias and bullish_memory_active)
+                ((swing_direction > 0) and prior_high_break and (bullish_memory_active or kdj_golden_cross))
+                or (weak_bull_bias and bullish_memory_active)
+                or rail_momentum_ready
                 or (not weak_bull_bias and prior_high_break and (bullish_memory_active or kdj_golden_cross))
             )
         )
