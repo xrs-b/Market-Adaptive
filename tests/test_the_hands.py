@@ -790,8 +790,8 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(len(sell_orders), 4)
         self.assertTrue(all(order["amount"] == 47.5 for order in buy_orders + sell_orders))
         self.assertTrue(all(not order.get("reduce_only", False) for order in sell_orders))
-        self.assertTrue(all(order["price"] >= 96.8 for order in buy_orders))
-        self.assertTrue(all(order["price"] <= 103.2 for order in sell_orders))
+        self.assertAlmostEqual(max(buy_orders, key=lambda order: order["price"])["price"], 98.75255730638212)
+        self.assertAlmostEqual(min(sell_orders, key=lambda order: order["price"])["price"], 101.24744269361788)
         self.assertLess(max(buy_orders, key=lambda order: order["price"])["price"], 100.0)
         self.assertGreater(min(sell_orders, key=lambda order: order["price"])["price"], 100.0)
 
@@ -815,6 +815,47 @@ class TheHandsTests(unittest.TestCase):
 
         self.assertEqual(len(context.buy_prices), 4)
         self.assertEqual(len(context.sell_prices), 4)
+
+    def test_grid_robot_adapts_minimum_spacing_floor_to_half_atr(self) -> None:
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, atr_multiplier=1.0)
+        self.client.ohlcv_by_timeframe["1h"] = []
+        for i in range(80):
+            ts = 60_000 + i * 3_600_000
+            self.client.ohlcv_by_timeframe["1h"].append([ts, 100.0, 110.0, 90.0, 100.0, 120.0])
+
+        context = robot._refresh_grid_context(100.0)
+
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertAlmostEqual(context.atr_value, 20.0, places=6)
+        self.assertAlmostEqual(context.sell_prices[0] - context.center_price, 10.0, places=6)
+        self.assertAlmostEqual(context.center_price - context.buy_prices[0], 10.0, places=6)
+
+    def test_grid_robot_atr_spacing_floor_widens_dense_biased_side_only(self) -> None:
+        class BullishOracle:
+            def current_bias_value(self) -> float:
+                return 0.5
+
+            def get_hourly_atr(self, symbol: str) -> float:
+                del symbol
+                return 20.0
+
+        robot = GridRobot(
+            self.client,
+            self.database,
+            self.grid_config,
+            self.execution,
+            market_oracle=BullishOracle(),
+        )
+
+        context = robot._refresh_grid_context(100.0)
+
+        self.assertIsNotNone(context)
+        assert context is not None
+        buy_step = context.center_price - context.buy_prices[0]
+        sell_step = context.sell_prices[0] - context.center_price
+        self.assertAlmostEqual(buy_step, 10.0, places=6)
+        self.assertAlmostEqual(sell_step, 25.0, places=6)
 
     def test_grid_robot_bullish_bias_skews_to_six_buy_two_sell_levels(self) -> None:
         class BullishOracle:
@@ -865,9 +906,9 @@ class TheHandsTests(unittest.TestCase):
         assert context is not None
         buy_spacing = round(context.buy_prices[1] - context.buy_prices[0], 6)
         sell_spacing = round(context.sell_prices[1] - context.sell_prices[0], 6)
-        self.assertLess(abs(buy_spacing), 0.7)
-        self.assertGreater(abs(sell_spacing), 1.0)
-        self.assertLess(abs(buy_spacing), abs(sell_spacing))
+        self.assertAlmostEqual(abs(buy_spacing), 5.0)
+        self.assertAlmostEqual(abs(sell_spacing), 5.0)
+        self.assertLessEqual(abs(buy_spacing), abs(sell_spacing))
 
     def test_grid_robot_bullish_bias_shifts_center_upward_by_atr_ratio(self) -> None:
         class BullishOracle:
@@ -942,9 +983,9 @@ class TheHandsTests(unittest.TestCase):
         assert context is not None
         buy_spacing = round(context.buy_prices[1] - context.buy_prices[0], 6)
         sell_spacing = round(context.sell_prices[1] - context.sell_prices[0], 6)
-        self.assertGreater(abs(buy_spacing), 1.0)
-        self.assertLess(abs(sell_spacing), 0.7)
-        self.assertGreater(abs(buy_spacing), abs(sell_spacing))
+        self.assertAlmostEqual(abs(buy_spacing), 5.0)
+        self.assertAlmostEqual(abs(sell_spacing), 5.0)
+        self.assertGreaterEqual(abs(buy_spacing), abs(sell_spacing))
 
     def test_grid_robot_bearish_bias_shifts_center_downward_by_atr_ratio(self) -> None:
         class BearishOracle:

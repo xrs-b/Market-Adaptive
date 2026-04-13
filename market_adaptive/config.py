@@ -327,6 +327,7 @@ class GridConfig:
     atr_period: int = 14
     atr_multiplier: float = 2.5
     min_spacing_ratio: float = 0.007
+    atr_spacing_floor_multiplier: float = 0.5
     fee_rate: float = 0.001
     directional_skew_enabled: bool = True
     directional_bias_threshold: float = 0.20

@@ -569,7 +569,13 @@ class GridRobot(BaseStrategyRobot):
         if lower_bound <= 0 or upper_bound <= 0 or lower_bound >= upper_bound:
             return self._fallback_context(current_price, atr_value)
 
-        buy_prices, sell_prices = self._derive_layer_prices(lower_bound, center_price, upper_bound, bias_profile=bias_profile)
+        buy_prices, sell_prices = self._derive_layer_prices(
+            lower_bound,
+            center_price,
+            upper_bound,
+            bias_profile=bias_profile,
+            atr_value=atr_value,
+        )
         context = GridContext(
             anchor_timestamp_ms=anchor_timestamp_ms,
             lower_bound=lower_bound,
@@ -1306,6 +1312,7 @@ class GridRobot(BaseStrategyRobot):
         upper_bound: float,
         *,
         bias_profile: GridBiasProfile | None = None,
+        atr_value: float = 0.0,
     ) -> tuple[list[float], list[float]]:
         bias_profile = bias_profile or GridBiasProfile()
         if bias_profile.bullish and bias_profile.buy_levels > 0 and bias_profile.sell_levels > 0:
@@ -1319,6 +1326,8 @@ class GridRobot(BaseStrategyRobot):
             sell_levels = max(1, self.config.levels - buy_levels)
 
         min_spacing_ratio = max(0.0, float(getattr(self.config, "min_spacing_ratio", 0.0)))
+        atr_spacing_floor_multiplier = max(0.0, float(getattr(self.config, "atr_spacing_floor_multiplier", 0.0)))
+        atr_spacing_floor = max(0.0, float(atr_value)) * atr_spacing_floor_multiplier
 
         buy_step = max(1e-12, (anchor_price - lower_bound) / buy_levels)
         sell_step = max(1e-12, (upper_bound - anchor_price) / sell_levels)
@@ -1333,8 +1342,8 @@ class GridRobot(BaseStrategyRobot):
             sell_spacing_ratio = 0.0
         effective_buy_spacing_ratio = buy_spacing_ratio if buy_spacing_ratio > 0 else min_spacing_ratio
         effective_sell_spacing_ratio = sell_spacing_ratio if sell_spacing_ratio > 0 else min_spacing_ratio
-        minimum_buy_step = max(anchor_price * effective_buy_spacing_ratio, 1e-12)
-        minimum_sell_step = max(anchor_price * effective_sell_spacing_ratio, 1e-12)
+        minimum_buy_step = max(anchor_price * effective_buy_spacing_ratio, atr_spacing_floor, 1e-12)
+        minimum_sell_step = max(anchor_price * effective_sell_spacing_ratio, atr_spacing_floor, 1e-12)
 
         buy_step = max(buy_step, minimum_buy_step)
         sell_step = max(sell_step, minimum_sell_step)

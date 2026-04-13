@@ -25,6 +25,7 @@ class MarketAdaptiveBootstrapTests(unittest.TestCase):
         self.assertEqual(config.grid.leverage, 3)
         self.assertEqual(config.grid.range_percent, 0.03)
         self.assertEqual(config.grid.min_spacing_ratio, 0.007)
+        self.assertEqual(config.grid.atr_spacing_floor_multiplier, 0.5)
         self.assertEqual(config.grid.fee_rate, 0.001)
         self.assertEqual(config.market_oracle.relaxed_trend_adx_buffer, 1.5)
         self.assertEqual(config.market_oracle.relaxed_trend_di_gap_bonus, 1.0)
