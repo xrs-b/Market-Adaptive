@@ -162,6 +162,18 @@ grid:
   atr_multiplier: 2.5
   min_spacing_ratio: 0.008
   fee_rate: 0.001
+  directional_skew_enabled: true
+  directional_bias_threshold: 0.20
+  bullish_buy_levels: 6
+  bullish_sell_levels: 2
+  bullish_buy_spacing_ratio: 0.005
+  bullish_sell_spacing_ratio: 0.012
+  bullish_center_shift_atr_ratio: 0.002
+  bearish_buy_levels: 2
+  bearish_sell_levels: 6
+  bearish_buy_spacing_ratio: 0.012
+  bearish_sell_spacing_ratio: 0.005
+  bearish_center_shift_atr_ratio: 0.002
   atr_regrid_change_ratio: 0.10
   regrid_trigger_atr_ratio: 0.30
   min_grid_lifetime_seconds: 300

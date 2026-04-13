@@ -313,6 +313,11 @@ class GridConfig:
     bullish_buy_spacing_ratio: float = 0.005
     bullish_sell_spacing_ratio: float = 0.012
     bullish_center_shift_atr_ratio: float = 0.002
+    bearish_buy_levels: int = 2
+    bearish_sell_levels: int = 6
+    bearish_buy_spacing_ratio: float = 0.012
+    bearish_sell_spacing_ratio: float = 0.005
+    bearish_center_shift_atr_ratio: float = 0.002
     atr_regrid_change_ratio: float = 0.10
     regrid_trigger_atr_ratio: float = 0.30
     min_grid_lifetime_seconds: int = 300
@@ -333,10 +338,20 @@ class GridConfig:
             scale = self.levels / max(total_bullish_levels, 1)
             self.bullish_buy_levels = max(1, int(round(self.bullish_buy_levels * scale)))
             self.bullish_sell_levels = max(1, self.levels - self.bullish_buy_levels)
+        self.bearish_buy_levels = max(1, int(self.bearish_buy_levels))
+        self.bearish_sell_levels = max(1, int(self.bearish_sell_levels))
+        total_bearish_levels = self.bearish_buy_levels + self.bearish_sell_levels
+        if total_bearish_levels != self.levels:
+            scale = self.levels / max(total_bearish_levels, 1)
+            self.bearish_sell_levels = max(1, int(round(self.bearish_sell_levels * scale)))
+            self.bearish_buy_levels = max(1, self.levels - self.bearish_sell_levels)
         self.directional_bias_threshold = max(0.0, float(self.directional_bias_threshold))
         self.bullish_buy_spacing_ratio = max(0.0, float(self.bullish_buy_spacing_ratio))
         self.bullish_sell_spacing_ratio = max(0.0, float(self.bullish_sell_spacing_ratio))
         self.bullish_center_shift_atr_ratio = max(0.0, float(self.bullish_center_shift_atr_ratio))
+        self.bearish_buy_spacing_ratio = max(0.0, float(self.bearish_buy_spacing_ratio))
+        self.bearish_sell_spacing_ratio = max(0.0, float(self.bearish_sell_spacing_ratio))
+        self.bearish_center_shift_atr_ratio = max(0.0, float(self.bearish_center_shift_atr_ratio))
 
 
 @dataclass
@@ -572,6 +587,11 @@ def load_config(config_path: str | Path) -> AppConfig:
         bullish_buy_spacing_ratio=float(grid_payload.get("bullish_buy_spacing_ratio", 0.005)),
         bullish_sell_spacing_ratio=float(grid_payload.get("bullish_sell_spacing_ratio", 0.012)),
         bullish_center_shift_atr_ratio=float(grid_payload.get("bullish_center_shift_atr_ratio", 0.002)),
+        bearish_buy_levels=int(grid_payload.get("bearish_buy_levels", 2)),
+        bearish_sell_levels=int(grid_payload.get("bearish_sell_levels", 6)),
+        bearish_buy_spacing_ratio=float(grid_payload.get("bearish_buy_spacing_ratio", 0.012)),
+        bearish_sell_spacing_ratio=float(grid_payload.get("bearish_sell_spacing_ratio", 0.005)),
+        bearish_center_shift_atr_ratio=float(grid_payload.get("bearish_center_shift_atr_ratio", 0.002)),
         atr_regrid_change_ratio=float(grid_payload.get("atr_regrid_change_ratio", 0.10)),
         regrid_trigger_atr_ratio=float(grid_payload.get("regrid_trigger_atr_ratio", 0.30)),
         min_grid_lifetime_seconds=int(grid_payload.get("min_grid_lifetime_seconds", 300)),

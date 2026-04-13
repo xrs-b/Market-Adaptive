@@ -55,6 +55,14 @@ class GridBiasProfile:
     def bullish(self) -> bool:
         return self.bias_value > 0
 
+    @property
+    def bearish(self) -> bool:
+        return self.bias_value < 0
+
+    @property
+    def neutral(self) -> bool:
+        return not self.bullish and not self.bearish
+
 
 @dataclass
 class GridPositionCandidate:
@@ -631,22 +639,48 @@ class GridRobot(BaseStrategyRobot):
             return GridBiasProfile()
         bias_value = self._resolve_bias_value()
         threshold = float(getattr(self.config, "directional_bias_threshold", 0.20))
-        if bias_value <= threshold:
+
+        def _normalize_levels(buy_levels: int, sell_levels: int) -> tuple[int, int]:
+            buy_levels = max(1, int(buy_levels))
+            sell_levels = max(1, int(sell_levels))
+            total_levels = buy_levels + sell_levels
+            if total_levels != self.config.levels:
+                if buy_levels >= sell_levels:
+                    buy_levels = max(1, min(self.config.levels - 1, buy_levels))
+                    sell_levels = max(1, self.config.levels - buy_levels)
+                else:
+                    sell_levels = max(1, min(self.config.levels - 1, sell_levels))
+                    buy_levels = max(1, self.config.levels - sell_levels)
+            return buy_levels, sell_levels
+
+        if bias_value >= threshold:
+            buy_levels, sell_levels = _normalize_levels(
+                getattr(self.config, "bullish_buy_levels", max(1, self.config.levels - 2)),
+                getattr(self.config, "bullish_sell_levels", 2),
+            )
+            return GridBiasProfile(
+                bias_value=bias_value,
+                center_shift=max(0.0, atr_value * float(getattr(self.config, "bullish_center_shift_atr_ratio", 0.0))),
+                buy_levels=buy_levels,
+                sell_levels=sell_levels,
+                buy_spacing_ratio=max(0.0, float(getattr(self.config, "bullish_buy_spacing_ratio", 0.0))),
+                sell_spacing_ratio=max(0.0, float(getattr(self.config, "bullish_sell_spacing_ratio", 0.0))),
+            )
+        elif bias_value <= -threshold:
+            buy_levels, sell_levels = _normalize_levels(
+                getattr(self.config, "bearish_buy_levels", 2),
+                getattr(self.config, "bearish_sell_levels", max(1, self.config.levels - 2)),
+            )
+            return GridBiasProfile(
+                bias_value=bias_value,
+                center_shift=-max(0.0, atr_value * float(getattr(self.config, "bearish_center_shift_atr_ratio", 0.0))),
+                buy_levels=buy_levels,
+                sell_levels=sell_levels,
+                buy_spacing_ratio=max(0.0, float(getattr(self.config, "bearish_buy_spacing_ratio", 0.0))),
+                sell_spacing_ratio=max(0.0, float(getattr(self.config, "bearish_sell_spacing_ratio", 0.0))),
+            )
+        else:
             return GridBiasProfile(bias_value=bias_value)
-        buy_levels = max(1, int(getattr(self.config, "bullish_buy_levels", max(1, self.config.levels - 2))))
-        sell_levels = max(1, int(getattr(self.config, "bullish_sell_levels", max(1, self.config.levels - buy_levels))))
-        total_levels = buy_levels + sell_levels
-        if total_levels != self.config.levels:
-            buy_levels = max(1, min(self.config.levels - 1, buy_levels))
-            sell_levels = max(1, self.config.levels - buy_levels)
-        return GridBiasProfile(
-            bias_value=bias_value,
-            center_shift=max(0.0, atr_value * float(getattr(self.config, "bullish_center_shift_atr_ratio", 0.0))),
-            buy_levels=buy_levels,
-            sell_levels=sell_levels,
-            buy_spacing_ratio=max(0.0, float(getattr(self.config, "bullish_buy_spacing_ratio", 0.0))),
-            sell_spacing_ratio=max(0.0, float(getattr(self.config, "bullish_sell_spacing_ratio", 0.0))),
-        )
 
     def _should_regrid(self, context: GridContext, current_price: float, now: datetime) -> bool:
         previous = self._cached_context
@@ -1251,6 +1285,9 @@ class GridRobot(BaseStrategyRobot):
         if bias_profile.bullish and bias_profile.buy_levels > 0 and bias_profile.sell_levels > 0:
             buy_levels = bias_profile.buy_levels
             sell_levels = bias_profile.sell_levels
+        elif bias_profile.bearish and bias_profile.buy_levels > 0 and bias_profile.sell_levels > 0:
+            buy_levels = bias_profile.buy_levels
+            sell_levels = bias_profile.sell_levels
         else:
             buy_levels = max(1, self.config.levels // 2)
             sell_levels = max(1, self.config.levels - buy_levels)
@@ -1259,8 +1296,15 @@ class GridRobot(BaseStrategyRobot):
 
         buy_step = max(1e-12, (anchor_price - lower_bound) / buy_levels)
         sell_step = max(1e-12, (upper_bound - anchor_price) / sell_levels)
-        buy_spacing_ratio = bias_profile.buy_spacing_ratio if bias_profile.bullish else 0.0
-        sell_spacing_ratio = bias_profile.sell_spacing_ratio if bias_profile.bullish else 0.0
+        if bias_profile.bullish:
+            buy_spacing_ratio = bias_profile.buy_spacing_ratio
+            sell_spacing_ratio = bias_profile.sell_spacing_ratio
+        elif bias_profile.bearish:
+            buy_spacing_ratio = bias_profile.buy_spacing_ratio
+            sell_spacing_ratio = bias_profile.sell_spacing_ratio
+        else:
+            buy_spacing_ratio = 0.0
+            sell_spacing_ratio = 0.0
         effective_buy_spacing_ratio = buy_spacing_ratio if buy_spacing_ratio > 0 else min_spacing_ratio
         effective_sell_spacing_ratio = sell_spacing_ratio if sell_spacing_ratio > 0 else min_spacing_ratio
         minimum_buy_step = max(anchor_price * effective_buy_spacing_ratio, 1e-12)
