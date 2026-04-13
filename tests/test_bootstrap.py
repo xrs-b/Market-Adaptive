@@ -52,7 +52,7 @@ class MarketAdaptiveBootstrapTests(unittest.TestCase):
         self.assertEqual(config.cta.magnetism_score_bonus, 20.0)
         self.assertEqual(config.cta.kdj_memory_score_bonus, 10.0)
         self.assertEqual(config.cta.weak_bull_memory_score_bonus, 0.0)
-        self.assertEqual(config.cta.early_bullish_score_bonus, 0.0)
+        self.assertEqual(config.cta.early_bullish_score_bonus, 10.0)
         self.assertTrue(config.cta.starter_frontrun_enabled)
         self.assertEqual(config.cta.starter_frontrun_fraction, 0.20)
         self.assertEqual(config.cta.starter_frontrun_breakout_buffer_ratio, 0.002)

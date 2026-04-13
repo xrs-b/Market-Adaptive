@@ -160,6 +160,12 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             lower_band_slope = current_lower_band - previous_lower_band
             minimum_slope = -float(cta.early_bullish_lower_band_slope_atr_threshold) * max(current_atr, 1e-12)
             early_bullish = swing_direction > 0 and current_price > current_lower_band and lower_band_slope >= minimum_slope
+        early_recovery_score = 0.0
+        if early_bullish and float(getattr(cta, "early_bullish_score_bonus", 0.0)) > 0.0:
+            rsi_buffer = max(0.0, 0.5 * abs(rsi_slope))
+            recovery_still_supported = current_rsi >= (current_rsi_sma - rsi_buffer)
+            if recovery_still_supported and current_rsi >= float(cta.swing_rsi_ready_threshold):
+                early_recovery_score = float(cta.early_bullish_score_bonus)
         score_4h = float(cta.strong_bull_bias_score) if major_direction > 0 else 0.0
         score_1h = 0.0
         if score_4h <= 0.0:
@@ -167,7 +173,7 @@ def replay_cta(config_path: Path, hours: int) -> dict:
                 score_1h = float(getattr(cta, "swing_supertrend_bullish_score", 0.0))
             elif weak_bull_bias:
                 score_1h = float(cta.weak_bull_bias_score)
-        bullish_score = score_4h + score_1h + swing_score
+        bullish_score = score_4h + score_1h + swing_score + early_recovery_score
         execution_obv = compute_obv(exec_frame)
         execution_obv_confirmation = compute_obv_confirmation_snapshot(exec_frame, obv=execution_obv, sma_period=cta.obv_sma_period, zscore_window=cta.obv_zscore_window)
         current_price = float(exec_frame["close"].iloc[-1])

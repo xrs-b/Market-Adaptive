@@ -217,6 +217,23 @@ class MultiTimeframeSignalEngine:
             return float(self.config.dynamic_rsi_rebound_score), rsi_slope
         return 0.0, rsi_slope
 
+    def _resolve_early_bullish_recovery_bonus(self, *, early_bullish: bool, swing_rsi: pd.Series) -> float:
+        if not early_bullish:
+            return 0.0
+        bonus = float(getattr(self.config, "early_bullish_score_bonus", 0.0))
+        if bonus <= 0.0 or len(swing_rsi) < 2:
+            return 0.0
+        rsi_sma = swing_rsi.rolling(max(2, int(self.config.recovery_rsi_sma_period)), min_periods=1).mean()
+        current_rsi = float(swing_rsi.iloc[-1])
+        current_rsi_sma = float(rsi_sma.iloc[-1])
+        previous_rsi = float(swing_rsi.iloc[-2])
+        rsi_slope = current_rsi - previous_rsi
+        rsi_buffer = max(0.0, 0.5 * abs(rsi_slope))
+        recovery_still_supported = current_rsi >= (current_rsi_sma - rsi_buffer)
+        if recovery_still_supported and current_rsi >= float(self.config.swing_rsi_ready_threshold):
+            return bonus
+        return 0.0
+
 
     def _has_starter_frontrun_impulse(self, execution_frame: pd.DataFrame) -> bool:
         impulse_bars = max(2, int(getattr(self.config, "starter_frontrun_impulse_bars", 3)))
@@ -349,9 +366,10 @@ class MultiTimeframeSignalEngine:
             elif weak_bull_bias:
                 score_1h = float(self.config.weak_bull_bias_score)
         score_rsi = swing_score
+        score_early_recovery = self._resolve_early_bullish_recovery_bonus(early_bullish=early_bullish, swing_rsi=swing_rsi)
         score_kdj = float(getattr(self.config, "kdj_memory_score_bonus", 0.0)) if bullish_memory_active else 0.0
         score_magnet = 0.0
-        bullish_score = score_4h + score_1h + score_rsi + score_kdj
+        bullish_score = score_4h + score_1h + score_rsi + score_early_recovery + score_kdj
 
         prior_high_series = execution_frame["high"].shift(1).rolling(
             max(1, int(self.config.execution_breakout_lookback)),
@@ -408,13 +426,14 @@ class MultiTimeframeSignalEngine:
 
         bullish_threshold = float(self.config.bullish_ready_score_threshold)
         logger.info(
-            "Bullish Score: %.0f/%.0f [4H: %.0f, 1H: %.0f, Magnet: %.0f, RSI: %.0f, KDJ: %.0f] | symbol=%s major_dir=%s swing_dir=%s weak_bull=%s early_bullish=%s",
+            "Bullish Score: %.0f/%.0f [4H: %.0f, 1H: %.0f, Magnet: %.0f, RSI: %.0f, Early: %.0f, KDJ: %.0f] | symbol=%s major_dir=%s swing_dir=%s weak_bull=%s early_bullish=%s",
             bullish_score,
             bullish_threshold,
             score_4h,
             score_1h,
             score_magnet,
             score_rsi,
+            score_early_recovery,
             score_kdj,
             self.config.symbol,
             major_direction,

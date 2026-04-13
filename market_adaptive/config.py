@@ -165,7 +165,7 @@ class CTAConfig:
     recovery_rsi_floor: float = 40.0
     recovery_rsi_sma_period: int = 14
     dynamic_rsi_rebound_score: float = 15.0
-    early_bullish_score_bonus: float = 0.0
+    early_bullish_score_bonus: float = 10.0
     swing_supertrend_bullish_score: float = 30.0
     magnetism_score_bonus: float = 20.0
     kdj_memory_score_bonus: float = 10.0
@@ -588,7 +588,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         weak_bull_memory_score_bonus=float(cta_payload.get("weak_bull_memory_score_bonus", 0.0)),
         dynamic_rsi_trend_score=float(cta_payload.get("dynamic_rsi_trend_score", 15.0)),
         dynamic_rsi_rebound_score=float(cta_payload.get("dynamic_rsi_rebound_score", 15.0)),
-        early_bullish_score_bonus=float(cta_payload.get("early_bullish_score_bonus", 0.0)),
+        early_bullish_score_bonus=float(cta_payload.get("early_bullish_score_bonus", 10.0)),
         swing_supertrend_bullish_score=float(cta_payload.get("swing_supertrend_bullish_score", 30.0)),
         magnetism_score_bonus=float(cta_payload.get("magnetism_score_bonus", 20.0)),
         kdj_memory_score_bonus=float(cta_payload.get("kdj_memory_score_bonus", 10.0)),
