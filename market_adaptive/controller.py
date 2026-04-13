@@ -115,6 +115,8 @@ class MainController:
         self.database.initialize()
         self.install_signal_handlers()
         self.risk_control.initialize()
+        if self.config.runtime.start_grid_websocket_on_boot:
+            self.grid_robot.start_background_websocket()
         self.logger.info("Main Controller started | daily_start_equity=%.4f", self.risk_control.daily_start_equity or 0.0)
         self.notifier.send(
             "系统已启动",
@@ -261,6 +263,11 @@ class MainController:
         logger.info("Worker exiting")
 
     def _shutdown(self) -> None:
+        try:
+            self.grid_robot.stop_background_websocket(timeout=float(self.config.runtime.shutdown_join_timeout_seconds))
+        except Exception as exc:  # pragma: no cover
+            self.logger.exception("Grid websocket shutdown failed: %s", exc)
+
         if self.config.runtime.shutdown_cancel_open_orders:
             self.logger.info("Graceful shutdown: cancelling open orders and closing positions")
             try:

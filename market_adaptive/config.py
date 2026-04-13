@@ -54,6 +54,8 @@ class RuntimeConfig:
     risk_check_interval_seconds: int = 60
     fast_risk_check_interval_seconds: int = 1
     shutdown_cancel_open_orders: bool = True
+    start_grid_websocket_on_boot: bool = True
+    shutdown_join_timeout_seconds: float = 5.0
 
 
 @dataclass
@@ -188,6 +190,7 @@ class CTAConfig:
     fast_ema: int = 7  # legacy compatibility
     slow_ema: int = 21  # legacy compatibility
     polling_interval_seconds: int = 60
+    cta_assist_trim_ratio: float = 0.25
 
     def __post_init__(self) -> None:
         default_execution = "15m"
@@ -240,6 +243,7 @@ class CTAConfig:
         self.order_flow_max_slippage_bps = max(0.0, float(self.order_flow_max_slippage_bps))
         self.near_miss_report_interval_seconds = max(0.0, float(self.near_miss_report_interval_seconds))
         self.near_miss_report_max_samples = max(1, int(self.near_miss_report_max_samples))
+        self.cta_assist_trim_ratio = min(1.0, max(0.0, float(self.cta_assist_trim_ratio)))
 
     @property
     def obv_slope_window(self) -> int:
@@ -328,6 +332,10 @@ class GridConfig:
     hard_stop_buffer_ratio: float = 0.01
     max_directional_exposure_ratio: float = 0.50
     websocket_order_sync_enabled: bool = True
+    heavy_inventory_threshold: float = 0.60
+    active_hedge_mode_enabled: bool = False
+    active_hedge_min_inventory_ratio: float = 0.45
+    active_hedge_requires_cta_position: bool = True
 
     def __post_init__(self) -> None:
         self.levels = max(2, int(self.levels))
@@ -352,6 +360,8 @@ class GridConfig:
         self.bearish_buy_spacing_ratio = max(0.0, float(self.bearish_buy_spacing_ratio))
         self.bearish_sell_spacing_ratio = max(0.0, float(self.bearish_sell_spacing_ratio))
         self.bearish_center_shift_atr_ratio = max(0.0, float(self.bearish_center_shift_atr_ratio))
+        self.heavy_inventory_threshold = min(1.0, max(0.0, float(self.heavy_inventory_threshold)))
+        self.active_hedge_min_inventory_ratio = min(1.0, max(0.0, float(self.active_hedge_min_inventory_ratio)))
 
 
 @dataclass
@@ -428,6 +438,8 @@ def load_config(config_path: str | Path) -> AppConfig:
         risk_check_interval_seconds=int(runtime_payload.get("risk_check_interval_seconds", 60)),
         fast_risk_check_interval_seconds=int(runtime_payload.get("fast_risk_check_interval_seconds", 1)),
         shutdown_cancel_open_orders=bool(runtime_payload.get("shutdown_cancel_open_orders", True)),
+        start_grid_websocket_on_boot=bool(runtime_payload.get("start_grid_websocket_on_boot", True)),
+        shutdown_join_timeout_seconds=float(runtime_payload.get("shutdown_join_timeout_seconds", 5.0)),
     )
     risk_control = RiskControlConfig(
         daily_loss_cutoff_pct=float(risk_payload.get("daily_loss_cutoff_pct", 0.05)),
@@ -554,6 +566,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         fast_ema=int(cta_payload.get("fast_ema", 7)),
         slow_ema=int(cta_payload.get("slow_ema", 21)),
         polling_interval_seconds=int(cta_payload.get("polling_interval_seconds", 60)),
+        cta_assist_trim_ratio=float(cta_payload.get("cta_assist_trim_ratio", 0.25)),
     )
     grid = GridConfig(
         symbol=str(grid_payload.get("symbol", "BTC/USDT")),
@@ -602,6 +615,10 @@ def load_config(config_path: str | Path) -> AppConfig:
         hard_stop_buffer_ratio=float(grid_payload.get("hard_stop_buffer_ratio", 0.01)),
         max_directional_exposure_ratio=float(grid_payload.get("max_directional_exposure_ratio", 0.50)),
         websocket_order_sync_enabled=bool(grid_payload.get("websocket_order_sync_enabled", True)),
+        heavy_inventory_threshold=float(grid_payload.get("heavy_inventory_threshold", 0.60)),
+        active_hedge_mode_enabled=bool(grid_payload.get("active_hedge_mode_enabled", False)),
+        active_hedge_min_inventory_ratio=float(grid_payload.get("active_hedge_min_inventory_ratio", 0.45)),
+        active_hedge_requires_cta_position=bool(grid_payload.get("active_hedge_requires_cta_position", True)),
     )
     return AppConfig(
         okx=okx,

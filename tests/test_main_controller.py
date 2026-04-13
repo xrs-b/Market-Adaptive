@@ -192,6 +192,20 @@ class MainControllerTests(unittest.TestCase):
         self.assertTrue(snapshot.strong_trend)
         self.assertAlmostEqual(snapshot.size, 1.2)
 
+    def test_shutdown_stops_grid_websocket_with_runtime_timeout(self) -> None:
+        controller = MainController(self.config, self.database)
+        controller.notifier = DummyNotifier()
+        controller.shutdown_client = DummyAccountClient(equity=100.0, pnl=0.0)
+        captured: list[float] = []
+
+        def fake_stop_background_websocket(timeout: float = 5.0) -> None:
+            captured.append(timeout)
+
+        controller.grid_robot.stop_background_websocket = fake_stop_background_websocket
+        controller._shutdown()
+
+        self.assertEqual(captured, [float(self.config.runtime.shutdown_join_timeout_seconds)])
+
     def test_worker_loop_wakes_early_on_runtime_urgent_event(self) -> None:
         controller = MainController(self.config, self.database)
         run_markers: list[float] = []

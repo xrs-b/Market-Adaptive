@@ -19,6 +19,8 @@ runtime:
   risk_check_interval_seconds: 60
   fast_risk_check_interval_seconds: 1
   shutdown_cancel_open_orders: true
+  start_grid_websocket_on_boot: true
+  shutdown_join_timeout_seconds: 5.0
 
 risk_control:
   daily_loss_cutoff_pct: 0.05
@@ -133,6 +135,7 @@ cta:
   near_miss_report_interval_seconds: 3600.0
   near_miss_report_max_samples: 5
   polling_interval_seconds: 60
+  cta_assist_trim_ratio: 0.25
   # 兼容旧配置，留空即可
   timeframe: "15m"
   fast_ema: 7
@@ -184,3 +187,7 @@ grid:
   hard_stop_buffer_ratio: 0.01
   max_directional_exposure_ratio: 0.50
   websocket_order_sync_enabled: true
+  heavy_inventory_threshold: 0.60
+  active_hedge_mode_enabled: false
+  active_hedge_min_inventory_ratio: 0.45
+  active_hedge_requires_cta_position: true

@@ -856,7 +856,7 @@ class CTARobot(BaseStrategyRobot):
         if grid_state.hedge_assist_target_side not in {self.position.side, None}:
             return None
 
-        reduction_ratio = 0.5 if grid_state.inventory_bias_ratio >= 1.0 else 0.25
+        reduction_ratio = float(getattr(self.config, "cta_assist_trim_ratio", 0.25))
         reduction_size = self.position.remaining_size * reduction_ratio
         if reduction_size <= 0:
             return None

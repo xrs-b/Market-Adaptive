@@ -1579,6 +1579,108 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(self.client.market_orders[0]["side"], "sell")
         self.assertLess(cta.position.remaining_size if cta.position is not None else 0.0, 0.2)
 
+    def test_grid_heavy_inventory_threshold_is_configurable(self) -> None:
+        runtime_context = StrategyRuntimeContext()
+        grid = GridRobot(
+            self.client,
+            self.database,
+            GridConfig(symbol="BTC/USDT", heavy_inventory_threshold=0.80),
+            self.execution,
+            runtime_context=runtime_context,
+        )
+        self.client.positions = [
+            {"contracts": 0.8, "side": "long", "notional": 80.0, "info": {"posSide": "long"}},
+            {"contracts": 0.2, "side": "short", "notional": 20.0, "info": {"posSide": "short"}},
+        ]
+        grid_context = grid._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=1)
+        assert grid_context is not None
+
+        grid._publish_grid_risk(grid_context)
+        grid_state = runtime_context.snapshot_grid()
+
+        self.assertAlmostEqual(grid_state.inventory_bias_ratio, 0.75)
+        self.assertFalse(grid_state.heavy_inventory)
+        self.assertFalse(grid_state.hedge_assist_requested)
+
+    def test_cta_assist_trim_ratio_is_configurable(self) -> None:
+        runtime_context = StrategyRuntimeContext()
+        grid = GridRobot(self.client, self.database, self.grid_config, self.execution, runtime_context=runtime_context)
+        cta = CTARobot(
+            self.client,
+            self.database,
+            CTAConfig(symbol="BTC/USDT", cta_assist_trim_ratio=0.40),
+            self.execution,
+            runtime_context=runtime_context,
+        )
+        cta.position = ManagedPosition(
+            side="long",
+            entry_price=100.0,
+            initial_size=0.2,
+            remaining_size=0.2,
+            stop_price=95.0,
+            best_price=100.0,
+            atr_value=2.0,
+            stop_distance=5.0,
+        )
+        self.client.positions = [{"contracts": 0.8, "side": "long", "notional": 80.0, "info": {"posSide": "long"}}]
+        grid_context = grid._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=1)
+        assert grid_context is not None
+
+        grid._publish_grid_risk(grid_context)
+        action = cta._apply_runtime_coordination(
+            TrendSignal(direction=1, raw_direction=1, major_direction=1, major_bias_score=2.0, price=100.0, atr=2.0)
+        )
+
+        self.assertIsNotNone(action)
+        self.assertAlmostEqual(self.client.market_orders[0]["amount"], 0.08)
+        self.assertAlmostEqual(cta.position.remaining_size if cta.position is not None else 0.0, 0.12)
+
+    def test_active_hedge_mode_is_opt_in_and_requires_cta_position_by_default(self) -> None:
+        runtime_context = StrategyRuntimeContext()
+        runtime_context.publish_cta_state(
+            symbol="BTC/USDT",
+            side=None,
+            size=0.0,
+            trend_strength=0.0,
+            strong_trend=False,
+        )
+        grid = GridRobot(
+            self.client,
+            self.database,
+            GridConfig(
+                symbol="BTC/USDT",
+                heavy_inventory_threshold=0.80,
+                active_hedge_mode_enabled=True,
+                active_hedge_min_inventory_ratio=0.70,
+            ),
+            self.execution,
+            runtime_context=runtime_context,
+        )
+        self.client.positions = [
+            {"contracts": 0.8, "side": "long", "notional": 80.0, "info": {"posSide": "long"}},
+            {"contracts": 0.2, "side": "short", "notional": 20.0, "info": {"posSide": "short"}},
+        ]
+        grid_context = grid._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=1)
+        assert grid_context is not None
+
+        grid._publish_grid_risk(grid_context)
+        without_cta_position = runtime_context.snapshot_grid()
+        self.assertFalse(without_cta_position.heavy_inventory)
+        self.assertFalse(without_cta_position.hedge_assist_requested)
+
+        runtime_context.publish_cta_state(
+            symbol="BTC/USDT",
+            side="long",
+            size=0.2,
+            trend_strength=1.0,
+            strong_trend=False,
+        )
+        grid._publish_grid_risk(grid_context)
+        with_cta_position = runtime_context.snapshot_grid()
+        self.assertFalse(with_cta_position.heavy_inventory)
+        self.assertTrue(with_cta_position.hedge_assist_requested)
+        self.assertEqual(with_cta_position.hedge_assist_reason, "grid_active_hedge:long")
+
     def test_grid_robot_liquidation_trim_targets_worst_farthest_position_first(self) -> None:
         self.client.last_price = 100.0
         self.client.positions = [

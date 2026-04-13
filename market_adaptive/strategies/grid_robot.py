@@ -1756,7 +1756,16 @@ class GridRobot(BaseStrategyRobot):
         if heavier_notional > 1e-12:
             inventory_bias_side = "long" if long_notional >= short_notional else "short"
         inventory_bias_ratio = 0.0 if heavier_notional <= 1e-12 else (heavier_notional - lighter_notional) / heavier_notional
-        heavy_inventory = heavier_notional > 1e-12 and inventory_bias_ratio >= 0.60
+        heavy_inventory_threshold = float(getattr(self.config, "heavy_inventory_threshold", 0.60))
+        heavy_inventory = heavier_notional > 1e-12 and inventory_bias_ratio >= heavy_inventory_threshold
+        hedge_assist_requested = False
+        hedge_assist_reason = None
+        if heavy_inventory and inventory_bias_side is not None:
+            hedge_assist_requested = True
+            hedge_assist_reason = f"grid_inventory_heavy:{inventory_bias_side}"
+        elif self._active_hedge_assist_allowed(inventory_bias_side, inventory_bias_ratio):
+            hedge_assist_requested = True
+            hedge_assist_reason = f"grid_active_hedge:{inventory_bias_side}"
         net_position_size = self._fetch_net_position_size()
         if self.runtime_context is not None:
             self.runtime_context.publish_grid_inventory(
@@ -1765,8 +1774,8 @@ class GridRobot(BaseStrategyRobot):
                 inventory_bias_side=inventory_bias_side,
                 inventory_bias_ratio=inventory_bias_ratio,
                 heavy_inventory=heavy_inventory,
-                hedge_assist_requested=heavy_inventory,
-                hedge_assist_reason=(f"grid_inventory_heavy:{inventory_bias_side}" if heavy_inventory and inventory_bias_side is not None else None),
+                hedge_assist_requested=hedge_assist_requested,
+                hedge_assist_reason=hedge_assist_reason,
                 hedge_assist_target_side=inventory_bias_side,
             )
         if self.risk_manager is None:
@@ -1779,6 +1788,23 @@ class GridRobot(BaseStrategyRobot):
                 upper_bound=context.upper_bound,
             )
         )
+
+    def _active_hedge_assist_allowed(self, inventory_bias_side: str | None, inventory_bias_ratio: float) -> bool:
+        if inventory_bias_side is None:
+            return False
+        if not bool(getattr(self.config, "active_hedge_mode_enabled", False)):
+            return False
+        min_ratio = float(getattr(self.config, "active_hedge_min_inventory_ratio", 0.45))
+        if inventory_bias_ratio < min_ratio:
+            return False
+        if self.runtime_context is None:
+            return True
+        if not bool(getattr(self.config, "active_hedge_requires_cta_position", True)):
+            return True
+        cta_state = self.runtime_context.snapshot_cta()
+        if cta_state.symbol not in {"", self.symbol}:
+            return False
+        return cta_state.side == inventory_bias_side and float(cta_state.size) > 0.0
 
     def _prune_layer_state(self, active_anchor_timestamp_ms: int) -> None:
         active_prefix = f"{active_anchor_timestamp_ms}:"
