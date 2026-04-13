@@ -183,6 +183,8 @@ class CTAConfig:
     heartbeat_interval_seconds: float = 300.0
     near_miss_report_interval_seconds: float = 3600.0
     near_miss_report_max_samples: int = 5
+    early_bullish_starter_fraction: float = 0.30
+    early_bullish_lower_band_slope_atr_threshold: float = 0.05
     fast_ema: int = 7  # legacy compatibility
     slow_ema: int = 21  # legacy compatibility
     polling_interval_seconds: int = 60
@@ -509,6 +511,10 @@ def load_config(config_path: str | Path) -> AppConfig:
         heartbeat_interval_seconds=float(cta_payload.get("heartbeat_interval_seconds", 300.0)),
         near_miss_report_interval_seconds=float(cta_payload.get("near_miss_report_interval_seconds", 3600.0)),
         near_miss_report_max_samples=int(cta_payload.get("near_miss_report_max_samples", 5)),
+        early_bullish_starter_fraction=float(cta_payload.get("early_bullish_starter_fraction", 0.30)),
+        early_bullish_lower_band_slope_atr_threshold=float(
+            cta_payload.get("early_bullish_lower_band_slope_atr_threshold", 0.05)
+        ),
         fast_ema=int(cta_payload.get("fast_ema", 7)),
         slow_ema=int(cta_payload.get("slow_ema", 21)),
         polling_interval_seconds=int(cta_payload.get("polling_interval_seconds", 60)),

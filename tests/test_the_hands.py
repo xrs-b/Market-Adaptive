@@ -505,6 +505,61 @@ class TheHandsTests(unittest.TestCase):
         self.assertIsNotNone(robot.position)
         self.assertAlmostEqual(robot.position.risk_percent, self.cta_config.boosted_risk_percent_per_trade)
 
+    def test_cta_robot_scales_early_bullish_starter_position_to_thirty_percent_of_normal_size(self) -> None:
+        self._insert_status("trend")
+        major_closes = [200 - 0.5 * index for index in range(60)]
+        swing_closes = [100.0 + 0.2 * index for index in range(60)]
+        execution_closes = [100.0] * 59 + [106.0]
+        self._set_ohlcv("4h", major_closes, 14_400_000)
+        self._set_ohlcv("1h", swing_closes, 3_600_000)
+        self._set_ohlcv("15m", execution_closes, 900_000)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=10)
+
+        import pandas as pd
+        major_supertrend = pd.DataFrame(
+            {
+                "direction": [-1] * 60,
+                "lower_band": [100.0] * 58 + [104.0, 104.3],
+                "upper_band": [110.0] * 60,
+                "supertrend": [110.0] * 60,
+                "atr": [2.0] * 60,
+            }
+        )
+        swing_supertrend = pd.DataFrame(
+            {
+                "direction": [-1] * 59 + [1],
+                "lower_band": [99.0] * 60,
+                "upper_band": [109.0] * 60,
+                "supertrend": [99.0] * 60,
+                "atr": [1.0] * 60,
+            }
+        )
+
+        expected_normal_amount = robot._normalize_order_amount(robot._calculate_entry_amount(106.0))
+
+        with (
+            patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj),
+            patch(
+                "market_adaptive.strategies.mtf_engine.compute_supertrend",
+                side_effect=[major_supertrend, swing_supertrend, swing_supertrend],
+            ),
+        ):
+            result = robot.run()
+
+        self.assertEqual(result.action, "cta:open_long_limit")
+        self.assertEqual(len(self.client.limit_orders), 1)
+        self.assertEqual(self.client.limit_orders[0]["params"]["executionMode"], "early_bullish_starter")
+        self.assertAlmostEqual(
+            self.client.limit_orders[0]["amount"],
+            expected_normal_amount * self.cta_config.early_bullish_starter_fraction,
+        )
+        self.assertIsNotNone(robot.position)
+        self.assertAlmostEqual(
+            robot.position.initial_size,
+            expected_normal_amount * self.cta_config.early_bullish_starter_fraction,
+        )
+
     def test_cta_robot_blocks_entry_when_order_flow_imbalance_fails_last_second_confirmation(self) -> None:
         self._insert_status("trend")
         self._load_bullish_signal(lower_last_close=100.0)

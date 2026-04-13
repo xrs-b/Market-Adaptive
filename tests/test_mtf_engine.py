@@ -102,6 +102,88 @@ class MTFEngineTests(unittest.TestCase):
         self.assertTrue(signal.fully_aligned)
         self.assertIn("scale-in allowed before breakout", signal.execution_trigger.reason)
 
+    def test_engine_flags_early_bullish_when_fast_supertrend_leads_and_major_lower_band_flattens(self) -> None:
+        self._set_ohlcv("4h", [200 - 0.5 * index for index in range(60)], 14_400_000)
+        self._set_ohlcv("1h", [100.0 + 0.2 * index for index in range(60)], 3_600_000)
+        self._set_ohlcv("15m", [100.0] * 59 + [106.0], 900_000)
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=10)
+
+        import pandas as pd
+        major_supertrend = pd.DataFrame(
+            {
+                "direction": [-1] * 60,
+                "lower_band": [100.0] * 58 + [104.0, 104.3],
+                "upper_band": [110.0] * 60,
+                "supertrend": [110.0] * 60,
+                "atr": [2.0] * 60,
+            }
+        )
+        swing_supertrend = pd.DataFrame(
+            {
+                "direction": [-1] * 59 + [1],
+                "lower_band": [99.0] * 60,
+                "upper_band": [109.0] * 60,
+                "supertrend": [99.0] * 60,
+                "atr": [1.0] * 60,
+            }
+        )
+
+        with (
+            patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj),
+            patch(
+                "market_adaptive.strategies.mtf_engine.compute_supertrend",
+                side_effect=[major_supertrend, swing_supertrend, swing_supertrend],
+            ),
+        ):
+            signal = self.engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.early_bullish)
+        self.assertTrue(signal.fully_aligned)
+        self.assertEqual(signal.execution_entry_mode, "early_bullish_starter_limit")
+        self.assertAlmostEqual(signal.entry_size_multiplier, self.config.early_bullish_starter_fraction)
+
+    def test_engine_does_not_flag_early_bullish_when_major_lower_band_slope_is_still_too_negative(self) -> None:
+        self._set_ohlcv("4h", [200 - 0.5 * index for index in range(60)], 14_400_000)
+        self._set_ohlcv("1h", [100.0 + 0.2 * index for index in range(60)], 3_600_000)
+        self._set_ohlcv("15m", [100.0] * 59 + [106.0], 900_000)
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=10)
+
+        import pandas as pd
+        major_supertrend = pd.DataFrame(
+            {
+                "direction": [-1] * 60,
+                "lower_band": [100.0] * 58 + [104.0, 103.8],
+                "upper_band": [110.0] * 60,
+                "supertrend": [110.0] * 60,
+                "atr": [2.0] * 60,
+            }
+        )
+        swing_supertrend = pd.DataFrame(
+            {
+                "direction": [-1] * 59 + [1],
+                "lower_band": [99.0] * 60,
+                "upper_band": [109.0] * 60,
+                "supertrend": [99.0] * 60,
+                "atr": [1.0] * 60,
+            }
+        )
+
+        with (
+            patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj),
+            patch(
+                "market_adaptive.strategies.mtf_engine.compute_supertrend",
+                side_effect=[major_supertrend, swing_supertrend, swing_supertrend],
+            ),
+        ):
+            signal = self.engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertFalse(signal.early_bullish)
+        self.assertNotEqual(signal.execution_entry_mode, "early_bullish_starter_limit")
+
     def test_engine_dynamic_rsi_ready_on_positive_slope_above_45(self) -> None:
         self._set_ohlcv("4h", [220 - 2.0 * (59 - index) for index in range(60)], 14_400_000)
         swing_closes = [100.0] * 45 + [99.8, 99.6, 99.7, 99.9, 100.2, 100.6, 101.1, 101.7, 102.4, 103.2, 104.1, 105.0, 106.0, 107.0, 108.0]

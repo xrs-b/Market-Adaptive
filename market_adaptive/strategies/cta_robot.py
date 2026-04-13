@@ -29,6 +29,8 @@ class TrendSignal:
     major_direction: int
     major_bias_score: float = 0.0
     weak_bull_bias: bool = False
+    early_bullish: bool = False
+    entry_size_multiplier: float = 1.0
     swing_rsi: float = 0.0
     swing_rsi_slope: float = 0.0
     bullish_score: float = 0.0
@@ -308,6 +310,8 @@ class CTARobot(BaseStrategyRobot):
             major_direction=mtf_signal.major_direction,
             major_bias_score=mtf_signal.major_bias_score,
             weak_bull_bias=mtf_signal.weak_bull_bias,
+            early_bullish=mtf_signal.early_bullish,
+            entry_size_multiplier=mtf_signal.entry_size_multiplier,
             swing_rsi=mtf_signal.swing_rsi,
             swing_rsi_slope=mtf_signal.swing_rsi_slope,
             bullish_score=mtf_signal.bullish_score,
@@ -341,6 +345,8 @@ class CTARobot(BaseStrategyRobot):
             "bullish_threshold": float(signal.bullish_threshold),
             "major_bias_score": float(signal.major_bias_score),
             "weak_bull_bias": bool(signal.weak_bull_bias),
+            "early_bullish": bool(signal.early_bullish),
+            "entry_size_multiplier": float(signal.entry_size_multiplier),
             "swing_rsi": float(signal.swing_rsi),
             "swing_rsi_slope": float(signal.swing_rsi_slope),
             "raw_direction": int(signal.raw_direction),
@@ -437,6 +443,7 @@ class CTARobot(BaseStrategyRobot):
         amount = self._calculate_entry_amount(signal.price)
         sentiment_halved = False
 
+        amount *= max(0.0, min(1.0, float(signal.entry_size_multiplier)))
         amount = self._normalize_order_amount(amount)
         if amount <= 0:
             self._publish_risk_profile(None)
@@ -457,7 +464,7 @@ class CTARobot(BaseStrategyRobot):
         order_flow_assessment: OrderFlowAssessment | None = None
         if side == "buy" and self.config.order_flow_enabled:
             order_flow_assessment = self.order_flow_sentinel.assess_entry(self.symbol, side, amount)
-            if not order_flow_assessment.entry_allowed and signal.execution_entry_mode != "weak_bull_scale_in_limit":
+            if not order_flow_assessment.entry_allowed and signal.execution_entry_mode not in {"weak_bull_scale_in_limit", "early_bullish_starter_limit"}:
                 self._publish_risk_profile(None)
                 return "cta:order_flow_blocked"
 
@@ -614,6 +621,8 @@ class CTARobot(BaseStrategyRobot):
             params = {"timeInForce": "IOC", "executionMode": "aggressive_limit"}
             if execution_entry_mode == "weak_bull_scale_in_limit":
                 params["executionMode"] = "weak_bull_scale_in"
+            elif execution_entry_mode == "early_bullish_starter_limit":
+                params["executionMode"] = "early_bullish_starter"
             elif order_flow_assessment is not None:
                 params["orderFlowImbalance"] = round(order_flow_assessment.imbalance_ratio, 4)
             response = self.client.place_limit_order(self.symbol, side, amount, aggressive_limit_price, params=params)
@@ -680,7 +689,7 @@ class CTARobot(BaseStrategyRobot):
         order_flow_assessment: OrderFlowAssessment | None,
         execution_entry_mode: str,
     ) -> float | None:
-        if execution_entry_mode == "weak_bull_scale_in_limit":
+        if execution_entry_mode in {"weak_bull_scale_in_limit", "early_bullish_starter_limit"}:
             reference_price = self._resolve_book_reference_price(side=side)
         else:
             if (

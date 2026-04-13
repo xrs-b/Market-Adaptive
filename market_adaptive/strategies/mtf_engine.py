@@ -41,6 +41,8 @@ class MTFSignal:
     major_direction: int
     major_bias_score: float
     weak_bull_bias: bool
+    early_bullish: bool
+    entry_size_multiplier: float
     swing_rsi: float
     swing_rsi_slope: float
     bullish_score: float
@@ -119,6 +121,27 @@ class MultiTimeframeSignalEngine:
             return float(self.config.dynamic_rsi_rebound_score), rsi_slope
         return 0.0, rsi_slope
 
+    def _resolve_early_bullish(self, major_frame: pd.DataFrame, swing_frame: pd.DataFrame, major_supertrend: pd.DataFrame) -> bool:
+        if len(major_frame) < 2 or len(swing_frame) < 1 or len(major_supertrend) < 2:
+            return False
+
+        swing_supertrend = compute_supertrend(
+            swing_frame,
+            length=self.config.supertrend_period,
+            multiplier=self.config.supertrend_multiplier,
+        )
+        swing_direction = int(swing_supertrend["direction"].iloc[-1])
+        if swing_direction <= 0:
+            return False
+
+        current_price = float(swing_frame["close"].iloc[-1])
+        current_lower_band = float(major_supertrend["lower_band"].iloc[-1])
+        previous_lower_band = float(major_supertrend["lower_band"].iloc[-2])
+        current_atr = float(major_supertrend["atr"].iloc[-1])
+        lower_band_slope = current_lower_band - previous_lower_band
+        minimum_slope = -float(self.config.early_bullish_lower_band_slope_atr_threshold) * max(current_atr, 1e-12)
+        return current_price > current_lower_band and lower_band_slope >= minimum_slope
+
     def build_signal(self) -> MTFSignal | None:
         execution_ohlcv = self.client.fetch_ohlcv(
             symbol=self.config.symbol,
@@ -169,6 +192,7 @@ class MultiTimeframeSignalEngine:
 
         major_direction = int(major_supertrend["direction"].iloc[-1])
         current_swing_rsi = float(swing_rsi.iloc[-1])
+        early_bullish = major_direction <= 0 and self._resolve_early_bullish(major_frame, swing_frame, major_supertrend)
         major_bias_score, weak_bull_bias = self._resolve_major_bias(major_direction, swing_frame)
         swing_score, swing_rsi_slope = self._resolve_swing_readiness(swing_rsi)
         bullish_score = major_bias_score + swing_score
@@ -234,10 +258,16 @@ class MultiTimeframeSignalEngine:
             )
 
         execution_entry_mode = "breakout_confirmed"
+        entry_size_multiplier = 1.0
         if weak_bull_bias:
             execution_entry_mode = "weak_bull_scale_in_limit"
+        if early_bullish:
+            execution_entry_mode = "early_bullish_starter_limit"
+            entry_size_multiplier = max(0.0, min(1.0, float(self.config.early_bullish_starter_fraction)))
 
-        if bullish_memory_active and prior_high_break:
+        if early_bullish:
+            reason = "early_bullish: 1h supertrend bullish + price above 4h lower band + 4h lower band slope flattening"
+        elif bullish_memory_active and prior_high_break:
             reason = f"Triggered via Memory Window: KDJ crossed {bullish_cross_bars_ago} bars ago + Price Breakout NOW"
         elif weak_bull_bias and bullish_memory_active:
             reason = f"Weak bull bias active: KDJ crossed {bullish_cross_bars_ago} bars ago + scale-in allowed before breakout"
@@ -263,9 +293,11 @@ class MultiTimeframeSignalEngine:
             prior_low=prior_low,
             reason=reason,
         )
-        fully_aligned = bullish_ready and (
-            (weak_bull_bias and bullish_memory_active)
-            or (not weak_bull_bias and prior_high_break and (bullish_memory_active or kdj_golden_cross))
+        fully_aligned = early_bullish or (
+            bullish_ready and (
+                (weak_bull_bias and bullish_memory_active)
+                or (not weak_bull_bias and prior_high_break and (bullish_memory_active or kdj_golden_cross))
+            )
         )
 
         return MTFSignal(
@@ -275,6 +307,8 @@ class MultiTimeframeSignalEngine:
             major_direction=major_direction,
             major_bias_score=major_bias_score,
             weak_bull_bias=weak_bull_bias,
+            early_bullish=early_bullish,
+            entry_size_multiplier=entry_size_multiplier,
             swing_rsi=current_swing_rsi,
             swing_rsi_slope=swing_rsi_slope,
             bullish_score=bullish_score,
