@@ -113,6 +113,7 @@ class MarketOracleConfig:
     trend_di_gap_threshold: float = 8.0
     relaxed_trend_adx_buffer: float = 3.0
     relaxed_trend_di_gap_bonus: float = 1.0
+    bb_width_contraction_tolerance_ratio: float = 0.03
     range_breakout_bb_width_threshold: float = 0.10
     range_breakout_volatility_threshold: float = 0.015
     prefer_closed_higher_timeframe_candles: bool = True
@@ -517,6 +518,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         trend_di_gap_threshold=float(market_oracle_payload.get("trend_di_gap_threshold", 8)),
         relaxed_trend_adx_buffer=float(market_oracle_payload.get("relaxed_trend_adx_buffer", 3.0)),
         relaxed_trend_di_gap_bonus=float(market_oracle_payload.get("relaxed_trend_di_gap_bonus", 1.0)),
+        bb_width_contraction_tolerance_ratio=float(market_oracle_payload.get("bb_width_contraction_tolerance_ratio", 0.03)),
         range_breakout_bb_width_threshold=float(market_oracle_payload.get("range_breakout_bb_width_threshold", 0.10)),
         range_breakout_volatility_threshold=float(market_oracle_payload.get("range_breakout_volatility_threshold", 0.015)),
         prefer_closed_higher_timeframe_candles=bool(market_oracle_payload.get("prefer_closed_higher_timeframe_candles", True)),

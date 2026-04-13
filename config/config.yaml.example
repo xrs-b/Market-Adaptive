@@ -63,6 +63,7 @@ market_oracle:
   trend_di_gap_threshold: 8
   relaxed_trend_adx_buffer: 1.5
   relaxed_trend_di_gap_bonus: 1.0
+  bb_width_contraction_tolerance_ratio: 0.03
   impulse_timeframe: "1m"
   prefer_closed_impulse_candles: false
   impulse_consecutive_bars: 3

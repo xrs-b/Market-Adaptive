@@ -22,6 +22,7 @@ from market_adaptive.indicators import (
     compute_volume_profile,
     ohlcv_to_dataframe,
 )
+from market_adaptive.oracles.market_oracle import indicator_confirms_trend
 from market_adaptive.strategies.order_flow_sentinel import OrderFlowSentinel
 from market_adaptive.timeframe_utils import maybe_use_closed_candles
 
@@ -113,10 +114,7 @@ def replay_cta(config_path: Path, hours: int) -> dict:
 
         high_snapshot = compute_indicator_snapshot(oracle_high_slice.tail(oracle.lookback_limit).values.tolist(), adx_length=oracle.adx_length, bb_length=oracle.bb_length, bb_std=oracle.bb_std)
         low_snapshot = compute_indicator_snapshot(oracle_low_slice.tail(oracle.lookback_limit).values.tolist(), adx_length=oracle.adx_length, bb_length=oracle.bb_length, bb_std=oracle.bb_std)
-        trend_detected = any(
-            i.adx_value > float(oracle.trend_adx_threshold) and i.adx_rising and i.di_gap >= float(oracle.trend_di_gap_threshold) and i.bb_width_expanding
-            for i in (high_snapshot, low_snapshot)
-        )
+        trend_detected = any(indicator_confirms_trend(i, oracle) for i in (high_snapshot, low_snapshot))
         market_regime = "trend" if trend_detected else "sideways"
         passed_market_regime = market_regime in {"trend", "trend_impulse"}
 

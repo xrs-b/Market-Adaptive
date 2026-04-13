@@ -29,6 +29,7 @@ class MarketAdaptiveBootstrapTests(unittest.TestCase):
         self.assertEqual(config.grid.fee_rate, 0.001)
         self.assertEqual(config.market_oracle.relaxed_trend_adx_buffer, 1.5)
         self.assertEqual(config.market_oracle.relaxed_trend_di_gap_bonus, 1.0)
+        self.assertEqual(config.market_oracle.bb_width_contraction_tolerance_ratio, 0.03)
         self.assertEqual(config.grid.sideways_neutral_bias_threshold, 0.12)
         self.assertEqual(config.grid.bearish_directional_bias_threshold, 0.30)
         self.assertEqual(config.grid.liquidation_protection_ratio, 0.05)

@@ -9,7 +9,7 @@ from market_adaptive.config import MarketOracleConfig
 from market_adaptive.coordination import StrategyRuntimeContext
 from market_adaptive.db import DatabaseInitializer, MarketStatusRecord
 from market_adaptive.indicators import IndicatorSnapshot
-from market_adaptive.oracles.market_oracle import MarketOracle, MultiTimeframeMarketSnapshot
+from market_adaptive.oracles.market_oracle import MarketOracle, MultiTimeframeMarketSnapshot, bb_width_supports_trend
 
 
 class DummyOKXClient:
@@ -65,6 +65,29 @@ class MarketOracleTests(unittest.TestCase):
             lower=IndicatorSnapshot(18.0, 17.0, 16.0, 22.0, 19.0, 0.08, 0.07, 0.01),
         )
         self.assertEqual(oracle.determine_status(snapshot), "trend")
+
+    def test_determine_status_accepts_small_bb_width_contraction_within_tolerance(self) -> None:
+        oracle = MarketOracle(client=DummyOKXClient({"1m": self._impulse_payload(False)}), database=self.database, config=self.config)
+        snapshot = self._snapshot(
+            higher=IndicatorSnapshot(30.0, 28.0, 26.0, 32.0, 18.0, 0.0975, 0.10, 0.02),
+            lower=IndicatorSnapshot(18.0, 17.0, 16.0, 22.0, 19.0, 0.08, 0.07, 0.01),
+        )
+        self.assertEqual(oracle.determine_status(snapshot), "trend")
+
+    def test_determine_status_rejects_bb_width_contraction_beyond_tolerance(self) -> None:
+        oracle = MarketOracle(client=DummyOKXClient({"1m": self._impulse_payload(False)}), database=self.database, config=self.config)
+        snapshot = self._snapshot(
+            higher=IndicatorSnapshot(30.0, 28.0, 26.0, 32.0, 18.0, 0.095, 0.10, 0.02),
+            lower=IndicatorSnapshot(17.0, 16.0, 15.0, 21.0, 19.0, 0.07, 0.07, 0.01),
+        )
+        self.assertEqual(oracle.determine_status(snapshot), "sideways")
+
+    def test_bb_width_supports_trend_respects_configured_tolerance(self) -> None:
+        indicator = IndicatorSnapshot(30.0, 28.0, 26.0, 32.0, 18.0, 0.097, 0.10, 0.02)
+        self.assertTrue(bb_width_supports_trend(indicator, self.config))
+
+        strict_config = MarketOracleConfig(bb_width_contraction_tolerance_ratio=0.02)
+        self.assertFalse(bb_width_supports_trend(indicator, strict_config))
 
     def test_determine_status_returns_sideways_when_both_adx_are_low(self) -> None:
         oracle = MarketOracle(client=DummyOKXClient({"1m": self._impulse_payload(False)}), database=self.database, config=self.config)

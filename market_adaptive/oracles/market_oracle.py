@@ -42,34 +42,45 @@ class MultiTimeframeMarketSnapshot:
         return float(weighted_gap / strongest_adx)
 
 
+def bb_width_supports_trend(indicator: IndicatorSnapshot, config: MarketOracleConfig) -> bool:
+    tolerance_ratio = max(0.0, float(getattr(config, "bb_width_contraction_tolerance_ratio", 0.0)))
+    min_allowed_width = indicator.bb_width_previous * (1.0 - tolerance_ratio)
+    return bool(indicator.bb_width >= min_allowed_width)
+
+
+def indicator_confirms_trend(indicator: IndicatorSnapshot, config: MarketOracleConfig) -> bool:
+    trend_adx_threshold = float(config.trend_adx_threshold)
+    trend_di_gap_threshold = float(config.trend_di_gap_threshold)
+    relaxed_trend_adx_floor = trend_adx_threshold - max(0.0, float(getattr(config, "relaxed_trend_adx_buffer", 0.0)))
+    relaxed_di_gap_threshold = trend_di_gap_threshold + max(0.0, float(getattr(config, "relaxed_trend_di_gap_bonus", 0.0)))
+    bb_width_ok = bb_width_supports_trend(indicator, config)
+
+    strict_trend = (
+        indicator.adx_value > trend_adx_threshold
+        and indicator.adx_rising
+        and indicator.di_gap >= trend_di_gap_threshold
+        and bb_width_ok
+    )
+    relaxed_trend = (
+        indicator.adx_value >= relaxed_trend_adx_floor
+        and indicator.adx_value >= indicator.adx_previous
+        and indicator.di_gap >= relaxed_di_gap_threshold
+        and bb_width_ok
+    )
+    return bool(strict_trend or relaxed_trend)
+
+
 class MarketOracle:
     """Market sensing bot that classifies BTC/USDT as trend, impulse, or active range breakout."""
 
     def _indicator_confirms_trend(self, indicator: IndicatorSnapshot) -> bool:
-        trend_adx_threshold = float(self.config.trend_adx_threshold)
-        trend_di_gap_threshold = float(self.config.trend_di_gap_threshold)
-        relaxed_trend_adx_floor = trend_adx_threshold - max(0.0, float(getattr(self.config, "relaxed_trend_adx_buffer", 0.0)))
-        relaxed_di_gap_threshold = trend_di_gap_threshold + max(0.0, float(getattr(self.config, "relaxed_trend_di_gap_bonus", 0.0)))
-
-        strict_trend = (
-            indicator.adx_value > trend_adx_threshold
-            and indicator.adx_rising
-            and indicator.di_gap >= trend_di_gap_threshold
-            and indicator.bb_width_expanding
-        )
-        relaxed_trend = (
-            indicator.adx_value >= relaxed_trend_adx_floor
-            and indicator.adx_value >= indicator.adx_previous
-            and indicator.di_gap >= relaxed_di_gap_threshold
-            and indicator.bb_width_expanding
-        )
-        return bool(strict_trend or relaxed_trend)
+        return indicator_confirms_trend(indicator, self.config)
 
     def _indicator_summary(self, label: str, indicator: IndicatorSnapshot) -> str:
         return (
             f"{label}: adx={indicator.adx_value:.2f} adx_trend={indicator.adx_trend_label} "
             f"di_gap={indicator.di_gap:.2f} (+di={indicator.plus_di_value:.2f} -di={indicator.minus_di_value:.2f}) "
-            f"bb_expand={indicator.bb_width_expanding}"
+            f"bb_expand={indicator.bb_width_expanding} bb_width={indicator.bb_width:.4f}/{indicator.bb_width_previous:.4f}"
         )
 
     def __init__(
