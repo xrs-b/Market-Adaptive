@@ -105,6 +105,23 @@ class MarketOracleTests(unittest.TestCase):
         )
         self.assertEqual(oracle.determine_status(snapshot), "sideways")
 
+    def test_snapshot_exposes_positive_bias_value_when_di_favors_bulls(self) -> None:
+        snapshot = self._snapshot(
+            higher=IndicatorSnapshot(30.0, 28.0, 26.0, 36.0, 18.0, 0.12, 0.09, 0.02),
+            lower=IndicatorSnapshot(20.0, 19.0, 18.0, 28.0, 20.0, 0.08, 0.07, 0.01),
+        )
+
+        self.assertGreater(snapshot.bias_value, 0.0)
+
+    def test_current_bias_value_uses_latest_snapshot(self) -> None:
+        oracle = MarketOracle(client=DummyOKXClient({"1m": self._impulse_payload(False)}), database=self.database, config=self.config)
+        oracle._last_snapshot = self._snapshot(
+            higher=IndicatorSnapshot(30.0, 28.0, 26.0, 34.0, 20.0, 0.12, 0.09, 0.02),
+            lower=IndicatorSnapshot(22.0, 21.0, 20.0, 27.0, 21.0, 0.08, 0.07, 0.01),
+        )
+
+        self.assertGreater(oracle.current_bias_value(), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

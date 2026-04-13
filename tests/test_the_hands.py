@@ -814,6 +814,83 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(len(context.buy_prices), 4)
         self.assertEqual(len(context.sell_prices), 4)
 
+    def test_grid_robot_bullish_bias_skews_to_six_buy_two_sell_levels(self) -> None:
+        class BullishOracle:
+            def current_bias_value(self) -> float:
+                return 0.5
+
+            def get_hourly_atr(self, symbol: str) -> float:
+                del symbol
+                return 10.0
+
+        robot = GridRobot(
+            self.client,
+            self.database,
+            self.grid_config,
+            self.execution,
+            market_oracle=BullishOracle(),
+            use_dynamic_range=False,
+        )
+
+        context = robot._refresh_grid_context(100.0)
+
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertEqual(len(context.buy_prices), 6)
+        self.assertEqual(len(context.sell_prices), 2)
+
+    def test_grid_robot_bullish_bias_uses_asymmetric_spacing(self) -> None:
+        class BullishOracle:
+            def current_bias_value(self) -> float:
+                return 0.5
+
+            def get_hourly_atr(self, symbol: str) -> float:
+                del symbol
+                return 10.0
+
+        robot = GridRobot(
+            self.client,
+            self.database,
+            self.grid_config,
+            self.execution,
+            market_oracle=BullishOracle(),
+            use_dynamic_range=False,
+        )
+
+        context = robot._refresh_grid_context(100.0)
+
+        self.assertIsNotNone(context)
+        assert context is not None
+        buy_spacing = round(context.buy_prices[1] - context.buy_prices[0], 6)
+        sell_spacing = round(context.sell_prices[1] - context.sell_prices[0], 6)
+        self.assertLess(abs(buy_spacing), 0.8)
+        self.assertGreater(abs(sell_spacing), 1.2)
+        self.assertLess(abs(buy_spacing), abs(sell_spacing))
+
+    def test_grid_robot_bullish_bias_shifts_center_upward_by_atr_ratio(self) -> None:
+        class BullishOracle:
+            def current_bias_value(self) -> float:
+                return 0.5
+
+            def get_hourly_atr(self, symbol: str) -> float:
+                del symbol
+                return 10.0
+
+        robot = GridRobot(
+            self.client,
+            self.database,
+            self.grid_config,
+            self.execution,
+            market_oracle=BullishOracle(),
+            use_dynamic_range=False,
+        )
+
+        context = robot._refresh_grid_context(100.0)
+
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertAlmostEqual(context.center_price, 100.02)
+
     def test_grid_robot_allocates_forty_percent_equity_across_levels(self) -> None:
         robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
 

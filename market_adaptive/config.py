@@ -306,6 +306,13 @@ class GridConfig:
     atr_multiplier: float = 2.5
     min_spacing_ratio: float = 0.008
     fee_rate: float = 0.001
+    directional_skew_enabled: bool = True
+    directional_bias_threshold: float = 0.20
+    bullish_buy_levels: int = 6
+    bullish_sell_levels: int = 2
+    bullish_buy_spacing_ratio: float = 0.005
+    bullish_sell_spacing_ratio: float = 0.012
+    bullish_center_shift_atr_ratio: float = 0.002
     atr_regrid_change_ratio: float = 0.10
     regrid_trigger_atr_ratio: float = 0.30
     min_grid_lifetime_seconds: int = 300
@@ -316,6 +323,20 @@ class GridConfig:
     hard_stop_buffer_ratio: float = 0.01
     max_directional_exposure_ratio: float = 0.50
     websocket_order_sync_enabled: bool = True
+
+    def __post_init__(self) -> None:
+        self.levels = max(2, int(self.levels))
+        self.bullish_buy_levels = max(1, int(self.bullish_buy_levels))
+        self.bullish_sell_levels = max(1, int(self.bullish_sell_levels))
+        total_bullish_levels = self.bullish_buy_levels + self.bullish_sell_levels
+        if total_bullish_levels != self.levels:
+            scale = self.levels / max(total_bullish_levels, 1)
+            self.bullish_buy_levels = max(1, int(round(self.bullish_buy_levels * scale)))
+            self.bullish_sell_levels = max(1, self.levels - self.bullish_buy_levels)
+        self.directional_bias_threshold = max(0.0, float(self.directional_bias_threshold))
+        self.bullish_buy_spacing_ratio = max(0.0, float(self.bullish_buy_spacing_ratio))
+        self.bullish_sell_spacing_ratio = max(0.0, float(self.bullish_sell_spacing_ratio))
+        self.bullish_center_shift_atr_ratio = max(0.0, float(self.bullish_center_shift_atr_ratio))
 
 
 @dataclass
@@ -544,6 +565,13 @@ def load_config(config_path: str | Path) -> AppConfig:
         atr_multiplier=float(grid_payload.get("atr_multiplier", 2.5)),
         min_spacing_ratio=float(grid_payload.get("min_spacing_ratio", 0.008)),
         fee_rate=float(grid_payload.get("fee_rate", 0.001)),
+        directional_skew_enabled=bool(grid_payload.get("directional_skew_enabled", True)),
+        directional_bias_threshold=float(grid_payload.get("directional_bias_threshold", 0.20)),
+        bullish_buy_levels=int(grid_payload.get("bullish_buy_levels", 6)),
+        bullish_sell_levels=int(grid_payload.get("bullish_sell_levels", 2)),
+        bullish_buy_spacing_ratio=float(grid_payload.get("bullish_buy_spacing_ratio", 0.005)),
+        bullish_sell_spacing_ratio=float(grid_payload.get("bullish_sell_spacing_ratio", 0.012)),
+        bullish_center_shift_atr_ratio=float(grid_payload.get("bullish_center_shift_atr_ratio", 0.002)),
         atr_regrid_change_ratio=float(grid_payload.get("atr_regrid_change_ratio", 0.10)),
         regrid_trigger_atr_ratio=float(grid_payload.get("regrid_trigger_atr_ratio", 0.30)),
         min_grid_lifetime_seconds=int(grid_payload.get("min_grid_lifetime_seconds", 300)),

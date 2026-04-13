@@ -43,6 +43,20 @@ class GridOrderPlan:
 
 
 @dataclass
+class GridBiasProfile:
+    bias_value: float = 0.0
+    center_shift: float = 0.0
+    buy_levels: int = 0
+    sell_levels: int = 0
+    buy_spacing_ratio: float = 0.0
+    sell_spacing_ratio: float = 0.0
+
+    @property
+    def bullish(self) -> bool:
+        return self.bias_value > 0
+
+
+@dataclass
 class GridPositionCandidate:
     side: str
     pos_side: str
@@ -528,19 +542,20 @@ class GridRobot(BaseStrategyRobot):
         atr_value = self._resolve_atr_value()
         anchor_timestamp_ms = int(anchor_timestamp_ms if anchor_timestamp_ms is not None else self.now_provider().timestamp() * 1000)
         self._reset_ws_order_cycle(anchor_timestamp_ms)
+        bias_profile = self._resolve_grid_bias_profile(atr_value)
 
         if self.use_dynamic_range and atr_value > 0:
-            lower_bound = current_price - self.atr_multiplier * atr_value
-            upper_bound = current_price + self.atr_multiplier * atr_value
-            center_price = current_price
+            center_price = current_price + bias_profile.center_shift
+            lower_bound = center_price - self.atr_multiplier * atr_value
+            upper_bound = center_price + self.atr_multiplier * atr_value
         else:
             lower_bound, upper_bound = self._resolve_active_bounds(current_price=current_price)
-            center_price = current_price
+            center_price = current_price + bias_profile.center_shift
 
         if lower_bound <= 0 or upper_bound <= 0 or lower_bound >= upper_bound:
             return self._fallback_context(current_price, atr_value)
 
-        buy_prices, sell_prices = self._derive_layer_prices(lower_bound, center_price, upper_bound)
+        buy_prices, sell_prices = self._derive_layer_prices(lower_bound, center_price, upper_bound, bias_profile=bias_profile)
         context = GridContext(
             anchor_timestamp_ms=anchor_timestamp_ms,
             lower_bound=lower_bound,
@@ -602,6 +617,36 @@ class GridRobot(BaseStrategyRobot):
         if atr_series.empty:
             return 0.0
         return float(atr_series.iloc[-1])
+
+    def _resolve_bias_value(self) -> float:
+        if self.market_oracle is not None and hasattr(self.market_oracle, "current_bias_value"):
+            try:
+                return float(self.market_oracle.current_bias_value())
+            except Exception:
+                return 0.0
+        return 0.0
+
+    def _resolve_grid_bias_profile(self, atr_value: float) -> GridBiasProfile:
+        if not bool(getattr(self.config, "directional_skew_enabled", True)):
+            return GridBiasProfile()
+        bias_value = self._resolve_bias_value()
+        threshold = float(getattr(self.config, "directional_bias_threshold", 0.20))
+        if bias_value <= threshold:
+            return GridBiasProfile(bias_value=bias_value)
+        buy_levels = max(1, int(getattr(self.config, "bullish_buy_levels", max(1, self.config.levels - 2))))
+        sell_levels = max(1, int(getattr(self.config, "bullish_sell_levels", max(1, self.config.levels - buy_levels))))
+        total_levels = buy_levels + sell_levels
+        if total_levels != self.config.levels:
+            buy_levels = max(1, min(self.config.levels - 1, buy_levels))
+            sell_levels = max(1, self.config.levels - buy_levels)
+        return GridBiasProfile(
+            bias_value=bias_value,
+            center_shift=max(0.0, atr_value * float(getattr(self.config, "bullish_center_shift_atr_ratio", 0.0))),
+            buy_levels=buy_levels,
+            sell_levels=sell_levels,
+            buy_spacing_ratio=max(0.0, float(getattr(self.config, "bullish_buy_spacing_ratio", 0.0))),
+            sell_spacing_ratio=max(0.0, float(getattr(self.config, "bullish_sell_spacing_ratio", 0.0))),
+        )
 
     def _should_regrid(self, context: GridContext, current_price: float, now: datetime) -> bool:
         previous = self._cached_context
@@ -1194,17 +1239,35 @@ class GridRobot(BaseStrategyRobot):
                 status or "unknown",
             )
 
-    def _derive_layer_prices(self, lower_bound: float, anchor_price: float, upper_bound: float) -> tuple[list[float], list[float]]:
-        buy_levels = max(1, self.config.levels // 2)
-        sell_levels = max(1, self.config.levels - buy_levels)
+    def _derive_layer_prices(
+        self,
+        lower_bound: float,
+        anchor_price: float,
+        upper_bound: float,
+        *,
+        bias_profile: GridBiasProfile | None = None,
+    ) -> tuple[list[float], list[float]]:
+        bias_profile = bias_profile or GridBiasProfile()
+        if bias_profile.bullish and bias_profile.buy_levels > 0 and bias_profile.sell_levels > 0:
+            buy_levels = bias_profile.buy_levels
+            sell_levels = bias_profile.sell_levels
+        else:
+            buy_levels = max(1, self.config.levels // 2)
+            sell_levels = max(1, self.config.levels - buy_levels)
+
         min_spacing_ratio = max(0.0, float(getattr(self.config, "min_spacing_ratio", 0.0)))
 
         buy_step = max(1e-12, (anchor_price - lower_bound) / buy_levels)
         sell_step = max(1e-12, (upper_bound - anchor_price) / sell_levels)
-        minimum_step = max(anchor_price * min_spacing_ratio, 1e-12)
+        buy_spacing_ratio = bias_profile.buy_spacing_ratio if bias_profile.bullish else 0.0
+        sell_spacing_ratio = bias_profile.sell_spacing_ratio if bias_profile.bullish else 0.0
+        effective_buy_spacing_ratio = buy_spacing_ratio if buy_spacing_ratio > 0 else min_spacing_ratio
+        effective_sell_spacing_ratio = sell_spacing_ratio if sell_spacing_ratio > 0 else min_spacing_ratio
+        minimum_buy_step = max(anchor_price * effective_buy_spacing_ratio, 1e-12)
+        minimum_sell_step = max(anchor_price * effective_sell_spacing_ratio, 1e-12)
 
-        buy_step = max(buy_step, minimum_step)
-        sell_step = max(sell_step, minimum_step)
+        buy_step = max(buy_step, minimum_buy_step)
+        sell_step = max(sell_step, minimum_sell_step)
 
         buy_prices = [anchor_price - buy_step * (index + 1) for index in range(buy_levels)]
         sell_prices = [anchor_price + sell_step * (index + 1) for index in range(sell_levels)]

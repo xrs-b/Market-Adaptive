@@ -32,6 +32,13 @@ class MultiTimeframeMarketSnapshot:
     def strongest_volatility(self) -> float:
         return max(self.higher.volatility, self.lower.volatility)
 
+    @property
+    def bias_value(self) -> float:
+        weighted_gap = (self.higher.plus_di_value - self.higher.minus_di_value) * 0.6
+        weighted_gap += (self.lower.plus_di_value - self.lower.minus_di_value) * 0.4
+        strongest_adx = max(self.strongest_adx, 1.0)
+        return float(weighted_gap / strongest_adx)
+
 
 class MarketOracle:
     """Market sensing bot that classifies BTC/USDT as trend or sideways."""
@@ -187,6 +194,13 @@ class MarketOracle:
             self._last_snapshot = snapshot
         assert self._last_snapshot is not None
         return self._last_snapshot.higher.adx_trend_label
+
+    def current_bias_value(self) -> float:
+        if self._last_snapshot is None:
+            snapshot = self.collect_market_snapshot()
+            self._last_snapshot = snapshot
+        assert self._last_snapshot is not None
+        return float(self._last_snapshot.bias_value)
 
     def run_forever(self) -> None:
         logger.info(
