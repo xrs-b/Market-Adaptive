@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from market_adaptive.config import CTAConfig, ExecutionConfig
+from market_adaptive.coordination import StrategyRuntimeContext
 from market_adaptive.indicators import OBVConfirmationSnapshot
 from market_adaptive.strategies.cta_robot import CTANearMissSample, CTARobot, TrendSignal
 
@@ -146,6 +147,47 @@ class CTAHeartbeatTests(unittest.TestCase):
         self.assertAlmostEqual(report["samples"][0].obv_threshold, 1.0)
         self.assertAlmostEqual(report["samples"][0].obv_gap, 0.15)
         self.assertEqual(robot._near_miss_samples, [])
+
+    def test_requests_urgent_wakeup_on_major_direction_and_bullish_ready_transition(self) -> None:
+        runtime_context = StrategyRuntimeContext()
+        robot = CTARobot(
+            client=DummyClient(),
+            database=DummyDatabase(),
+            config=CTAConfig(symbol="BTC/USDT"),
+            execution_config=ExecutionConfig(),
+            notifier=None,
+            risk_manager=None,
+            sentiment_analyst=None,
+            runtime_context=runtime_context,
+        )
+        baseline = TrendSignal(
+            direction=0,
+            raw_direction=0,
+            major_direction=-1,
+            bullish_ready=False,
+            obv_confirmation=OBVConfirmationSnapshot(0.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+            price=100.0,
+            atr=1.0,
+            risk_percent=0.02,
+        )
+        shifted = TrendSignal(
+            direction=0,
+            raw_direction=0,
+            major_direction=1,
+            bullish_ready=True,
+            obv_confirmation=OBVConfirmationSnapshot(0.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+            price=100.0,
+            atr=1.0,
+            risk_percent=0.02,
+        )
+
+        robot._request_urgent_wakeup_on_signal_transition(baseline)
+        self.assertFalse(runtime_context.urgent_wakeup.is_set())
+
+        robot._request_urgent_wakeup_on_signal_transition(shifted)
+        self.assertTrue(runtime_context.urgent_wakeup.is_set())
+        self.assertIn("cta_major_direction:-1->1", runtime_context.urgent_wakeup_reason or "")
+        self.assertIn("cta_bullish_ready:False->True", runtime_context.urgent_wakeup_reason or "")
 
     def test_ignores_non_obv_or_not_ready_near_miss_candidates(self) -> None:
         robot = CTARobot(

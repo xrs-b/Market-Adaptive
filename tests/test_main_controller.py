@@ -21,7 +21,7 @@ from market_adaptive.config import (
     RuntimeConfig,
     SentimentConfig,
 )
-from market_adaptive.controller import MainController
+from market_adaptive.controller import MainController, WorkerSpec
 from market_adaptive.db import DatabaseInitializer, SystemStateRecord
 from market_adaptive.testsupport import DummyNotifier
 
@@ -191,6 +191,41 @@ class MainControllerTests(unittest.TestCase):
         self.assertEqual(snapshot.side, "long")
         self.assertTrue(snapshot.strong_trend)
         self.assertAlmostEqual(snapshot.size, 1.2)
+
+    def test_worker_loop_wakes_early_on_runtime_urgent_event(self) -> None:
+        controller = MainController(self.config, self.database)
+        run_markers: list[float] = []
+        completed = threading.Event()
+
+        def target() -> str:
+            run_markers.append(threading.get_native_id())
+            if len(run_markers) >= 2:
+                completed.set()
+                controller.stop_event.set()
+            return "ok"
+
+        worker = threading.Thread(
+            target=controller._worker_loop,
+            args=(WorkerSpec("test", 10, target),),
+            daemon=True,
+        )
+        worker.start()
+        self.assertFalse(completed.wait(0.2))
+
+        controller.runtime_context.request_urgent_wakeup("test_wakeup")
+
+        self.assertTrue(completed.wait(1.0))
+        worker.join(timeout=1.0)
+        self.assertGreaterEqual(len(run_markers), 2)
+
+    def test_stop_requests_urgent_wakeup_for_waiting_workers(self) -> None:
+        controller = MainController(self.config, self.database)
+
+        controller.stop()
+
+        self.assertTrue(controller.stop_event.is_set())
+        self.assertTrue(controller.runtime_context.urgent_wakeup.is_set())
+        self.assertEqual(controller.runtime_context.urgent_wakeup_reason, "controller_stop")
 
 if __name__ == "__main__":
     unittest.main()

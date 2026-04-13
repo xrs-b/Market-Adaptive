@@ -52,7 +52,13 @@ class MainController:
         self.shutdown_client = OKXClient(config.okx, config.execution)
 
         self.sentiment_analyst = SentimentAnalyst(self.cta_client, config.sentiment)
-        self.market_oracle = MarketOracle(self.oracle_client, database, config.market_oracle, notifier=self.notifier)
+        self.market_oracle = MarketOracle(
+            self.oracle_client,
+            database,
+            config.market_oracle,
+            notifier=self.notifier,
+            runtime_context=self.runtime_context,
+        )
         self.cta_robot = CTARobot(
             self.cta_client,
             database,
@@ -147,6 +153,7 @@ class MainController:
 
     def stop(self) -> None:
         self.stop_event.set()
+        self.runtime_context.request_urgent_wakeup("controller_stop")
 
     def monitor_risk_once(self):
         return self.risk_control.monitor_once()
@@ -239,8 +246,18 @@ class MainController:
                     )
             elapsed = time.time() - started_at
             sleep_seconds = max(0.0, spec.interval_seconds - elapsed)
-            if self.stop_event.wait(sleep_seconds):
+            wake_event = self.runtime_context.urgent_wakeup
+            wake_event.wait(sleep_seconds)
+            if self.stop_event.is_set():
                 break
+            if wake_event.is_set():
+                logger.info(
+                    "Urgent wakeup consumed | reason=%s requested_at=%.6f",
+                    self.runtime_context.urgent_wakeup_reason,
+                    self.runtime_context.urgent_wakeup_requested_at,
+                )
+                self.runtime_context.clear_urgent_wakeup()
+                continue
         logger.info("Worker exiting")
 
     def _shutdown(self) -> None:
@@ -272,4 +289,4 @@ class MainController:
 
     def _handle_signal(self, signum: int, _frame: object) -> None:
         self.logger.info("Signal received: %s | requesting graceful shutdown", signum)
-        self.stop_event.set()
+        self.stop()

@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from market_adaptive.config import MarketOracleConfig
+from market_adaptive.coordination import StrategyRuntimeContext
 from market_adaptive.db import DatabaseInitializer, MarketStatusRecord
 from market_adaptive.indicators import IndicatorSnapshot
 from market_adaptive.oracles.market_oracle import MarketOracle, MultiTimeframeMarketSnapshot
@@ -121,6 +122,37 @@ class MarketOracleTests(unittest.TestCase):
         )
 
         self.assertGreater(oracle.current_bias_value(), 0.0)
+
+    def test_run_once_publishes_market_state_and_requests_wakeup_on_regime_change(self) -> None:
+        runtime_context = StrategyRuntimeContext()
+        self.database.insert_market_status(
+            MarketStatusRecord(
+                timestamp="2026-04-10T03:00:00+00:00",
+                symbol="BTC/USDT",
+                status="sideways",
+                adx_value=15.0,
+                volatility=0.01,
+            )
+        )
+        oracle = MarketOracle(
+            client=DummyOKXClient({"1h": self._impulse_payload(False), "15m": self._impulse_payload(False), "1m": self._impulse_payload(False)}),
+            database=self.database,
+            config=self.config,
+            runtime_context=runtime_context,
+        )
+        oracle.collect_market_snapshot = lambda: self._snapshot(
+            higher=IndicatorSnapshot(30.0, 28.0, 26.0, 36.0, 18.0, 0.12, 0.09, 0.02),
+            lower=IndicatorSnapshot(20.0, 19.0, 18.0, 28.0, 20.0, 0.08, 0.07, 0.01),
+        )
+
+        record = oracle.run_once()
+
+        market_state = runtime_context.snapshot_market()
+        self.assertEqual(record.status, "trend")
+        self.assertEqual(market_state.regime, "trend")
+        self.assertGreater(market_state.bias_value, 0.0)
+        self.assertTrue(runtime_context.urgent_wakeup.is_set())
+        self.assertEqual(runtime_context.urgent_wakeup_reason, "market_regime_change:sideways->trend")
 
 
 if __name__ == "__main__":

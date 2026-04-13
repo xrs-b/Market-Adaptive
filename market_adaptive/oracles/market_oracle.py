@@ -10,6 +10,7 @@ import ccxt
 
 from market_adaptive.clients.okx_client import OKXClient
 from market_adaptive.config import MarketOracleConfig
+from market_adaptive.coordination import StrategyRuntimeContext
 from market_adaptive.db import DatabaseInitializer, MarketStatusRecord
 from market_adaptive.indicators import IndicatorSnapshot, compute_atr, compute_indicator_snapshot, ohlcv_to_dataframe
 
@@ -64,11 +65,13 @@ class MarketOracle:
         database: DatabaseInitializer,
         config: MarketOracleConfig,
         notifier: Any | None = None,
+        runtime_context: StrategyRuntimeContext | None = None,
     ) -> None:
         self.client = client
         self.database = database
         self.config = config
         self.notifier = notifier
+        self.runtime_context = runtime_context
         self._last_snapshot: MultiTimeframeMarketSnapshot | None = None
 
     def collect_market_snapshot(self) -> MultiTimeframeMarketSnapshot:
@@ -153,6 +156,12 @@ class MarketOracle:
         snapshot = self.collect_market_snapshot()
         self._last_snapshot = snapshot
         status = self.determine_status(snapshot)
+        if self.runtime_context is not None:
+            self.runtime_context.publish_market_state(
+                symbol=snapshot.symbol,
+                regime=status,
+                bias_value=snapshot.bias_value,
+            )
         record = MarketStatusRecord(
             timestamp=datetime.now(timezone.utc).isoformat(),
             symbol=snapshot.symbol,
@@ -174,6 +183,10 @@ class MarketOracle:
             record.volatility,
         )
         if previous is None or previous.status != record.status:
+            if self.runtime_context is not None:
+                self.runtime_context.request_urgent_wakeup(
+                    f"market_regime_change:{previous.status if previous else 'none'}->{record.status}"
+                )
             self._notify_status_change(previous.status if previous else None, record)
         return record
 

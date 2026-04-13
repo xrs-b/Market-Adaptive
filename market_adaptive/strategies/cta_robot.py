@@ -168,6 +168,8 @@ class CTARobot(BaseStrategyRobot):
         self.mtf_engine = MultiTimeframeSignalEngine(client, config)
         self.order_flow_sentinel = OrderFlowSentinel(client, config)
         self._last_signal_heartbeat_at = 0.0
+        self._last_major_direction: int | None = None
+        self._last_bullish_ready: bool | None = None
         self._near_miss_samples: list[CTANearMissSample] = []
         self._near_miss_window_started_at: float | None = None
         self._last_near_miss_report_at = 0.0
@@ -226,6 +228,7 @@ class CTARobot(BaseStrategyRobot):
             return "cta:insufficient_data"
 
         self._maybe_log_signal_heartbeat(signal)
+        self._request_urgent_wakeup_on_signal_transition(signal)
         self._collect_near_miss_sample(signal)
         self._maybe_flush_near_miss_report()
 
@@ -389,6 +392,24 @@ class CTARobot(BaseStrategyRobot):
 
     def _is_execution_near_ready(self, signal: TrendSignal) -> bool:
         return bool(signal.bullish_ready and (signal.raw_direction > 0 or signal.execution_memory_active or signal.execution_breakout))
+
+    def _request_urgent_wakeup_on_signal_transition(self, signal: TrendSignal) -> None:
+        if self.runtime_context is None:
+            self._last_major_direction = int(signal.major_direction)
+            self._last_bullish_ready = bool(signal.bullish_ready)
+            return
+
+        reasons: list[str] = []
+        major_direction = int(signal.major_direction)
+        bullish_ready = bool(signal.bullish_ready)
+        if self._last_major_direction is not None and self._last_major_direction != major_direction:
+            reasons.append(f"cta_major_direction:{self._last_major_direction}->{major_direction}")
+        if self._last_bullish_ready is not None and self._last_bullish_ready != bullish_ready:
+            reasons.append(f"cta_bullish_ready:{self._last_bullish_ready}->{bullish_ready}")
+        self._last_major_direction = major_direction
+        self._last_bullish_ready = bullish_ready
+        if reasons:
+            self.runtime_context.request_urgent_wakeup("|".join(reasons))
 
     def _collect_near_miss_sample(self, signal: TrendSignal) -> None:
         if signal.long_setup_reason != "obv_strength_not_confirmed":
@@ -863,6 +884,8 @@ class CTARobot(BaseStrategyRobot):
                 size=current_size,
                 trend_strength=trend_strength,
                 strong_trend=strong_trend,
+                major_direction=int(signal.major_direction) if signal is not None else 0,
+                bullish_ready=bool(signal.bullish_ready) if signal is not None else False,
             )
         if self.risk_manager is None:
             return
