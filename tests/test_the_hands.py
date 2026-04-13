@@ -796,17 +796,17 @@ class TheHandsTests(unittest.TestCase):
         self.assertGreater(min(sell_orders, key=lambda order: order["price"])["price"], 100.0)
 
 
-    def test_grid_robot_enforces_minimum_spacing_floor_of_point_eight_percent(self) -> None:
+    def test_grid_robot_enforces_minimum_spacing_floor_of_point_seven_percent(self) -> None:
         robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
 
         buy_prices, sell_prices = robot._derive_layer_prices(99.5, 100.0, 100.5)
 
         self.assertEqual(len(buy_prices), 4)
         self.assertEqual(len(sell_prices), 4)
-        self.assertAlmostEqual(buy_prices[0], 99.2)
-        self.assertAlmostEqual(sell_prices[0], 100.8)
-        self.assertAlmostEqual(buy_prices[0] - buy_prices[1], 0.8)
-        self.assertAlmostEqual(sell_prices[1] - sell_prices[0], 0.8)
+        self.assertAlmostEqual(buy_prices[0], 99.3)
+        self.assertAlmostEqual(sell_prices[0], 100.7)
+        self.assertAlmostEqual(buy_prices[0] - buy_prices[1], 0.7)
+        self.assertAlmostEqual(sell_prices[1] - sell_prices[0], 0.7)
 
     def test_grid_robot_uses_eight_level_grid_by_default(self) -> None:
         self.assertEqual(self.grid_config.levels, 8)
@@ -865,8 +865,8 @@ class TheHandsTests(unittest.TestCase):
         assert context is not None
         buy_spacing = round(context.buy_prices[1] - context.buy_prices[0], 6)
         sell_spacing = round(context.sell_prices[1] - context.sell_prices[0], 6)
-        self.assertLess(abs(buy_spacing), 0.8)
-        self.assertGreater(abs(sell_spacing), 1.2)
+        self.assertLess(abs(buy_spacing), 0.7)
+        self.assertGreater(abs(sell_spacing), 1.0)
         self.assertLess(abs(buy_spacing), abs(sell_spacing))
 
     def test_grid_robot_bullish_bias_shifts_center_upward_by_atr_ratio(self) -> None:
@@ -891,7 +891,7 @@ class TheHandsTests(unittest.TestCase):
 
         self.assertIsNotNone(context)
         assert context is not None
-        self.assertAlmostEqual(context.center_price, 100.02)
+        self.assertAlmostEqual(context.center_price, 100.03)
 
     def test_grid_robot_bearish_bias_skews_to_six_sell_two_buy_levels(self) -> None:
         class BearishOracle:
@@ -942,8 +942,8 @@ class TheHandsTests(unittest.TestCase):
         assert context is not None
         buy_spacing = round(context.buy_prices[1] - context.buy_prices[0], 6)
         sell_spacing = round(context.sell_prices[1] - context.sell_prices[0], 6)
-        self.assertGreater(abs(buy_spacing), 1.2)
-        self.assertLess(abs(sell_spacing), 0.8)
+        self.assertGreater(abs(buy_spacing), 1.0)
+        self.assertLess(abs(sell_spacing), 0.7)
         self.assertGreater(abs(buy_spacing), abs(sell_spacing))
 
     def test_grid_robot_bearish_bias_shifts_center_downward_by_atr_ratio(self) -> None:
@@ -968,7 +968,7 @@ class TheHandsTests(unittest.TestCase):
 
         self.assertIsNotNone(context)
         assert context is not None
-        self.assertAlmostEqual(context.center_price, 99.98)
+        self.assertAlmostEqual(context.center_price, 99.97)
 
     def test_grid_robot_allocates_forty_percent_equity_across_levels(self) -> None:
         robot = GridRobot(self.client, self.database, self.grid_config, self.execution, use_dynamic_range=False)
@@ -1036,7 +1036,7 @@ class TheHandsTests(unittest.TestCase):
 
         self.assertFalse(robot._should_regrid(robot._fallback_context(105.0, atr_value=10.0), 105.0, now))
 
-    def test_grid_robot_requires_center_shift_beyond_point_four_atr(self) -> None:
+    def test_grid_robot_regrids_once_center_shift_exceeds_configured_point_three_atr(self) -> None:
         self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
         now = datetime(2026, 4, 11, 10, 10, tzinfo=timezone.utc)
         robot = GridRobot(self.client, self.database, self.grid_config, self.execution, now_provider=lambda: now, use_dynamic_range=False)
@@ -1044,8 +1044,8 @@ class TheHandsTests(unittest.TestCase):
         robot.last_regrid_time = now.timestamp() - 301
         robot.current_grid_center = 100.0
 
-        self.assertFalse(robot._should_regrid(robot._fallback_context(103.9, atr_value=10.0), 103.9, now))
-        self.assertTrue(robot._should_regrid(robot._fallback_context(104.1, atr_value=10.0), 104.1, now))
+        self.assertFalse(robot._should_regrid(robot._fallback_context(102.9, atr_value=10.0), 102.9, now))
+        self.assertTrue(robot._should_regrid(robot._fallback_context(103.1, atr_value=10.0), 103.1, now))
 
     def test_grid_robot_cools_down_repeatedly_triggered_buy_layer(self) -> None:
         self._insert_status("sideways")

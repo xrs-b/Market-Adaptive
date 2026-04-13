@@ -61,6 +61,8 @@ market_oracle:
   trend_adx_threshold: 25
   sideways_adx_threshold: 20
   trend_di_gap_threshold: 8
+  relaxed_trend_adx_buffer: 1.5
+  relaxed_trend_di_gap_bonus: 1.0
   impulse_timeframe: "1m"
   prefer_closed_impulse_candles: false
   impulse_consecutive_bars: 3
@@ -177,7 +179,7 @@ grid:
   atr_timeframe: "1h"
   atr_period: 14
   atr_multiplier: 2.5
-  min_spacing_ratio: 0.008
+  min_spacing_ratio: 0.007
   fee_rate: 0.001
   directional_skew_enabled: true
   directional_bias_threshold: 0.20
@@ -185,14 +187,14 @@ grid:
   bearish_directional_bias_threshold: 0.30
   bullish_buy_levels: 6
   bullish_sell_levels: 2
-  bullish_buy_spacing_ratio: 0.005
-  bullish_sell_spacing_ratio: 0.012
-  bullish_center_shift_atr_ratio: 0.002
+  bullish_buy_spacing_ratio: 0.0045
+  bullish_sell_spacing_ratio: 0.011
+  bullish_center_shift_atr_ratio: 0.003
   bearish_buy_levels: 2
   bearish_sell_levels: 6
-  bearish_buy_spacing_ratio: 0.012
-  bearish_sell_spacing_ratio: 0.005
-  bearish_center_shift_atr_ratio: 0.002
+  bearish_buy_spacing_ratio: 0.011
+  bearish_sell_spacing_ratio: 0.0045
+  bearish_center_shift_atr_ratio: 0.003
   atr_regrid_change_ratio: 0.10
   regrid_trigger_atr_ratio: 0.30
   min_grid_lifetime_seconds: 300

@@ -58,6 +58,14 @@ class MarketOracleTests(unittest.TestCase):
         )
         self.assertEqual(oracle.determine_status(snapshot), "trend")
 
+    def test_determine_status_accepts_moderately_relaxed_adx_when_di_gap_is_stronger(self) -> None:
+        oracle = MarketOracle(client=DummyOKXClient({"1m": self._impulse_payload(False)}), database=self.database, config=self.config)
+        snapshot = self._snapshot(
+            higher=IndicatorSnapshot(24.0, 23.8, 23.0, 35.0, 24.0, 0.12, 0.09, 0.02),
+            lower=IndicatorSnapshot(18.0, 17.0, 16.0, 22.0, 19.0, 0.08, 0.07, 0.01),
+        )
+        self.assertEqual(oracle.determine_status(snapshot), "trend")
+
     def test_determine_status_returns_sideways_when_both_adx_are_low(self) -> None:
         oracle = MarketOracle(client=DummyOKXClient({"1m": self._impulse_payload(False)}), database=self.database, config=self.config)
         snapshot = self._snapshot(

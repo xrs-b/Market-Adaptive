@@ -46,12 +46,24 @@ class MarketOracle:
     """Market sensing bot that classifies BTC/USDT as trend or sideways."""
 
     def _indicator_confirms_trend(self, indicator: IndicatorSnapshot) -> bool:
-        return bool(
-            indicator.adx_value > float(self.config.trend_adx_threshold)
+        trend_adx_threshold = float(self.config.trend_adx_threshold)
+        trend_di_gap_threshold = float(self.config.trend_di_gap_threshold)
+        relaxed_trend_adx_floor = trend_adx_threshold - max(0.0, float(getattr(self.config, "relaxed_trend_adx_buffer", 0.0)))
+        relaxed_di_gap_threshold = trend_di_gap_threshold + max(0.0, float(getattr(self.config, "relaxed_trend_di_gap_bonus", 0.0)))
+
+        strict_trend = (
+            indicator.adx_value > trend_adx_threshold
             and indicator.adx_rising
-            and indicator.di_gap >= float(self.config.trend_di_gap_threshold)
+            and indicator.di_gap >= trend_di_gap_threshold
             and indicator.bb_width_expanding
         )
+        relaxed_trend = (
+            indicator.adx_value >= relaxed_trend_adx_floor
+            and indicator.adx_value >= indicator.adx_previous
+            and indicator.di_gap >= relaxed_di_gap_threshold
+            and indicator.bb_width_expanding
+        )
+        return bool(strict_trend or relaxed_trend)
 
     def _indicator_summary(self, label: str, indicator: IndicatorSnapshot) -> str:
         return (

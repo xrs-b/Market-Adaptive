@@ -711,7 +711,7 @@ class GridRobot(BaseStrategyRobot):
             logger.info("[grid_robot] _should_regrid: invalid previous center, returning True")
             return True
 
-        trigger_distance = max(0.0, float(context.atr_value) * 0.4)
+        trigger_distance = max(0.0, float(context.atr_value) * float(getattr(self.config, "regrid_trigger_atr_ratio", 0.30)))
         if trigger_distance <= 0:
             trigger_distance = abs(grid_center) * 0.001
         price_shift = abs(current_price - grid_center)
