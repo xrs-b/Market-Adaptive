@@ -137,9 +137,9 @@ class MTFEngineTests(unittest.TestCase):
         assert signal is not None
         self.assertLess(signal.major_direction, 0)
         self.assertTrue(signal.weak_bull_bias)
-        self.assertTrue(signal.bullish_ready)
+        self.assertFalse(signal.bullish_ready)
         self.assertEqual(signal.execution_entry_mode, "weak_bull_scale_in_limit")
-        self.assertTrue(signal.fully_aligned)
+        self.assertFalse(signal.fully_aligned)
         self.assertIn("scale-in allowed before breakout", signal.execution_trigger.reason)
 
     def test_engine_flags_early_bullish_when_fast_supertrend_leads_and_major_lower_band_flattens(self) -> None:
@@ -273,7 +273,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertIsNotNone(signal)
         assert signal is not None
         self.assertLess(signal.major_direction, 0)
-        self.assertEqual(signal.bullish_score, 65.0)
+        self.assertGreaterEqual(signal.bullish_score, signal.bullish_threshold)
         self.assertTrue(signal.bullish_ready)
         self.assertFalse(signal.fully_aligned)
         self.assertIn("磁吸力预判：距离轨道", signal.execution_trigger.reason)
@@ -309,10 +309,10 @@ class MTFEngineTests(unittest.TestCase):
         assert signal is not None
         self.assertTrue(signal.weak_bull_bias)
         self.assertTrue(signal.execution_trigger.bullish_memory_active)
-        self.assertEqual(signal.bullish_score, 55.0)
-        self.assertTrue(signal.bullish_ready)
+        self.assertEqual(signal.bullish_score, 40.0)
+        self.assertFalse(signal.bullish_ready)
         joined_logs = "\n".join(logs.output)
-        self.assertIn("Bullish Score: 55/55 [4H: 0, 1H: 30, Magnet: 0, RSI: 15, KDJ: 10]", joined_logs)
+        self.assertIn("Bullish Score: 40/55 [4H: 0, 1H: 30, Magnet: 0, RSI: 0, KDJ: 10]", joined_logs)
 
     def test_engine_scores_bullish_ready_before_major_flip_via_swing_and_memory_stack(self) -> None:
         config = CTAConfig(
@@ -341,9 +341,76 @@ class MTFEngineTests(unittest.TestCase):
         self.assertIsNotNone(signal)
         assert signal is not None
         self.assertLess(signal.major_direction, 0)
-        self.assertEqual(signal.bullish_score, 55.0)
+        self.assertEqual(signal.bullish_score, 40.0)
+        self.assertFalse(signal.bullish_ready)
+        self.assertFalse(signal.fully_aligned)
+
+    def test_engine_scores_structural_recovery_proxy_when_price_reclaims_ema21_and_slope_is_flat_up(self) -> None:
+        self._set_ohlcv("4h", [200 - 0.5 * index for index in range(60)], 14_400_000)
+        swing_closes = [100.0] * 30 + [99.5, 99.2, 99.0, 99.1, 99.3, 99.6, 100.0, 100.4, 100.9, 101.4, 101.9, 102.3, 102.7, 103.0, 103.3, 103.6, 103.9, 104.2, 104.5, 104.8, 105.0, 105.2, 105.4, 105.6, 105.8, 106.0, 106.2, 106.4, 106.6, 106.8]
+        self._set_ohlcv("1h", swing_closes, 3_600_000)
+        self._set_ohlcv("15m", [100.0] * 60, 900_000)
+
+        import pandas as pd
+        major_supertrend = pd.DataFrame({"direction": [-1] * 60, "lower_band": [100.0] * 60, "upper_band": [180.0] * 60, "supertrend": [180.0] * 60, "atr": [2.0] * 60})
+        swing_supertrend = pd.DataFrame({"direction": [-1] * 60, "lower_band": [95.0] * 60, "upper_band": [120.0] * 60, "supertrend": [120.0] * 60, "atr": [1.0] * 60})
+        with patch("market_adaptive.strategies.mtf_engine.compute_supertrend", side_effect=[major_supertrend, swing_supertrend, swing_supertrend]):
+            signal = self.engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.weak_bull_bias)
+        self.assertEqual(signal.bullish_score, float(self.config.weak_bull_bias_score + self.config.dynamic_rsi_trend_score))
+
+    def test_engine_scores_momentum_recovery_proxy_when_rsi_reclaims_its_sma_above_40(self) -> None:
+        self._set_ohlcv("4h", [200 - 0.5 * index for index in range(60)], 14_400_000)
+        swing_closes = [100.0] * 45 + [99.8, 99.6, 99.7, 99.9, 100.2, 100.6, 101.1, 101.7, 102.4, 103.2, 104.1, 105.0, 106.0, 107.0, 108.0]
+        self._set_ohlcv("1h", swing_closes, 3_600_000)
+        self._set_ohlcv("15m", [100.0] * 60, 900_000)
+
+        import pandas as pd
+        major_supertrend = pd.DataFrame({"direction": [-1] * 60, "lower_band": [100.0] * 60, "upper_band": [180.0] * 60, "supertrend": [180.0] * 60, "atr": [2.0] * 60})
+        swing_supertrend = pd.DataFrame({"direction": [-1] * 60, "lower_band": [95.0] * 60, "upper_band": [120.0] * 60, "supertrend": [120.0] * 60, "atr": [1.0] * 60})
+        with patch("market_adaptive.strategies.mtf_engine.compute_supertrend", side_effect=[major_supertrend, swing_supertrend, swing_supertrend]):
+            signal = self.engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertGreater(signal.swing_rsi, 40.0)
+        self.assertGreater(signal.swing_rsi_slope, 0.0)
+        self.assertEqual(signal.bullish_score, float(self.config.weak_bull_bias_score + self.config.dynamic_rsi_trend_score))
+
+    def test_engine_unlocks_bullish_ready_via_recovery_proxies_plus_magnetism(self) -> None:
+        config = CTAConfig(
+            symbol="BTC/USDT",
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            prefer_closed_major_timeframe_candles=False,
+            prefer_closed_swing_timeframe_candles=False,
+            weak_bull_bias_score=22.0,
+            dynamic_rsi_trend_score=15.0,
+            magnetism_score_bonus=20.0,
+            bullish_ready_score_threshold=55.0,
+            magnetism_obv_zscore_threshold=1.2,
+            magnetism_rail_atr_multiplier=0.6,
+        )
+        engine = MultiTimeframeSignalEngine(self.client, config)
+        self._set_ohlcv("4h", [200 - 0.5 * index for index in range(60)], 14_400_000)
+        swing_closes = [100.0] * 45 + [99.8, 99.6, 99.7, 99.9, 100.2, 100.6, 101.1, 101.7, 102.4, 103.2, 104.1, 105.0, 106.0, 107.0, 108.0]
+        execution_closes = [100.0] * 59 + [173.2]
+        execution_volumes = [100.0] * 59 + [1000.0]
+        self._set_ohlcv("1h", swing_closes, 3_600_000)
+        self._set_ohlcv("15m", execution_closes, 900_000, volumes=execution_volumes)
+
+        signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.weak_bull_bias)
+        self.assertGreaterEqual(signal.bullish_score, signal.bullish_threshold)
         self.assertTrue(signal.bullish_ready)
-        self.assertTrue(signal.fully_aligned)
+        self.assertGreaterEqual(signal.bullish_score, config.weak_bull_bias_score + config.dynamic_rsi_trend_score + config.magnetism_score_bonus)
 
     def test_engine_flags_starter_frontrun_when_breakout_is_within_last_point_two_percent(self) -> None:
         config = CTAConfig(

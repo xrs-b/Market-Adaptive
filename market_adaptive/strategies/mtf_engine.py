@@ -177,24 +177,33 @@ class MultiTimeframeSignalEngine:
             self.config.rsi_rebound_lookback + 3,
         )
 
-    def _resolve_major_bias(self, major_direction: int, swing_frame: pd.DataFrame, swing_supertrend: pd.DataFrame) -> tuple[float, bool]:
+    def _resolve_major_bias(self, major_direction: int, swing_frame: pd.DataFrame, swing_supertrend: pd.DataFrame, current_major_atr: float) -> tuple[float, bool]:
         if major_direction > 0:
             return float(self.config.strong_bull_bias_score), False
 
-        price_above_swing_supertrend = float(swing_frame["close"].iloc[-1]) > float(swing_supertrend["supertrend"].iloc[-1])
-        fast_ema = swing_frame["close"].ewm(span=self.config.weak_bias_fast_ema, adjust=False).mean()
-        slow_ema = swing_frame["close"].ewm(span=self.config.weak_bias_slow_ema, adjust=False).mean()
-        ema_converged_bullish = float(fast_ema.iloc[-1]) > float(slow_ema.iloc[-1])
-        weak_bull_bias = price_above_swing_supertrend and ema_converged_bullish
+        recovery_ema = swing_frame["close"].ewm(span=self.config.recovery_ema_period, adjust=False).mean()
+        current_price = float(swing_frame["close"].iloc[-1])
+        current_ema = float(recovery_ema.iloc[-1])
+        slope_lookback = max(1, min(int(self.config.recovery_ema_slope_lookback), len(recovery_ema) - 1))
+        ema_slope = current_ema - float(recovery_ema.iloc[-1 - slope_lookback])
+        flat_tolerance = float(self.config.recovery_ema_flat_tolerance_atr_ratio) * max(current_major_atr, 1e-12)
+        ema_flat_or_up = ema_slope >= -flat_tolerance
+        weak_bull_bias = current_price > current_ema and ema_flat_or_up
         return (float(self.config.weak_bull_bias_score) if weak_bull_bias else 0.0), weak_bull_bias
 
     def _resolve_swing_readiness(self, swing_rsi: pd.Series) -> tuple[float, float]:
         current_rsi = float(swing_rsi.iloc[-1])
         previous_rsi = float(swing_rsi.iloc[-2])
         rsi_slope = current_rsi - previous_rsi
-        if current_rsi >= float(self.config.swing_rsi_ready_threshold):
-            return float(self.config.dynamic_rsi_trend_score), rsi_slope
-        if current_rsi >= float(self.config.dynamic_rsi_floor) and rsi_slope > 0:
+        rsi_sma = swing_rsi.rolling(max(2, int(self.config.recovery_rsi_sma_period)), min_periods=1).mean()
+        current_rsi_sma = float(rsi_sma.iloc[-1])
+        previous_rsi_sma = float(rsi_sma.iloc[-2])
+        momentum_recovery = (
+            current_rsi > float(self.config.recovery_rsi_floor)
+            and current_rsi > current_rsi_sma
+            and (previous_rsi <= previous_rsi_sma or rsi_slope > 0.0)
+        )
+        if momentum_recovery:
             return float(self.config.dynamic_rsi_trend_score), rsi_slope
 
         rebound_window = max(2, int(self.config.rsi_rebound_lookback))
@@ -311,8 +320,9 @@ class MultiTimeframeSignalEngine:
         swing_direction = int(swing_supertrend["direction"].iloc[-1])
         alignment = self._check_timeframe_alignment(major_frame, swing_frame, execution_frame)
         current_swing_rsi = float(swing_rsi.iloc[-1])
+        current_major_atr = float(major_supertrend["atr"].iloc[-1])
         early_bullish = major_direction <= 0 and self._resolve_early_bullish(major_frame, swing_frame, major_supertrend)
-        major_bias_score, weak_bull_bias = self._resolve_major_bias(major_direction, swing_frame, swing_supertrend)
+        major_bias_score, weak_bull_bias = self._resolve_major_bias(major_direction, swing_frame, swing_supertrend, current_major_atr)
         swing_score, swing_rsi_slope = self._resolve_swing_readiness(swing_rsi)
 
         current_k = float(execution_kdj["k"].iloc[-1])
@@ -332,7 +342,12 @@ class MultiTimeframeSignalEngine:
         bearish_memory_active = bearish_cross_bars_ago is not None
 
         score_4h = float(self.config.strong_bull_bias_score) if major_direction > 0 else 0.0
-        score_1h = float(getattr(self.config, "swing_supertrend_bullish_score", 0.0)) if score_4h <= 0.0 and swing_direction > 0 else 0.0
+        score_1h = 0.0
+        if score_4h <= 0.0:
+            if swing_direction > 0:
+                score_1h = float(getattr(self.config, "swing_supertrend_bullish_score", 0.0))
+            elif weak_bull_bias:
+                score_1h = float(self.config.weak_bull_bias_score)
         score_rsi = swing_score
         score_kdj = float(getattr(self.config, "kdj_memory_score_bonus", 0.0)) if bullish_memory_active else 0.0
         score_magnet = 0.0
@@ -359,7 +374,6 @@ class MultiTimeframeSignalEngine:
             frontrun_gap_ratio = max(0.0, (prior_high - current_price) / prior_high)
             frontrun_near_breakout = frontrun_gap_ratio <= float(getattr(self.config, "starter_frontrun_breakout_buffer_ratio", 0.002))
 
-        current_major_atr = float(major_supertrend["atr"].iloc[-1])
         relevant_rail = float(major_supertrend["upper_band"].iloc[-1] if major_direction <= 0 else major_supertrend["lower_band"].iloc[-1])
         rail_distance = abs(current_price - relevant_rail)
         magnetism_limit = float(self.config.magnetism_rail_atr_multiplier) * current_major_atr

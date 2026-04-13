@@ -128,9 +128,11 @@ def replay_cta(config_path: Path, hours: int) -> dict:
         current_rsi = float(swing_rsi.iloc[-1])
         previous_rsi = float(swing_rsi.iloc[-2])
         rsi_slope = current_rsi - previous_rsi
-        if current_rsi >= float(cta.swing_rsi_ready_threshold):
-            swing_score = float(cta.dynamic_rsi_trend_score)
-        elif current_rsi >= float(cta.dynamic_rsi_floor) and rsi_slope > 0:
+        rsi_sma = swing_rsi.rolling(max(2, int(cta.recovery_rsi_sma_period)), min_periods=1).mean()
+        current_rsi_sma = float(rsi_sma.iloc[-1])
+        previous_rsi_sma = float(rsi_sma.iloc[-2])
+        momentum_recovery = current_rsi > float(cta.recovery_rsi_floor) and current_rsi > current_rsi_sma and (previous_rsi <= previous_rsi_sma or rsi_slope > 0)
+        if momentum_recovery:
             swing_score = float(cta.dynamic_rsi_trend_score)
         else:
             rebound_window = max(2, int(cta.rsi_rebound_lookback))
@@ -139,16 +141,18 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             swing_score = float(cta.dynamic_rsi_rebound_score) if oversold_rebound else 0.0
 
         swing_supertrend = compute_supertrend(swing_frame, length=cta.supertrend_period, multiplier=cta.supertrend_multiplier)
-        fast_ema = swing_frame["close"].ewm(span=cta.weak_bias_fast_ema, adjust=False).mean()
-        slow_ema = swing_frame["close"].ewm(span=cta.weak_bias_slow_ema, adjust=False).mean()
-        weak_bull_bias = major_direction <= 0 and float(swing_frame["close"].iloc[-1]) > float(swing_supertrend["supertrend"].iloc[-1]) and float(fast_ema.iloc[-1]) > float(slow_ema.iloc[-1])
+        recovery_ema = swing_frame["close"].ewm(span=cta.recovery_ema_period, adjust=False).mean()
+        slope_lookback = max(1, min(int(cta.recovery_ema_slope_lookback), len(recovery_ema) - 1))
+        ema_slope = float(recovery_ema.iloc[-1]) - float(recovery_ema.iloc[-1 - slope_lookback])
+        flat_tolerance = float(cta.recovery_ema_flat_tolerance_atr_ratio) * max(float(major_supertrend["atr"].iloc[-1]), 1e-12)
+        weak_bull_bias = major_direction <= 0 and float(swing_frame["close"].iloc[-1]) > float(recovery_ema.iloc[-1]) and ema_slope >= -flat_tolerance
         if major_direction > 0:
             major_bias_score = float(cta.strong_bull_bias_score)
         else:
             major_bias_score = float(cta.weak_bull_bias_score) if weak_bull_bias else 0.0
+        swing_direction = int(swing_supertrend["direction"].iloc[-1])
         early_bullish = False
         if major_direction <= 0 and len(major_frame) >= 2:
-            swing_direction = int(swing_supertrend["direction"].iloc[-1])
             current_price = float(swing_frame["close"].iloc[-1])
             current_lower_band = float(major_supertrend["lower_band"].iloc[-1])
             previous_lower_band = float(major_supertrend["lower_band"].iloc[-2])
@@ -156,7 +160,14 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             lower_band_slope = current_lower_band - previous_lower_band
             minimum_slope = -float(cta.early_bullish_lower_band_slope_atr_threshold) * max(current_atr, 1e-12)
             early_bullish = swing_direction > 0 and current_price > current_lower_band and lower_band_slope >= minimum_slope
-        bullish_score = major_bias_score + swing_score
+        score_4h = float(cta.strong_bull_bias_score) if major_direction > 0 else 0.0
+        score_1h = 0.0
+        if score_4h <= 0.0:
+            if swing_direction > 0:
+                score_1h = float(getattr(cta, "swing_supertrend_bullish_score", 0.0))
+            elif weak_bull_bias:
+                score_1h = float(cta.weak_bull_bias_score)
+        bullish_score = score_4h + score_1h + swing_score
         execution_obv = compute_obv(exec_frame)
         execution_obv_confirmation = compute_obv_confirmation_snapshot(exec_frame, obv=execution_obv, sma_period=cta.obv_sma_period, zscore_window=cta.obv_zscore_window)
         current_price = float(exec_frame["close"].iloc[-1])
