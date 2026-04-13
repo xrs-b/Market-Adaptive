@@ -9,9 +9,11 @@ from unittest.mock import patch
 import pandas as pd
 
 from market_adaptive.config import CTAConfig, ExecutionConfig, GridConfig, SentimentConfig
+from market_adaptive.coordination import StrategyRuntimeContext
 from market_adaptive.db import DatabaseInitializer, MarketStatusRecord
 from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies import CTARobot, GridRobot, HandsCoordinator
+from market_adaptive.strategies.cta_robot import ManagedPosition, TrendSignal
 from market_adaptive.strategies.mtf_engine import MultiTimeframeSignalEngine
 
 
@@ -1512,6 +1514,70 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(self.client.market_orders[0]["side"], "sell")
         self.assertTrue(self.client.market_orders[0]["reduce_only"])
         self.assertAlmostEqual(self.client.market_orders[0]["amount"], 0.03)
+
+    def test_grid_robot_suppresses_sell_openings_when_cta_long_trend_is_strong(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0, width=4.0, length=120)
+        runtime_context = StrategyRuntimeContext()
+        runtime_context.publish_cta_state(
+            symbol="BTC/USDT",
+            side="long",
+            size=1.0,
+            trend_strength=2.0,
+            strong_trend=True,
+        )
+        robot = GridRobot(
+            self.client,
+            self.database,
+            self.grid_config,
+            self.execution,
+            runtime_context=runtime_context,
+            use_dynamic_range=False,
+            market_oracle=None,
+        )
+        context = robot._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=1)
+        assert context is not None
+
+        opening_orders = robot._build_opening_orders(context, self.client.last_price, datetime.now(timezone.utc))
+        filtered_orders, reason = robot._apply_runtime_lockout(opening_orders)
+
+        self.assertTrue(any(order.side == "sell" for order in opening_orders))
+        self.assertTrue(all(order.side == "buy" for order in filtered_orders))
+        self.assertEqual(reason, "cta_long_lockout:sell_suppressed")
+
+    def test_grid_inventory_heavy_state_triggers_cta_protective_reduce_hook(self) -> None:
+        runtime_context = StrategyRuntimeContext()
+        grid = GridRobot(self.client, self.database, self.grid_config, self.execution, runtime_context=runtime_context)
+        cta = CTARobot(self.client, self.database, self.cta_config, self.execution, runtime_context=runtime_context)
+        cta.position = ManagedPosition(
+            side="long",
+            entry_price=100.0,
+            initial_size=0.2,
+            remaining_size=0.2,
+            stop_price=95.0,
+            best_price=100.0,
+            atr_value=2.0,
+            stop_distance=5.0,
+        )
+        self.client.positions = [{"contracts": 0.8, "side": "long", "notional": 80.0, "info": {"posSide": "long"}}]
+        grid_context = grid._refresh_grid_context(self.client.last_price, anchor_timestamp_ms=1)
+        assert grid_context is not None
+
+        grid._publish_grid_risk(grid_context)
+        grid_state = runtime_context.snapshot_grid()
+        action = cta._apply_runtime_coordination(
+            TrendSignal(direction=1, raw_direction=1, major_direction=1, major_bias_score=2.0, price=100.0, atr=2.0)
+        )
+
+        self.assertTrue(grid_state.heavy_inventory)
+        self.assertEqual(grid_state.inventory_bias_side, "long")
+        self.assertTrue(grid_state.hedge_assist_requested)
+        self.assertIsNotNone(action)
+        self.assertIn("cta:coordination_reduce_", action)
+        self.assertEqual(len(self.client.market_orders), 1)
+        self.assertTrue(self.client.market_orders[0]["reduce_only"])
+        self.assertEqual(self.client.market_orders[0]["side"], "sell")
+        self.assertLess(cta.position.remaining_size if cta.position is not None else 0.0, 0.2)
 
     def test_grid_robot_liquidation_trim_targets_worst_farthest_position_first(self) -> None:
         self.client.last_price = 100.0

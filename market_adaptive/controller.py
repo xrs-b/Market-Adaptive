@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover - optional runtime dependency fallback
 
 from market_adaptive.clients.okx_client import OKXClient
 from market_adaptive.config import AppConfig
+from market_adaptive.coordination import StrategyRuntimeContext
 from market_adaptive.db import DatabaseInitializer, SystemStateRecord
 from market_adaptive.notifiers import DiscordNotifier, NullNotifier
 from market_adaptive.oracles import MarketOracle
@@ -42,6 +43,7 @@ class MainController:
         self.logger = logging.LoggerAdapter(logging.getLogger(__name__), {"robot": "main"})
         self.symbols = sorted({config.market_oracle.symbol, config.cta.symbol, config.grid.symbol})
         self.notifier = DiscordNotifier(config.notification.discord) if config.notification.discord.enabled else NullNotifier()
+        self.runtime_context = StrategyRuntimeContext()
 
         self.oracle_client = OKXClient(config.okx, config.execution)
         self.cta_client = OKXClient(config.okx, config.execution)
@@ -58,6 +60,7 @@ class MainController:
             config.execution,
             notifier=self.notifier,
             sentiment_analyst=self.sentiment_analyst,
+            runtime_context=self.runtime_context,
         )
         self.grid_robot = GridRobot(
             self.grid_client,
@@ -66,6 +69,7 @@ class MainController:
             config.execution,
             notifier=self.notifier,
             market_oracle=self.market_oracle,
+            runtime_context=self.runtime_context,
         )
         self.risk_control = RiskControlManager(
             config=config.risk_control,

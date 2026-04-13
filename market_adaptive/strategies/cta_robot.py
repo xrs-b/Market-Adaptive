@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass, field
 
 from market_adaptive.config import CTAConfig, ExecutionConfig
+from market_adaptive.coordination import StrategyRuntimeContext
 from market_adaptive.indicators import (
     OBVConfirmationSnapshot,
     VolumeProfileSnapshot,
@@ -155,12 +156,14 @@ class CTARobot(BaseStrategyRobot):
         notifier=None,
         risk_manager=None,
         sentiment_analyst: SentimentAnalyst | None = None,
+        runtime_context: StrategyRuntimeContext | None = None,
     ) -> None:
         super().__init__(client=client, database=database, symbol=config.symbol, notifier=notifier)
         self.config = config
         self.execution_config = execution_config
         self.risk_manager = risk_manager
         self.sentiment_analyst = sentiment_analyst
+        self.runtime_context = runtime_context
         self.position: ManagedPosition | None = None
         self.mtf_engine = MultiTimeframeSignalEngine(client, config)
         self.order_flow_sentinel = OrderFlowSentinel(client, config)
@@ -225,6 +228,10 @@ class CTARobot(BaseStrategyRobot):
         self._maybe_log_signal_heartbeat(signal)
         self._collect_near_miss_sample(signal)
         self._maybe_flush_near_miss_report()
+
+        coordination_action = self._apply_runtime_coordination(signal)
+        if coordination_action is not None:
+            return coordination_action
 
         actions: list[str] = []
         closed_position = False
@@ -814,7 +821,49 @@ class CTARobot(BaseStrategyRobot):
             self._notify_realized_profit(position=position, amount=amount, exit_order=exit_order)
         self.position = None
 
+    def _apply_runtime_coordination(self, signal: TrendSignal) -> str | None:
+        if self.runtime_context is None:
+            return None
+        if self.position is None:
+            return None
+
+        grid_state = self.runtime_context.snapshot_grid()
+        if not grid_state.hedge_assist_requested:
+            return None
+        if grid_state.symbol not in {"", self.symbol}:
+            return None
+        if grid_state.hedge_assist_target_side not in {self.position.side, None}:
+            return None
+
+        reduction_ratio = 0.5 if grid_state.inventory_bias_ratio >= 1.0 else 0.25
+        reduction_size = self.position.remaining_size * reduction_ratio
+        if reduction_size <= 0:
+            return None
+        if not self._reduce_position(reduction_size):
+            return None
+
+        self._publish_risk_profile(signal)
+        return f"cta:coordination_reduce_{self.position.side if self.position is not None else 'flat'}|reason={grid_state.hedge_assist_reason or 'grid_inventory_heavy'}"
+
     def _publish_risk_profile(self, signal: TrendSignal | None) -> None:
+        current_side = None
+        current_size = 0.0
+        strong_trend = False
+        trend_strength = 0.0
+        if self.position is not None:
+            current_side = self.position.side
+            current_size = self._round_size(self.position.remaining_size)
+        if signal is not None:
+            trend_strength = abs(float(signal.major_bias_score or 0.0))
+            strong_trend = bool(self.position is not None and signal.direction != 0 and signal.direction == self.position.direction and trend_strength >= float(self.config.strong_bull_bias_score))
+        if self.runtime_context is not None:
+            self.runtime_context.publish_cta_state(
+                symbol=self.symbol,
+                side=current_side,
+                size=current_size,
+                trend_strength=trend_strength,
+                strong_trend=strong_trend,
+            )
         if self.risk_manager is None:
             return
         if self.position is None:

@@ -174,5 +174,23 @@ class MainControllerTests(unittest.TestCase):
         self.assertIn("BTC/USDT", controller.shutdown_client.closed_symbols)
         self.assertTrue(any(title == "系统已停止" for title, _ in controller.notifier.messages))
 
+    def test_runtime_context_is_shared_between_cta_and_grid(self) -> None:
+        controller = MainController(self.config, self.database)
+
+        self.assertIs(controller.cta_robot.runtime_context, controller.runtime_context)
+        self.assertIs(controller.grid_robot.runtime_context, controller.runtime_context)
+
+        controller.runtime_context.publish_cta_state(
+            symbol="BTC/USDT",
+            side="long",
+            size=1.2,
+            trend_strength=2.0,
+            strong_trend=True,
+        )
+        snapshot = controller.grid_robot.runtime_context.snapshot_cta()
+        self.assertEqual(snapshot.side, "long")
+        self.assertTrue(snapshot.strong_trend)
+        self.assertAlmostEqual(snapshot.size, 1.2)
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@ from typing import Callable
 
 from market_adaptive.clients.okx_ws_client import CCXTProUnavailableError, build_okx_websocket_client
 from market_adaptive.config import ExecutionConfig, GridConfig
+from market_adaptive.coordination import StrategyRuntimeContext
 from market_adaptive.indicators import compute_atr, compute_bollinger_bands, ohlcv_to_dataframe
 from market_adaptive.risk import GridRiskProfile
 from market_adaptive.strategies.base import BaseStrategyRobot, StrategyRunResult
@@ -98,6 +99,7 @@ class GridRobot(BaseStrategyRobot):
         market_oracle=None,
         use_dynamic_range: bool | None = None,
         atr_multiplier: float | None = None,
+        runtime_context: StrategyRuntimeContext | None = None,
     ) -> None:
         super().__init__(client=client, database=database, symbol=config.symbol, notifier=notifier)
         self.config = config
@@ -107,6 +109,7 @@ class GridRobot(BaseStrategyRobot):
         self.use_dynamic_range = bool(config.use_dynamic_range if use_dynamic_range is None else use_dynamic_range)
         self.atr_multiplier = float(config.atr_multiplier if atr_multiplier is None else atr_multiplier)
         self.now_provider = now_provider or (lambda: datetime.now(timezone.utc))
+        self.runtime_context = runtime_context
         self._cached_context: GridContext | None = None
         self._layer_triggers: dict[str, deque[datetime]] = defaultdict(deque)
         self._layer_cooldowns: dict[str, datetime] = {}
@@ -355,6 +358,7 @@ class GridRobot(BaseStrategyRobot):
         net_position_size = self._fetch_net_position_size()
         opening_orders = self._build_opening_orders(context, current_price, now)
         rebalance_orders = self._build_rebalance_orders(context, net_position_size)
+        opening_orders, coordination_reason = self._apply_runtime_lockout(opening_orders)
 
         opening_candidates: list[GridOrderPlan] = []
         cooled_layers = 0
@@ -403,6 +407,8 @@ class GridRobot(BaseStrategyRobot):
         ]
         if risk_blocked_reason is not None:
             action_parts.append(f"risk={risk_blocked_reason}")
+        if coordination_reason is not None:
+            action_parts.append(f"coordination={coordination_reason}")
         return "|".join(action_parts)
 
     def reduce_exposure_step(self, reason: str, reduction_step_pct: float) -> str:
@@ -965,6 +971,21 @@ class GridRobot(BaseStrategyRobot):
         lower_stop = context.lower_bound * (1.0 - buffer_ratio)
         upper_stop = context.upper_bound * (1.0 + buffer_ratio)
         return current_price <= lower_stop or current_price >= upper_stop
+
+    def _apply_runtime_lockout(self, orders: list[GridOrderPlan]) -> tuple[list[GridOrderPlan], str | None]:
+        if self.runtime_context is None:
+            return orders, None
+        cta_state = self.runtime_context.snapshot_cta()
+        if not cta_state.strong_trend or cta_state.symbol not in {"", self.symbol}:
+            return orders, None
+
+        blocked_side = "sell" if cta_state.side == "long" else "buy" if cta_state.side == "short" else None
+        if blocked_side is None:
+            return orders, None
+        filtered = [order for order in orders if order.side != blocked_side]
+        if len(filtered) == len(orders):
+            return orders, None
+        return filtered, f"cta_{cta_state.side}_lockout:{blocked_side}_suppressed"
 
     def _directional_opening_allowed(self, side: str, price: float, amount: float) -> bool:
         max_ratio = float(getattr(self.config, "max_directional_exposure_ratio", 0.50))
@@ -1709,10 +1730,46 @@ class GridRobot(BaseStrategyRobot):
         return 0.0 if normalized < 1e-12 else normalized
 
     def _publish_grid_risk(self, context: GridContext | None) -> None:
-        if self.risk_manager is None:
-            return
         if context is None:
-            self.risk_manager.update_grid_risk(None)
+            if self.runtime_context is not None:
+                self.runtime_context.publish_grid_inventory(
+                    symbol=self.symbol,
+                    net_position_size=0.0,
+                    inventory_bias_side=None,
+                    inventory_bias_ratio=0.0,
+                    heavy_inventory=False,
+                    hedge_assist_requested=False,
+                    hedge_assist_reason=None,
+                    hedge_assist_target_side=None,
+                )
+            if self.risk_manager is not None:
+                self.risk_manager.update_grid_risk(None)
+            return
+
+        current_price = float(self.client.fetch_last_price(self.symbol))
+        candidates = self._load_position_candidates(current_price)
+        long_notional = sum(candidate.notional for candidate in candidates if candidate.side == "long")
+        short_notional = sum(candidate.notional for candidate in candidates if candidate.side == "short")
+        heavier_notional = max(long_notional, short_notional)
+        lighter_notional = min(long_notional, short_notional)
+        inventory_bias_side = None
+        if heavier_notional > 1e-12:
+            inventory_bias_side = "long" if long_notional >= short_notional else "short"
+        inventory_bias_ratio = 0.0 if heavier_notional <= 1e-12 else (heavier_notional - lighter_notional) / heavier_notional
+        heavy_inventory = heavier_notional > 1e-12 and inventory_bias_ratio >= 0.60
+        net_position_size = self._fetch_net_position_size()
+        if self.runtime_context is not None:
+            self.runtime_context.publish_grid_inventory(
+                symbol=self.symbol,
+                net_position_size=net_position_size,
+                inventory_bias_side=inventory_bias_side,
+                inventory_bias_ratio=inventory_bias_ratio,
+                heavy_inventory=heavy_inventory,
+                hedge_assist_requested=heavy_inventory,
+                hedge_assist_reason=(f"grid_inventory_heavy:{inventory_bias_side}" if heavy_inventory and inventory_bias_side is not None else None),
+                hedge_assist_target_side=inventory_bias_side,
+            )
+        if self.risk_manager is None:
             return
 
         self.risk_manager.update_grid_risk(
