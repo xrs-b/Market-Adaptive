@@ -73,6 +73,12 @@ class CTAAuditRow:
     trigger_reason: str
     swing_rsi: float
     bullish_score: float
+    bearish_score: float
+    bearish_ready: bool
+    raw_direction: int
+    direction: int
+    execution_entry_mode: str
+    major_direction: int
     obv_zscore: float
     current_price: float
 
@@ -328,16 +334,26 @@ def replay_cta(config_path: Path, hours: int) -> dict:
                 bearish_cross_bars_ago = bars_ago
                 break
         bearish_memory_active = bearish_cross_bars_ago is not None and bearish_cross_bars_ago < max(1, int(cta.kdj_signal_memory_bars))
-        prior_high = exec_frame["high"].shift(1).rolling(max(1, int(cta.execution_breakout_lookback)), min_periods=max(1, int(cta.execution_breakout_lookback))).max().iloc[-1]
-        prior_high_break = not pd.isna(prior_high) and current_price > float(prior_high)
-        frontrun_gap_ratio = 999.0
-        if not pd.isna(prior_high) and abs(float(prior_high)) > 1e-12:
-            frontrun_gap_ratio = max(0.0, (float(prior_high) - current_price) / float(prior_high))
-        frontrun_near_breakout = frontrun_gap_ratio <= float(getattr(cta, "starter_frontrun_breakout_buffer_ratio", 0.002))
-        short_frontrun_gap_ratio = 999.0
-        if not pd.isna(prior_low) and abs(float(prior_low)) > 1e-12:
-            short_frontrun_gap_ratio = max(0.0, (current_price - float(prior_low)) / float(prior_low))
-        short_frontrun_near_breakout = short_frontrun_gap_ratio <= float(getattr(cta, "starter_frontrun_breakout_buffer_ratio", 0.002))
+        if bearish_memory_active:
+            bearish_score += float(getattr(cta, "kdj_memory_score_bonus", 0.0))
+        prior_high_series = exec_frame["high"].shift(1).rolling(max(1, int(cta.execution_breakout_lookback)), min_periods=max(1, int(cta.execution_breakout_lookback))).max()
+        prior_low_series = exec_frame["low"].shift(1).rolling(max(1, int(cta.execution_breakout_lookback)), min_periods=max(1, int(cta.execution_breakout_lookback))).min()
+        prior_high_value = prior_high_series.iloc[-1]
+        prior_low_value = prior_low_series.iloc[-1]
+        prior_high = None if pd.isna(prior_high_value) else float(prior_high_value)
+        prior_low = None if pd.isna(prior_low_value) else float(prior_low_value)
+        prior_high_break = prior_high is not None and current_price > prior_high + 1e-12
+        prior_low_break = prior_low is not None and current_price < prior_low - 1e-12
+        frontrun_gap_ratio = 0.0
+        frontrun_near_breakout = False
+        if prior_high is not None and prior_high > 0 and current_price < prior_high:
+            frontrun_gap_ratio = max(0.0, (prior_high - current_price) / prior_high)
+            frontrun_near_breakout = frontrun_gap_ratio <= float(getattr(cta, "starter_frontrun_breakout_buffer_ratio", 0.002))
+        short_frontrun_gap_ratio = 0.0
+        short_frontrun_near_breakout = False
+        if prior_low is not None and prior_low > 0 and current_price > prior_low:
+            short_frontrun_gap_ratio = max(0.0, (current_price - prior_low) / prior_low)
+            short_frontrun_near_breakout = short_frontrun_gap_ratio <= float(getattr(cta, "starter_frontrun_breakout_buffer_ratio", 0.002))
         impulse_bars = max(2, int(getattr(cta, "starter_frontrun_impulse_bars", 3)))
         volume_window = max(impulse_bars + 1, int(getattr(cta, "starter_frontrun_volume_window", 12)))
         frontrun_impulse_confirmed = False
@@ -393,6 +409,15 @@ def replay_cta(config_path: Path, hours: int) -> dict:
         )
         bearish_breakout_ready = bool(major_direction < 0 and bearish_ready and prior_low_break and (bearish_memory_active or kdj_dead_cross))
         bearish_retest_ready = bool(major_direction < 0 and bearish_ready and bearish_memory_active and short_frontrun_near_breakout)
+        execution_entry_mode = "breakout_confirmed"
+        if weak_bull_bias:
+            execution_entry_mode = "weak_bull_scale_in_limit"
+        if early_bullish:
+            execution_entry_mode = "early_bullish_starter_limit"
+        if weak_bear_bias:
+            execution_entry_mode = "weak_bear_scale_in_limit"
+        if early_bearish:
+            execution_entry_mode = "early_bearish_starter_limit"
         trigger_reason = classify_waiting_execution_trigger(
             bullish_ready=bullish_ready,
             state_label="ARMED_READY" if bullish_ready and (kdj_golden_cross or frontrun_near_breakout) else "WAITING_SETUP",
@@ -449,28 +474,37 @@ def replay_cta(config_path: Path, hours: int) -> dict:
         passed_mtf_regime = bool(major_direction != 0 or weak_bull_bias or early_bullish or weak_bear_bias or early_bearish)
         passed_bullish_ready = bool(bullish_ready or bearish_ready)
         passed_trigger = bool(fully_aligned)
+        raw_direction = 0
+        if fully_aligned and major_direction < 0 and bearish_ready:
+            raw_direction = -1
+        elif fully_aligned and major_direction >= 0 and not bearish_ready:
+            raw_direction = 1
+        replay_side = "short" if raw_direction < 0 or execution_entry_mode in {"weak_bear_scale_in_limit", "early_bearish_starter_limit"} or trigger_reason.startswith("early_bearish") or trigger_reason.startswith("bearish_") else "long"
+        replay_score = bearish_score if replay_side == "short" else bullish_score
+        replay_near_breakout = short_frontrun_near_breakout if replay_side == "short" else frontrun_near_breakout
         obv_gate = resolve_dynamic_obv_gate(
-            bullish_score=bullish_score,
+            bullish_score=replay_score,
             configured_threshold=cta.obv_zscore_threshold,
+            side=replay_side,
             major_direction=major_direction,
             early_bullish=early_bullish,
             weak_bull_bias=weak_bull_bias,
-            execution_frontrun_near_breakout=frontrun_near_breakout,
+            early_bearish=early_bearish,
+            weak_bear_bias=weak_bear_bias,
+            execution_frontrun_near_breakout=replay_near_breakout,
             trigger_reason=trigger_reason,
-            execution_entry_mode=(
-                "early_bullish_starter_limit"
-                if early_bullish
-                else "weak_bull_scale_in_limit"
-                if weak_bull_bias
-                else "breakout_confirmed"
-            ),
+            execution_entry_mode=execution_entry_mode,
         )
         relaxed_obv_allowed = bool(
-            major_direction > 0
+            replay_side == "long"
+            and major_direction > 0
             and drive_first_tradeable
             and float(execution_obv_confirmation.zscore) > float(obv_gate.threshold)
         )
-        volume_filter_passed = fully_aligned and (obv_gate.passed(execution_obv_confirmation) or relaxed_obv_allowed)
+        if replay_side == "short":
+            volume_filter_passed = fully_aligned and (obv_gate.exempt or execution_obv_confirmation.sell_confirmed(zscore_threshold=float(obv_gate.threshold)))
+        else:
+            volume_filter_passed = fully_aligned and (obv_gate.passed(execution_obv_confirmation) or relaxed_obv_allowed)
         passed_obv = bool(volume_filter_passed)
         volume_profile = compute_volume_profile(exec_frame, lookback_hours=cta.volume_profile_lookback_hours, value_area_pct=cta.volume_profile_value_area_pct, bin_count=cta.volume_profile_bin_count)
         value_area_decision = evaluate_value_area_decision(
@@ -483,7 +517,11 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             drive_first_tradeable_score=float(getattr(cta, "drive_first_tradeable_score", 60.0)),
             value_area_edge_atr_multiplier=float(getattr(cta, "value_area_edge_atr_multiplier", 1.0)),
         )
-        passed_volume_profile = bool(volume_profile and volume_profile.above_poc(current_price) and (not value_area_decision.blocked) and (value_area_decision.reason is not None or volume_profile.above_value_area(current_price)))
+        if replay_side == "short":
+            passed_volume_profile = bool(volume_profile and current_price < float(volume_profile.poc_price) and (not value_area_decision.blocked) and (value_area_decision.reason is not None or current_price <= float(volume_profile.value_area_low)))
+        else:
+            passed_volume_profile = bool(volume_profile and volume_profile.above_poc(current_price) and (not value_area_decision.blocked) and (value_area_decision.reason is not None or volume_profile.above_value_area(current_price)))
+        direction = raw_direction if volume_filter_passed and passed_volume_profile else 0
 
         blocker = "PASSED"
         if not passed_market_regime:
@@ -496,18 +534,24 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             blocker = "Blocked_By_Bullish_Score" if bullish_score > 0 else "Blocked_By_RSI_Threshold"
         elif not passed_trigger:
             blocker = f"Blocked_By_Trigger:{trigger_reason}"
-        elif not obv_gate.exempt and not execution_obv_confirmation.above_sma:
+        elif replay_side == "long" and not obv_gate.exempt and not execution_obv_confirmation.above_sma:
             blocker = "Blocked_By_OBV_BELOW_SMA"
+        elif replay_side == "short" and not obv_gate.exempt and not execution_obv_confirmation.below_sma:
+            blocker = "Blocked_By_OBV_ABOVE_SMA"
         elif not volume_filter_passed:
             blocker = "Blocked_By_OBV_STRENGTH_NOT_CONFIRMED"
         elif volume_profile is None:
             blocker = "Blocked_By_MISSING_VOLUME_PROFILE"
-        elif not volume_profile.above_poc(current_price):
+        elif replay_side == "long" and not volume_profile.above_poc(current_price):
             blocker = "Blocked_By_BELOW_POC"
+        elif replay_side == "short" and float(current_price) >= float(volume_profile.poc_price):
+            blocker = "Blocked_By_ABOVE_POC"
         elif value_area_decision.blocked:
             blocker = "Blocked_By_INSIDE_VALUE_AREA"
-        elif not value_area_decision.reason and not volume_profile.above_value_area(current_price):
+        elif replay_side == "long" and not value_area_decision.reason and not volume_profile.above_value_area(current_price):
             blocker = "Blocked_By_BELOW_VALUE_AREA_HIGH"
+        elif replay_side == "short" and not value_area_decision.reason and float(current_price) > float(volume_profile.value_area_low):
+            blocker = "Blocked_By_ABOVE_VALUE_AREA_LOW"
 
         sentiment_blocked = False
         if blocker == "PASSED" and not ratio_frame.empty:
@@ -537,7 +581,7 @@ def replay_cta(config_path: Path, hours: int) -> dict:
                     except Exception as exc:
                         order_flow_samples.append({"ts": ts.isoformat(), "error": type(exc).__name__})
 
-        rows.append(CTAAuditRow(ts=ts, market_regime=market_regime, blocker=blocker, passed_market_regime=passed_market_regime, passed_mtf_regime=passed_mtf_regime, passed_bullish_ready=passed_bullish_ready, passed_trigger=passed_trigger, passed_obv=passed_obv, passed_volume_profile=passed_volume_profile, sentiment_blocked=sentiment_blocked, risk_blocked=risk_blocked, trigger_reason=trigger_reason, swing_rsi=current_rsi, bullish_score=bullish_score, obv_zscore=float(execution_obv_confirmation.zscore), current_price=current_price))
+        rows.append(CTAAuditRow(ts=ts, market_regime=market_regime, blocker=blocker, passed_market_regime=passed_market_regime, passed_mtf_regime=passed_mtf_regime, passed_bullish_ready=passed_bullish_ready, passed_trigger=passed_trigger, passed_obv=passed_obv, passed_volume_profile=passed_volume_profile, sentiment_blocked=sentiment_blocked, risk_blocked=risk_blocked, trigger_reason=trigger_reason, swing_rsi=current_rsi, bullish_score=bullish_score, bearish_score=bearish_score, bearish_ready=bearish_ready, raw_direction=raw_direction, direction=direction, execution_entry_mode=execution_entry_mode, major_direction=major_direction, obv_zscore=float(execution_obv_confirmation.zscore), current_price=current_price))
 
     df = pd.DataFrame([r.__dict__ for r in rows])
     blocker_counts = df["blocker"].value_counts().to_dict() if not df.empty else {}
@@ -556,7 +600,13 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             "risk_blocked": int(df["risk_blocked"].sum()) if not df.empty else 0,
         },
         "blockers": blocker_counts,
+        "raw_direction_counts": df["raw_direction"].value_counts().sort_index().to_dict() if not df.empty else {},
+        "direction_counts": df["direction"].value_counts().sort_index().to_dict() if not df.empty else {},
+        "bearish_ready_count": int(df["bearish_ready"].sum()) if not df.empty else 0,
+        "bearish_trigger_count": int(((df["raw_direction"] == -1) & (df["passed_trigger"])).sum()) if not df.empty else 0,
+        "bearish_live_direction_count": int((df["direction"] == -1).sum()) if not df.empty else 0,
         "samples": df.sort_values("ts").tail(8).to_dict(orient="records") if not df.empty else [],
+        "bearish_samples": df[df["raw_direction"] == -1].sort_values("ts").tail(8).to_dict(orient="records") if not df.empty and "raw_direction" in df else [],
         "order_flow_live_probe": {
             "samples": order_flow_samples,
             "pass_count": sum(1 for x in order_flow_samples if x.get("passed")),
