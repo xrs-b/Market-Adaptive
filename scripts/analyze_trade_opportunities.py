@@ -12,18 +12,18 @@ class ValueAreaDecision:
     reason: str | None = None
 
 
-def evaluate_value_area_decision(*, volume_profile, current_price: float, atr_value: float, major_direction: int, bullish_score: float, execution_frontrun_near_breakout: bool) -> ValueAreaDecision:
+def evaluate_value_area_decision(*, volume_profile, current_price: float, atr_value: float, major_direction: int, bullish_score: float, execution_frontrun_near_breakout: bool, drive_first_tradeable_score: float = 60.0, value_area_edge_atr_multiplier: float = 1.0) -> ValueAreaDecision:
     if volume_profile is None:
         return ValueAreaDecision(inside_value_area=False, blocked=False)
     inside_value_area = bool(volume_profile.contains_price(current_price))
     if not inside_value_area:
         return ValueAreaDecision(inside_value_area=False, blocked=False)
-    edge_threshold = 0.5 * max(0.0, float(atr_value))
+    edge_threshold = float(value_area_edge_atr_multiplier) * max(0.0, float(atr_value))
     value_area_high = float(volume_profile.value_area_high)
     value_area_low = float(volume_profile.value_area_low)
     if float(bullish_score) >= 75.0 and bool(execution_frontrun_near_breakout):
         return ValueAreaDecision(inside_value_area=True, blocked=False, reason="High Momentum")
-    if int(major_direction) > 0 and float(current_price) > value_area_high - edge_threshold:
+    if int(major_direction) > 0 and float(bullish_score) >= float(drive_first_tradeable_score) and float(current_price) >= value_area_high - edge_threshold:
         return ValueAreaDecision(inside_value_area=True, blocked=False, reason="Edge Proximity")
     if int(major_direction) < 0 and float(current_price) < value_area_low + edge_threshold:
         return ValueAreaDecision(inside_value_area=True, blocked=False, reason="Edge Proximity")
@@ -261,6 +261,7 @@ def replay_cta(config_path: Path, hours: int) -> dict:
         bullish_score = score_4h + score_1h + swing_score + early_recovery_score
         execution_obv = compute_obv(exec_frame)
         execution_obv_confirmation = compute_obv_confirmation_snapshot(exec_frame, obv=execution_obv, sma_period=cta.obv_sma_period, zscore_window=cta.obv_zscore_window)
+        execution_atr = float(compute_atr(exec_frame, length=cta.atr_period).iloc[-1])
         current_price = float(exec_frame["close"].iloc[-1])
         if major_direction <= 0 and not (weak_bull_bias or early_bullish):
             relevant_rail = float(major_supertrend["upper_band"].iloc[-1])
@@ -270,6 +271,7 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             if current_major_atr > 0 and rail_distance < magnetism_limit and execution_obv_confirmation.zscore > float(cta.magnetism_obv_zscore_threshold):
                 bullish_score = max(bullish_score, float(cta.bullish_ready_score_threshold))
         bullish_ready = bullish_score >= float(cta.bullish_ready_score_threshold)
+        drive_first_tradeable = bullish_score >= float(getattr(cta, "drive_first_tradeable_score", 60.0))
 
         execution_kdj = compute_kdj(exec_frame, length=cta.kdj_length, k_smoothing=cta.kdj_k_smoothing, d_smoothing=cta.kdj_d_smoothing)
         current_k = float(execution_kdj["k"].iloc[-1]); current_d = float(execution_kdj["d"].iloc[-1])
@@ -365,8 +367,10 @@ def replay_cta(config_path: Path, hours: int) -> dict:
         obv_gate = resolve_dynamic_obv_gate(
             bullish_score=bullish_score,
             configured_threshold=cta.obv_zscore_threshold,
+            major_direction=major_direction,
             early_bullish=early_bullish,
             weak_bull_bias=weak_bull_bias,
+            execution_frontrun_near_breakout=frontrun_near_breakout,
             trigger_reason=trigger_reason,
             execution_entry_mode=(
                 "early_bullish_starter_limit"
@@ -376,8 +380,13 @@ def replay_cta(config_path: Path, hours: int) -> dict:
                 else "breakout_confirmed"
             ),
         )
-        volume_filter_passed = fully_aligned and obv_gate.passed(execution_obv_confirmation)
-        passed_obv = bool((obv_gate.exempt or execution_obv_confirmation.above_sma) and volume_filter_passed)
+        relaxed_obv_allowed = bool(
+            major_direction > 0
+            and drive_first_tradeable
+            and float(execution_obv_confirmation.zscore) > float(obv_gate.threshold)
+        )
+        volume_filter_passed = fully_aligned and (obv_gate.passed(execution_obv_confirmation) or relaxed_obv_allowed)
+        passed_obv = bool(volume_filter_passed)
         volume_profile = compute_volume_profile(exec_frame, lookback_hours=cta.volume_profile_lookback_hours, value_area_pct=cta.volume_profile_value_area_pct, bin_count=cta.volume_profile_bin_count)
         value_area_decision = evaluate_value_area_decision(
             volume_profile=volume_profile,
@@ -385,7 +394,9 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             atr_value=execution_atr,
             major_direction=major_direction,
             bullish_score=bullish_score,
-            execution_frontrun_near_breakout=bool(getattr(trigger, "frontrun_near_breakout", False)),
+            execution_frontrun_near_breakout=frontrun_near_breakout,
+            drive_first_tradeable_score=float(getattr(cta, "drive_first_tradeable_score", 60.0)),
+            value_area_edge_atr_multiplier=float(getattr(cta, "value_area_edge_atr_multiplier", 1.0)),
         )
         passed_volume_profile = bool(volume_profile and volume_profile.above_poc(current_price) and (not value_area_decision.blocked) and (value_area_decision.reason is not None or volume_profile.above_value_area(current_price)))
 

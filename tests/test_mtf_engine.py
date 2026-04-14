@@ -582,6 +582,42 @@ class MTFEngineTests(unittest.TestCase):
         joined_logs = "\n".join(logs.output)
         self.assertIn("Bullish Score: 40/55 [4H: 0, 1H: 30, Magnet: 0, RSI: 0, Early: 0, KDJ: 10]", joined_logs)
 
+    def test_drive_first_major_trend_does_not_report_rsi_block_when_score_is_tradeable(self) -> None:
+        signal = self.engine._resolve_blocker_reason(
+            data_alignment_valid=True,
+            major_direction=1,
+            weak_bull_bias=False,
+            early_bullish=False,
+            swing_score=0.0,
+            bullish_ready=True,
+            fully_aligned=False,
+            execution_reason="waiting_execution_trigger",
+            bullish_score=60.0,
+            execution_frontrun_near_breakout=False,
+            drive_first_tradeable=True,
+            rsi_rollover_blocked=False,
+        )
+
+        self.assertEqual(signal, "Blocked_By_Trigger:waiting_execution_trigger")
+
+    def test_drive_first_major_trend_blocks_only_extreme_rsi_rollover(self) -> None:
+        signal = self.engine._resolve_blocker_reason(
+            data_alignment_valid=True,
+            major_direction=1,
+            weak_bull_bias=False,
+            early_bullish=False,
+            swing_score=0.0,
+            bullish_ready=True,
+            fully_aligned=False,
+            execution_reason="waiting_execution_trigger",
+            bullish_score=72.0,
+            execution_frontrun_near_breakout=False,
+            drive_first_tradeable=True,
+            rsi_rollover_blocked=True,
+        )
+
+        self.assertEqual(signal, "Blocked_By_RSI_ROLLOVER")
+
     def test_engine_scores_bullish_ready_before_major_flip_via_swing_and_memory_stack(self) -> None:
         config = CTAConfig(
             symbol="BTC/USDT",

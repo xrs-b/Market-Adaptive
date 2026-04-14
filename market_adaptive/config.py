@@ -171,6 +171,11 @@ class CTAConfig:
     kdj_memory_score_bonus: float = 10.0
     rail_momentum_score_bonus: float = 0.0
     bullish_ready_score_threshold: float = 55.0
+    drive_first_tradeable_score: float = 60.0
+    aggressive_rsi_relax_score: float = 70.0
+    aggressive_rsi_extreme_threshold: float = 85.0
+    aggressive_obv_zscore_floor: float = -0.1
+    value_area_edge_atr_multiplier: float = 1.0
     weak_bias_fast_ema: int = 21
     weak_bias_slow_ema: int = 55
     kdj_length: int = 9
@@ -275,6 +280,11 @@ class CTAConfig:
         self.kdj_memory_score_bonus = max(0.0, float(self.kdj_memory_score_bonus))
         self.rail_momentum_score_bonus = max(0.0, float(self.rail_momentum_score_bonus))
         self.bullish_ready_score_threshold = max(1.0, float(self.bullish_ready_score_threshold))
+        self.drive_first_tradeable_score = max(self.bullish_ready_score_threshold, float(self.drive_first_tradeable_score))
+        self.aggressive_rsi_relax_score = max(self.drive_first_tradeable_score, float(self.aggressive_rsi_relax_score))
+        self.aggressive_rsi_extreme_threshold = max(self.aggressive_rsi_relax_score, float(self.aggressive_rsi_extreme_threshold))
+        self.aggressive_obv_zscore_floor = float(self.aggressive_obv_zscore_floor)
+        self.value_area_edge_atr_multiplier = max(0.0, float(self.value_area_edge_atr_multiplier))
         self.weak_bias_fast_ema = max(2, int(self.weak_bias_fast_ema))
         self.weak_bias_slow_ema = max(self.weak_bias_fast_ema + 1, int(self.weak_bias_slow_ema))
         self.obv_signal_window = max(1, int(self.obv_signal_window))
@@ -601,6 +611,11 @@ def load_config(config_path: str | Path) -> AppConfig:
         kdj_memory_score_bonus=float(cta_payload.get("kdj_memory_score_bonus", 10.0)),
         rail_momentum_score_bonus=float(cta_payload.get("rail_momentum_score_bonus", 0.0)),
         bullish_ready_score_threshold=float(cta_payload.get("bullish_ready_score_threshold", 55.0)),
+        drive_first_tradeable_score=float(cta_payload.get("drive_first_tradeable_score", 60.0)),
+        aggressive_rsi_relax_score=float(cta_payload.get("aggressive_rsi_relax_score", 70.0)),
+        aggressive_rsi_extreme_threshold=float(cta_payload.get("aggressive_rsi_extreme_threshold", 85.0)),
+        aggressive_obv_zscore_floor=float(cta_payload.get("aggressive_obv_zscore_floor", -0.1)),
+        value_area_edge_atr_multiplier=float(cta_payload.get("value_area_edge_atr_multiplier", 1.0)),
         weak_bias_fast_ema=int(cta_payload.get("weak_bias_fast_ema", cta_payload.get("fast_ema", 21))),
         weak_bias_slow_ema=int(cta_payload.get("weak_bias_slow_ema", cta_payload.get("slow_ema", 55))),
         kdj_length=int(cta_payload.get("kdj_length", 9)),

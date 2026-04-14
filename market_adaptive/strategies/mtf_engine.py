@@ -241,13 +241,15 @@ class MultiTimeframeSignalEngine:
             valid=valid,
         )
 
-    def _resolve_blocker_reason(self, *, data_alignment_valid: bool, major_direction: int, weak_bull_bias: bool, early_bullish: bool, swing_score: float, bullish_ready: bool, fully_aligned: bool, execution_reason: str, bullish_score: float, execution_frontrun_near_breakout: bool) -> str:
+    def _resolve_blocker_reason(self, *, data_alignment_valid: bool, major_direction: int, weak_bull_bias: bool, early_bullish: bool, swing_score: float, bullish_ready: bool, fully_aligned: bool, execution_reason: str, bullish_score: float, execution_frontrun_near_breakout: bool, drive_first_tradeable: bool, rsi_rollover_blocked: bool) -> str:
         if not data_alignment_valid:
             return "DATA_MISMATCH_WARNING"
         if not (major_direction > 0 or weak_bull_bias or early_bullish):
             return "Blocked_By_SuperTrend_Regime"
+        if rsi_rollover_blocked:
+            return "Blocked_By_RSI_ROLLOVER"
         high_momentum_breakout_clearance = bool(float(bullish_score) >= 75.0 and execution_frontrun_near_breakout)
-        if swing_score <= 0.0 and not high_momentum_breakout_clearance:
+        if swing_score <= 0.0 and not high_momentum_breakout_clearance and not drive_first_tradeable:
             return "Blocked_By_RSI_Threshold"
         if not bullish_ready:
             return "Blocked_By_Bullish_Score"
@@ -479,6 +481,7 @@ class MultiTimeframeSignalEngine:
         score_kdj = float(getattr(self.config, "kdj_memory_score_bonus", 0.0)) if bullish_memory_active else 0.0
         score_magnet = 0.0
         bullish_score = score_4h + score_1h + score_rsi + score_early_recovery + score_kdj
+        drive_first_tradeable = bullish_score >= float(getattr(self.config, "drive_first_tradeable_score", 60.0))
 
         prior_high_series = execution_frame["high"].shift(1).rolling(
             max(1, int(self.config.execution_breakout_lookback)),
@@ -534,6 +537,15 @@ class MultiTimeframeSignalEngine:
             )
 
         bullish_threshold = float(self.config.bullish_ready_score_threshold)
+        rsi_relax_score = float(getattr(self.config, "aggressive_rsi_relax_score", 70.0))
+        rsi_extreme_threshold = float(getattr(self.config, "aggressive_rsi_extreme_threshold", 85.0))
+        rsi_rollover_blocked = bool(
+            major_direction > 0
+            and bullish_score >= rsi_relax_score
+            and current_swing_rsi > rsi_extreme_threshold
+            and swing_rsi_slope < 0.0
+            and current_swing_rsi < current_rsi_sma
+        )
         logger.info(
             "Bullish Score: %.0f/%.0f [4H: %.0f, 1H: %.0f, Magnet: %.0f, RSI: %.0f, Early: %.0f, KDJ: %.0f] | symbol=%s major_dir=%s swing_dir=%s weak_bull=%s early_bullish=%s",
             bullish_score,
@@ -692,7 +704,14 @@ class MultiTimeframeSignalEngine:
         local_dt = datetime.now(timezone.utc)
         server_ts = self.client.fetch_server_time() if hasattr(self.client, "fetch_server_time") else None
         server_dt = datetime.fromtimestamp(server_ts / 1000.0, tz=timezone.utc) if server_ts else None
-        rsi_blocking_overridden = bool(swing_score <= 0.0 and float(bullish_score) >= 75.0 and frontrun_near_breakout)
+        rsi_blocking_overridden = bool(
+            swing_score <= 0.0
+            and major_direction > 0
+            and bullish_score >= rsi_relax_score
+            and not rsi_rollover_blocked
+        )
+        if rsi_rollover_blocked:
+            fully_aligned = False
         blocker_reason = self._resolve_blocker_reason(
             data_alignment_valid=alignment.valid,
             major_direction=major_direction,
@@ -704,6 +723,8 @@ class MultiTimeframeSignalEngine:
             execution_reason=reason,
             bullish_score=bullish_score,
             execution_frontrun_near_breakout=frontrun_near_breakout,
+            drive_first_tradeable=drive_first_tradeable,
+            rsi_rollover_blocked=rsi_rollover_blocked,
         )
 
         return MTFSignal(

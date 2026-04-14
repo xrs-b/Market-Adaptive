@@ -153,7 +153,7 @@ class CTAHeartbeatTests(unittest.TestCase):
         volume_profile = type("VolumeProfile", (), {
             "poc_price": 99.0,
             "value_area_low": 98.0,
-            "value_area_high": 100.4,
+            "value_area_high": 100.9,
             "above_poc": lambda self, price: True,
             "contains_price": lambda self, price: True,
             "above_value_area": lambda self, price: False,
@@ -175,7 +175,7 @@ class CTAHeartbeatTests(unittest.TestCase):
         mock_logger.info.assert_called_with(
             "Passed: VA Override [Reason: %s] [%s]",
             "Edge Proximity",
-            "POC: 99.0000, VAH: 100.4000, VAL: 98.0000, Price: 100.0000",
+            "POC: 99.0000, VAH: 100.9000, VAL: 98.0000, Price: 100.0000",
         )
 
     def test_inside_value_area_block_logs_boundaries_when_no_override_applies(self) -> None:
@@ -243,7 +243,7 @@ class CTAHeartbeatTests(unittest.TestCase):
             ),
             (0.6, False),
         )
-        self.assertEqual(robot._resolve_obv_gate(self._build_mtf_signal(bullish_score=65.0)), (0.0, False))
+        self.assertEqual(robot._resolve_obv_gate(self._build_mtf_signal(bullish_score=65.0)), (-0.1, False))
         self.assertEqual(robot._resolve_obv_gate(self._build_mtf_signal(bullish_score=80.0)), (-1.0, True))
 
     def test_high_quality_post_trigger_signal_gets_narrow_obv_softening(self) -> None:
@@ -264,7 +264,7 @@ class CTAHeartbeatTests(unittest.TestCase):
                     trigger_reason="major_bull_retest_ready: gap=0.120% + KDJ memory 2 bars ago",
                 )
             ),
-            (0.5, False),
+            (-0.1, False),
         )
 
     def test_recovery_context_relaxes_obv_gate_even_when_score_is_below_mid_tier(self) -> None:
@@ -433,8 +433,8 @@ class CTAHeartbeatTests(unittest.TestCase):
         self.assertEqual(signal.direction, 1)
         self.assertFalse(signal.long_setup_blocked)
         self.assertTrue(signal.obv_confirmation_passed)
-        self.assertAlmostEqual(signal.obv_threshold, 0.0)
-        self.assertAlmostEqual(robot._effective_signal_obv_threshold(signal), 0.0)
+        self.assertAlmostEqual(signal.obv_threshold, -0.1)
+        self.assertAlmostEqual(robot._effective_signal_obv_threshold(signal), -0.1)
 
     def test_heartbeat_payload_uses_relaxed_zero_obv_threshold_without_falling_back(self) -> None:
         robot = CTARobot(
@@ -477,6 +477,49 @@ class CTAHeartbeatTests(unittest.TestCase):
 
         self.assertEqual(payload["obv_zscore_threshold"], 0.0)
         self.assertAlmostEqual(payload["obv_zscore_gap"], 0.1)
+
+    def test_drive_first_relaxed_obv_can_pass_below_sma_when_not_dumping(self) -> None:
+        robot = CTARobot(
+            client=DummyClient(),
+            database=DummyDatabase(),
+            config=CTAConfig(symbol="BTC/USDT", obv_zscore_threshold=0.6),
+            execution_config=ExecutionConfig(),
+            notifier=None,
+            risk_manager=None,
+            sentiment_analyst=None,
+        )
+        mtf_signal = self._build_mtf_signal(bullish_score=72.0, major_direction=1)
+        obv_snapshot = OBVConfirmationSnapshot(
+            current_obv=990.0,
+            sma_value=1000.0,
+            increment_value=2.0,
+            increment_mean=1.0,
+            increment_std=2.0,
+            zscore=-0.05,
+        )
+
+        with (
+            patch.object(robot.mtf_engine, "build_signal", return_value=mtf_signal),
+            patch("market_adaptive.strategies.cta_robot.compute_obv", return_value=pd.Series([1.0])),
+            patch("market_adaptive.strategies.cta_robot.compute_atr", return_value=pd.Series([1.2])),
+            patch("market_adaptive.strategies.cta_robot.compute_obv_confirmation_snapshot", return_value=obv_snapshot),
+            patch(
+                "market_adaptive.strategies.cta_robot.compute_volume_profile",
+                return_value=type("VolumeProfile", (), {
+                    "above_poc": lambda self, price: True,
+                    "contains_price": lambda self, price: False,
+                    "above_value_area": lambda self, price: True,
+                })(),
+            ),
+        ):
+            signal = robot._build_trend_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.direction, 1)
+        self.assertFalse(signal.long_setup_blocked)
+        self.assertTrue(signal.relaxed_entry)
+        self.assertIn("OBV(-0.05) > Floor(-0.10)", signal.relaxed_reasons)
 
     def test_build_signal_heartbeat_payload_contains_zscore_gaps(self) -> None:
         robot = CTARobot(

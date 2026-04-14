@@ -174,7 +174,9 @@ def resolve_dynamic_obv_gate(
     ):
         return OBVGateDecision(threshold=0.0, exempt=False, side=resolved_side)
     if bool(execution_frontrun_near_breakout):
-        return OBVGateDecision(threshold=0.0, exempt=False, side=resolved_side)
+        return OBVGateDecision(threshold=-0.1 if resolved_side == "long" else 0.0, exempt=False, side=resolved_side)
+    if resolved_side == "long" and major_direction is not None and int(major_direction) > 0 and float(bullish_score) >= 60.0:
+        return OBVGateDecision(threshold=-0.1, exempt=False, side=resolved_side)
     if float(bullish_score) >= 65.0:
         return OBVGateDecision(threshold=0.0, exempt=False, side=resolved_side)
     if _is_high_quality_long_post_trigger_context(

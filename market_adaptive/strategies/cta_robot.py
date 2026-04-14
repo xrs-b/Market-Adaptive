@@ -63,6 +63,8 @@ class TrendSignal:
     blocker_reason: str = ""
     data_alignment_valid: bool = True
     data_mismatch_ms: int = 0
+    relaxed_entry: bool = False
+    relaxed_reasons: tuple[str, ...] = ()
 
     @property
     def obv_signal_strength(self) -> float:
@@ -245,14 +247,15 @@ class CTARobot(BaseStrategyRobot):
         if not inside_value_area:
             return ValueAreaDecision(inside_value_area=False, blocked=False)
 
-        edge_threshold = 0.5 * max(0.0, float(atr_value))
+        edge_threshold = float(getattr(self.config, "value_area_edge_atr_multiplier", 1.0)) * max(0.0, float(atr_value))
         value_area_high = float(volume_profile.value_area_high)
         value_area_low = float(volume_profile.value_area_low)
 
+        drive_first_score = float(getattr(self.config, "drive_first_tradeable_score", 60.0))
         if float(bullish_score) >= 75.0 and bool(execution_frontrun_near_breakout):
             return ValueAreaDecision(inside_value_area=True, blocked=False, reason='High Momentum')
 
-        if int(major_direction) > 0 and float(current_price) > value_area_high - edge_threshold:
+        if int(major_direction) > 0 and float(bullish_score) >= drive_first_score and float(current_price) >= value_area_high - edge_threshold:
             return ValueAreaDecision(inside_value_area=True, blocked=False, reason='Edge Proximity')
 
         if int(major_direction) < 0 and float(current_price) < value_area_low + edge_threshold:
@@ -381,8 +384,14 @@ class CTARobot(BaseStrategyRobot):
         obv_bias = 1 if obv_confirmation.above_sma else -1 if obv_confirmation.below_sma else 0
         raw_direction = 1 if mtf_signal.fully_aligned else 0
         obv_threshold, obv_exempt = self._resolve_obv_gate(mtf_signal)
+        drive_first_tradeable = bool(float(mtf_signal.bullish_score) >= float(getattr(self.config, "drive_first_tradeable_score", 60.0)))
+        relaxed_obv_allowed = bool(
+            int(mtf_signal.major_direction) > 0
+            and drive_first_tradeable
+            and float(obv_confirmation.zscore) > float(obv_threshold)
+        )
         volume_filter_passed = raw_direction > 0 and (
-            obv_exempt or obv_confirmation.buy_confirmed(zscore_threshold=obv_threshold)
+            obv_exempt or obv_confirmation.buy_confirmed(zscore_threshold=obv_threshold) or relaxed_obv_allowed
         )
         current_price = float(execution_frame["close"].iloc[-1])
         volume_profile = compute_volume_profile(
@@ -401,6 +410,7 @@ class CTARobot(BaseStrategyRobot):
         long_setup_blocked = False
         long_setup_reason = ""
         obv_confirmation_passed = True
+        relaxed_reasons: list[str] = []
 
         if raw_direction > 0:
             obv_confirmation_passed = volume_filter_passed
@@ -412,12 +422,15 @@ class CTARobot(BaseStrategyRobot):
                 bullish_score=float(mtf_signal.bullish_score),
                 execution_frontrun_near_breakout=bool(mtf_signal.execution_trigger.frontrun_near_breakout),
             )
-            if not obv_exempt and not obv_confirmation.above_sma:
-                long_setup_blocked = True
-                long_setup_reason = "obv_below_sma"
-            elif not obv_exempt and not obv_confirmation_passed:
+            if not obv_exempt and not obv_confirmation_passed:
                 long_setup_blocked = True
                 long_setup_reason = "obv_strength_not_confirmed"
+            elif not obv_exempt and not obv_confirmation.above_sma:
+                if relaxed_obv_allowed:
+                    relaxed_reasons.append(f"OBV({float(obv_confirmation.zscore):.2f}) > Floor({float(obv_threshold):.2f})")
+                else:
+                    long_setup_blocked = True
+                    long_setup_reason = "obv_below_sma"
             elif volume_profile is None:
                 long_setup_blocked = True
                 long_setup_reason = "missing_volume_profile"
@@ -428,6 +441,8 @@ class CTARobot(BaseStrategyRobot):
                 long_setup_blocked = True
                 long_setup_reason = "inside_value_area"
             elif value_area_decision.inside_value_area and value_area_decision.reason:
+                if value_area_decision.reason in {"High Momentum", "Edge Proximity"}:
+                    relaxed_reasons.append(f"VA:{value_area_decision.reason}")
                 self._log_value_area_event(
                     volume_profile=volume_profile,
                     current_price=current_price,
@@ -449,6 +464,10 @@ class CTARobot(BaseStrategyRobot):
 
             if final_direction > 0 and high_momentum_clearance.activated:
                 logger.info("[FINAL_TRIGGER_OVERRIDE] Full Clearance - All Guards Relaxed for High Momentum Breakout")
+            if final_direction > 0 and bool(getattr(mtf_signal, "rsi_blocking_overridden", False)):
+                relaxed_reasons.append(
+                    f"RSI({float(mtf_signal.swing_rsi):.2f}) tolerated with Score({float(mtf_signal.bullish_score):.0f})"
+                )
 
         blocker_reason = mtf_signal.blocker_reason
         if long_setup_blocked:
@@ -494,6 +513,8 @@ class CTARobot(BaseStrategyRobot):
             blocker_reason=blocker_reason,
             data_alignment_valid=mtf_signal.data_alignment_valid,
             data_mismatch_ms=mtf_signal.data_mismatch_ms,
+            relaxed_entry=bool(relaxed_reasons),
+            relaxed_reasons=tuple(dict.fromkeys(relaxed_reasons)),
         )
 
     def _effective_signal_obv_threshold(self, signal: TrendSignal) -> float:
@@ -690,6 +711,15 @@ class CTARobot(BaseStrategyRobot):
                 side,
                 signal.execution_trigger_reason,
             )
+        entry_type = "Relaxed_Entry" if signal.relaxed_entry else "Standard_Entry"
+        entry_reason = (
+            f"Score({float(signal.bullish_score):.0f}) > Threshold({float(getattr(self.config, 'drive_first_tradeable_score', 60.0)):.0f})"
+            if signal.relaxed_entry
+            else str(signal.execution_trigger_reason)
+        )
+        if signal.relaxed_entry and signal.relaxed_reasons:
+            entry_reason = f"{entry_reason} | Relaxations: {', '.join(signal.relaxed_reasons)}"
+        logger.info("[TRADE_OPEN] Type: %s | Reason: %s", entry_type, entry_reason)
 
         entry_order = self._place_entry_order(
             side=side,
