@@ -56,6 +56,7 @@ class MarketAdaptiveBootstrapTests(unittest.TestCase):
         self.assertTrue(config.cta.starter_frontrun_enabled)
         self.assertEqual(config.cta.starter_frontrun_fraction, 0.20)
         self.assertEqual(config.cta.starter_frontrun_breakout_buffer_ratio, 0.002)
+        self.assertEqual(config.cta.bullish_memory_retest_breakout_buffer_ratio, 0.0026)
         self.assertEqual(config.cta.obv_signal_window, 8)
         self.assertEqual(config.cta.obv_signal_threshold_degrees, 30.0)
         self.assertEqual(config.cta.obv_slope_window, 8)

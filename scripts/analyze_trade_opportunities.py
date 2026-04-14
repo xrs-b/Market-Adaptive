@@ -64,6 +64,23 @@ def _slice_until(frame: pd.DataFrame, ts: pd.Timestamp) -> pd.DataFrame:
     return subset.copy()
 
 
+def _major_bull_retest_near_breakout_ready(
+    *,
+    cta,
+    major_direction: int,
+    bullish_ready: bool,
+    bullish_memory_active: bool,
+    frontrun_gap_ratio: float,
+) -> bool:
+    if major_direction <= 0 or not bullish_ready or not bullish_memory_active:
+        return False
+    tolerance_ratio = max(
+        float(getattr(cta, "starter_frontrun_breakout_buffer_ratio", 0.002)),
+        float(getattr(cta, "bullish_memory_retest_breakout_buffer_ratio", 0.0026)),
+    )
+    return frontrun_gap_ratio <= tolerance_ratio
+
+
 def fetch_ohlcv_df(client: OKXClient, symbol: str, timeframe: str, *, limit_per_call: int = 200, prefer_closed: bool = True) -> pd.DataFrame:
     rows = client.fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit_per_call)
     rows = maybe_use_closed_candles(rows, enabled=prefer_closed)
@@ -218,7 +235,13 @@ def replay_cta(config_path: Path, hours: int) -> dict:
                 supported_volume = bool((recent["volume"] >= volume_mean * volume_multiplier).all())
                 frontrun_impulse_confirmed = bullish_bars and supported_volume
         execution_obv_ready = execution_obv_confirmation.buy_confirmed(zscore_threshold=float(cta.obv_zscore_threshold))
-        major_bull_retest_ready = bool(major_direction > 0 and bullish_ready and frontrun_near_breakout and bullish_memory_active)
+        major_bull_retest_ready = _major_bull_retest_near_breakout_ready(
+            cta=cta,
+            major_direction=major_direction,
+            bullish_ready=bullish_ready,
+            bullish_memory_active=bullish_memory_active,
+            frontrun_gap_ratio=frontrun_gap_ratio,
+        )
         major_bull_impulse_reclaim_ready = bool(
             major_direction > 0
             and bullish_ready

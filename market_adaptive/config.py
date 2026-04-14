@@ -212,6 +212,7 @@ class CTAConfig:
     starter_frontrun_enabled: bool = True
     starter_frontrun_fraction: float = 0.20
     starter_frontrun_breakout_buffer_ratio: float = 0.002
+    bullish_memory_retest_breakout_buffer_ratio: float = 0.0026
     starter_frontrun_impulse_bars: int = 3
     starter_frontrun_volume_window: int = 12
     starter_frontrun_volume_multiplier: float = 1.15
@@ -248,6 +249,10 @@ class CTAConfig:
         if self.boosted_risk_percent_per_trade <= 0:
             self.boosted_risk_percent_per_trade = self.risk_percent_per_trade
         self.kdj_signal_memory_bars = max(1, int(self.kdj_signal_memory_bars))
+        self.bullish_memory_retest_breakout_buffer_ratio = max(
+            float(self.starter_frontrun_breakout_buffer_ratio),
+            float(self.bullish_memory_retest_breakout_buffer_ratio),
+        )
         self.dynamic_rsi_floor = float(self.dynamic_rsi_floor)
         self.recovery_ema_period = max(2, int(self.recovery_ema_period))
         self.recovery_ema_slope_lookback = max(1, int(self.recovery_ema_slope_lookback))
@@ -636,6 +641,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         starter_frontrun_enabled=bool(cta_payload.get("starter_frontrun_enabled", True)),
         starter_frontrun_fraction=float(cta_payload.get("starter_frontrun_fraction", 0.20)),
         starter_frontrun_breakout_buffer_ratio=float(cta_payload.get("starter_frontrun_breakout_buffer_ratio", 0.002)),
+        bullish_memory_retest_breakout_buffer_ratio=float(cta_payload.get("bullish_memory_retest_breakout_buffer_ratio", 0.0026)),
         starter_frontrun_impulse_bars=int(cta_payload.get("starter_frontrun_impulse_bars", 3)),
         starter_frontrun_volume_window=int(cta_payload.get("starter_frontrun_volume_window", 12)),
         starter_frontrun_volume_multiplier=float(cta_payload.get("starter_frontrun_volume_multiplier", 1.15)),

@@ -113,6 +113,22 @@ class MultiTimeframeSignalEngine:
         except ValueError:
             return 900_000
 
+    def _major_bull_retest_near_breakout_ready(
+        self,
+        *,
+        major_direction: int,
+        bullish_ready: bool,
+        bullish_memory_active: bool,
+        frontrun_gap_ratio: float,
+    ) -> bool:
+        if major_direction <= 0 or not bullish_ready or not bullish_memory_active:
+            return False
+        tolerance_ratio = max(
+            float(getattr(self.config, "starter_frontrun_breakout_buffer_ratio", 0.002)),
+            float(getattr(self.config, "bullish_memory_retest_breakout_buffer_ratio", 0.0026)),
+        )
+        return frontrun_gap_ratio <= tolerance_ratio
+
     def _check_timeframe_alignment(self, major_frame: pd.DataFrame, swing_frame: pd.DataFrame, execution_frame: pd.DataFrame) -> TimeframeAlignmentCheck:
         major_ts = int(pd.Timestamp(major_frame["timestamp"].iloc[-1]).value // 1_000_000)
         swing_ts = int(pd.Timestamp(swing_frame["timestamp"].iloc[-1]).value // 1_000_000)
@@ -455,11 +471,11 @@ class MultiTimeframeSignalEngine:
             and frontrun_impulse_confirmed
             and (bullish_memory_active or kdj_golden_cross)
         )
-        major_bull_retest_ready = bool(
-            major_direction > 0
-            and bullish_ready
-            and frontrun_near_breakout
-            and bullish_memory_active
+        major_bull_retest_ready = self._major_bull_retest_near_breakout_ready(
+            major_direction=major_direction,
+            bullish_ready=bullish_ready,
+            bullish_memory_active=bullish_memory_active,
+            frontrun_gap_ratio=frontrun_gap_ratio,
         )
         major_bull_impulse_reclaim_ready = bool(
             major_direction > 0

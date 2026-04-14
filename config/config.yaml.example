@@ -148,6 +148,7 @@ cta:
   starter_frontrun_enabled: true
   starter_frontrun_fraction: 0.20
   starter_frontrun_breakout_buffer_ratio: 0.002
+  bullish_memory_retest_breakout_buffer_ratio: 0.0026
   starter_frontrun_impulse_bars: 3
   starter_frontrun_volume_window: 12
   starter_frontrun_volume_multiplier: 1.15
