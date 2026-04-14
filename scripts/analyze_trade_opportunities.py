@@ -135,7 +135,12 @@ def replay_cta(config_path: Path, hours: int) -> dict:
     start = now - pd.Timedelta(hours=hours)
     major = fetch_ohlcv_df(client, symbol, cta.major_timeframe, prefer_closed=cta.prefer_closed_major_timeframe_candles)
     swing = fetch_ohlcv_df(client, symbol, cta.swing_timeframe, prefer_closed=cta.prefer_closed_swing_timeframe_candles)
-    execution = fetch_ohlcv_df(client, symbol, cta.execution_timeframe, prefer_closed=True)
+    execution = fetch_ohlcv_df(
+        client,
+        symbol,
+        cta.execution_timeframe,
+        prefer_closed=cta.prefer_closed_execution_timeframe_candles,
+    )
     oracle_high = fetch_ohlcv_df(client, symbol, oracle.higher_timeframe, prefer_closed=oracle.prefer_closed_higher_timeframe_candles)
     oracle_low = fetch_ohlcv_df(client, symbol, oracle.lower_timeframe, prefer_closed=oracle.prefer_closed_lower_timeframe_candles)
 
