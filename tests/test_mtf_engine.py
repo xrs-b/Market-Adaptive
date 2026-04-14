@@ -64,7 +64,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.execution_trigger.kdj_golden_cross)
         self.assertFalse(signal.execution_trigger.prior_high_break)
         self.assertFalse(signal.fully_aligned)
-        self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger")
+        self.assertEqual(signal.execution_trigger.reason, "WAITING_SETUP")
 
     def test_engine_confirms_entry_when_execution_breaks_prior_high(self) -> None:
         self._load_bullish_major_and_swing()
@@ -102,7 +102,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.execution_trigger.prior_high_break)
         self.assertTrue(signal.execution_trigger.bullish_memory_active)
         self.assertTrue(signal.fully_aligned)
-        self.assertIn("major_bull_retest_ready", signal.execution_trigger.reason)
+        self.assertTrue(any(tag in signal.execution_trigger.reason for tag in ("major_bull_retest_ready", "price_led_override")))
 
     def test_engine_allows_slightly_wider_major_bull_retest_window_only_with_active_bullish_memory(self) -> None:
         self._load_bullish_major_and_swing()
@@ -138,7 +138,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.execution_trigger.bullish_memory_active)
         self.assertFalse(signal.execution_trigger.prior_high_break)
         self.assertFalse(signal.fully_aligned)
-        self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger")
+        self.assertEqual(signal.execution_trigger.reason, "WAITING_SETUP")
 
     def test_engine_keeps_short_decaying_urgency_window_after_memory_expires_near_breakout(self) -> None:
         config = CTAConfig(
@@ -192,7 +192,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.execution_trigger.bullish_memory_active)
         self.assertFalse(signal.execution_trigger.bullish_urgency_active)
         self.assertFalse(signal.fully_aligned)
-        self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger")
+        self.assertEqual(signal.execution_trigger.reason, "ARMED_READY")
 
     def test_engine_blocks_decaying_urgency_window_on_kdj_dead_cross(self) -> None:
         config = CTAConfig(
@@ -219,8 +219,9 @@ class MTFEngineTests(unittest.TestCase):
         self.assertTrue(signal.bullish_ready)
         self.assertFalse(signal.execution_trigger.bullish_memory_active)
         self.assertFalse(signal.execution_trigger.bullish_urgency_active)
+        self.assertTrue(signal.execution_trigger.bearish_latch_active)
         self.assertFalse(signal.fully_aligned)
-        self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger")
+        self.assertEqual(signal.execution_trigger.reason, "WAITING_SETUP")
 
     def test_engine_allows_major_bull_impulse_reclaim_after_breakout_when_kdj_memory_expired(self) -> None:
         self._load_bullish_major_and_swing()
@@ -678,6 +679,89 @@ class MTFEngineTests(unittest.TestCase):
         self.assertGreaterEqual(signal.bullish_score, signal.bullish_threshold)
         self.assertTrue(signal.bullish_ready)
         self.assertGreaterEqual(signal.bullish_score, config.weak_bull_bias_score + config.dynamic_rsi_trend_score + config.magnetism_score_bonus)
+
+
+    def test_engine_uses_price_led_override_for_high_confidence_near_breakout_without_memory(self) -> None:
+        config = CTAConfig(
+            symbol="BTC/USDT",
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            strong_bull_bias_score=70.0,
+            bullish_ready_score_threshold=55.0,
+        )
+        engine = MultiTimeframeSignalEngine(self.client, config)
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.25 for index in range(54)] + [103.8, 104.3, 104.9, 105.4, 105.8, 105.99]
+        self._set_ohlcv("15m", execution_closes, 900_000)
+
+        import pandas as pd
+        mocked_kdj = pd.DataFrame({"k": [56.0] * 60, "d": [51.0] * 60})
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.bullish_ready)
+        self.assertFalse(signal.execution_trigger.bullish_memory_active)
+        self.assertTrue(signal.execution_trigger.frontrun_near_breakout)
+        self.assertTrue(signal.fully_aligned)
+        self.assertIn("price_led_override", signal.execution_trigger.reason)
+
+    def test_engine_uses_soft_latch_breakout_for_medium_confidence_breakout_after_memory_expiry(self) -> None:
+        config = CTAConfig(
+            symbol="BTC/USDT",
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            strong_bull_bias_score=55.0,
+            bullish_ready_score_threshold=55.0,
+            kdj_signal_memory_bars=3,
+        )
+        engine = MultiTimeframeSignalEngine(self.client, config)
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.22 for index in range(54)] + [101.0, 101.4, 101.9, 102.2, 102.6, 103.2]
+        self._set_ohlcv("15m", execution_closes, 900_000)
+
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=4)
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.bullish_ready)
+        self.assertFalse(signal.execution_trigger.bullish_memory_active)
+        self.assertTrue(signal.execution_trigger.bullish_latch_active)
+        self.assertIsNotNone(signal.execution_trigger.latch_low_price)
+        self.assertTrue(signal.execution_trigger.prior_high_break)
+        self.assertTrue(signal.fully_aligned)
+        self.assertIn("soft_latch_breakout", signal.execution_trigger.reason)
+
+    def test_engine_resets_soft_latch_after_defended_low_breaks(self) -> None:
+        config = CTAConfig(
+            symbol="BTC/USDT",
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            strong_bull_bias_score=55.0,
+            bullish_ready_score_threshold=55.0,
+            kdj_signal_memory_bars=3,
+        )
+        engine = MultiTimeframeSignalEngine(self.client, config)
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.22 for index in range(54)] + [101.0, 101.4, 100.8, 101.2, 101.5, 103.2]
+        self._set_ohlcv("15m", execution_closes, 900_000)
+
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=4)
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertFalse(signal.execution_trigger.bullish_memory_active)
+        self.assertFalse(signal.execution_trigger.bullish_latch_active)
+        self.assertFalse(signal.fully_aligned)
+        self.assertEqual(signal.execution_trigger.reason, "WAITING_SETUP")
 
     def test_engine_flags_starter_frontrun_when_breakout_is_within_last_point_two_percent(self) -> None:
         config = CTAConfig(

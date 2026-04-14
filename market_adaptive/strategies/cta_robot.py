@@ -43,6 +43,9 @@ class TrendSignal:
     execution_golden_cross: bool = False
     execution_breakout: bool = False
     execution_memory_active: bool = False
+    execution_latch_active: bool = False
+    execution_latch_price: float | None = None
+    execution_frontrun_near_breakout: bool = False
     execution_memory_bars_ago: int | None = None
     execution_trigger_reason: str = ""
     mtf_aligned: bool = False
@@ -356,6 +359,9 @@ class CTARobot(BaseStrategyRobot):
             execution_golden_cross=mtf_signal.execution_trigger.kdj_golden_cross,
             execution_breakout=mtf_signal.execution_trigger.prior_high_break,
             execution_memory_active=mtf_signal.execution_trigger.bullish_memory_active,
+            execution_latch_active=mtf_signal.execution_trigger.bullish_latch_active,
+            execution_latch_price=mtf_signal.execution_trigger.latch_low_price,
+            execution_frontrun_near_breakout=mtf_signal.execution_trigger.frontrun_near_breakout,
             execution_memory_bars_ago=mtf_signal.execution_trigger.bullish_cross_bars_ago,
             execution_trigger_reason=mtf_signal.execution_trigger.reason,
             mtf_aligned=mtf_signal.fully_aligned,
@@ -399,6 +405,9 @@ class CTARobot(BaseStrategyRobot):
             "execution_entry_mode": str(signal.execution_entry_mode),
             "execution_trigger_reason": str(signal.execution_trigger_reason),
             "execution_memory_active": bool(signal.execution_memory_active),
+            "execution_latch_active": bool(signal.execution_latch_active),
+            "execution_latch_price": signal.execution_latch_price,
+            "execution_frontrun_near_breakout": bool(signal.execution_frontrun_near_breakout),
             "execution_memory_bars_ago": signal.execution_memory_bars_ago,
             "obv_current": float(obv.current_obv),
             "obv_sma": float(obv.sma_value),
@@ -429,7 +438,16 @@ class CTARobot(BaseStrategyRobot):
         logger.info("CTA signal heartbeat | %s", self._build_signal_heartbeat_payload(signal))
 
     def _is_execution_near_ready(self, signal: TrendSignal) -> bool:
-        return bool(signal.bullish_ready and (signal.raw_direction > 0 or signal.execution_memory_active or signal.execution_breakout))
+        return bool(
+            signal.bullish_ready
+            and (
+                signal.raw_direction > 0
+                or signal.execution_memory_active
+                or signal.execution_latch_active
+                or signal.execution_frontrun_near_breakout
+                or signal.execution_breakout
+            )
+        )
 
     def _request_urgent_wakeup_on_signal_transition(self, signal: TrendSignal) -> None:
         if self.runtime_context is None:

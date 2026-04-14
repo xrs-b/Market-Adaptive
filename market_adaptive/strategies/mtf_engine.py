@@ -39,10 +39,14 @@ class ExecutionTriggerSnapshot:
     bearish_memory_active: bool
     bullish_cross_bars_ago: int | None
     bearish_cross_bars_ago: int | None
-    prior_high_break: bool
-    prior_low_break: bool
-    prior_high: float | None
-    prior_low: float | None
+    bullish_latch_active: bool = False
+    bearish_latch_active: bool = False
+    latch_low_price: float | None = None
+    latch_high_price: float | None = None
+    prior_high_break: bool = False
+    prior_low_break: bool = False
+    prior_high: float | None = None
+    prior_low: float | None = None
     frontrun_gap_ratio: float = 0.0
     bullish_urgency_active: bool = False
     bullish_urgency_decay_step: int | None = None
@@ -50,6 +54,7 @@ class ExecutionTriggerSnapshot:
     frontrun_impulse_confirmed: bool = False
     frontrun_obv_confirmed: bool = False
     frontrun_ready: bool = False
+    state_label: str = "WAITING_SETUP"
     reason: str = ""
 
 
@@ -131,6 +136,36 @@ class MultiTimeframeSignalEngine:
             float(getattr(self.config, "bullish_memory_retest_breakout_buffer_ratio", 0.0026)),
         )
         return frontrun_gap_ratio <= tolerance_ratio
+
+    @staticmethod
+    def _resolve_directional_latch(
+        *,
+        cross_mask: pd.Series,
+        reverse_cross_mask: pd.Series,
+        execution_frame: pd.DataFrame,
+        defended_column: str,
+        violation_column: str,
+        bullish: bool,
+    ) -> tuple[bool, float | None, int | None]:
+        recent_crosses = cross_mask.fillna(False).astype(bool)
+        if recent_crosses.empty or not recent_crosses.any():
+            return False, None, None
+        cross_positions = [idx for idx, value in enumerate(recent_crosses.tolist()) if value]
+        cross_position = cross_positions[-1]
+        reverse_crosses = reverse_cross_mask.fillna(False).astype(bool)
+        reverse_positions = [idx for idx, value in enumerate(reverse_crosses.tolist()) if value]
+        if reverse_positions and reverse_positions[-1] > cross_position:
+            return False, None, None
+        defended_price = float(execution_frame[defended_column].iloc[cross_position])
+        trailing_slice = execution_frame[violation_column].iloc[cross_position + 1 :]
+        epsilon = 1e-12
+        if bullish:
+            violated = bool((trailing_slice < defended_price - epsilon).any())
+        else:
+            violated = bool((trailing_slice > defended_price + epsilon).any())
+        if violated:
+            return False, defended_price, len(execution_frame) - 1 - cross_position
+        return True, defended_price, len(execution_frame) - 1 - cross_position
 
     def _resolve_bullish_urgency_window(
         self,
@@ -413,6 +448,22 @@ class MultiTimeframeSignalEngine:
         bearish_cross_bars_ago = self._bars_since_last_true(bearish_cross_mask, memory_bars)
         bullish_memory_active = bullish_cross_bars_ago is not None and bullish_cross_bars_ago < memory_bars
         bearish_memory_active = bearish_cross_bars_ago is not None
+        bullish_latch_active, latch_low_price, bullish_latch_bars_ago = self._resolve_directional_latch(
+            cross_mask=bullish_cross_mask,
+            reverse_cross_mask=bearish_cross_mask,
+            execution_frame=execution_frame,
+            defended_column="low",
+            violation_column="low",
+            bullish=True,
+        )
+        bearish_latch_active, latch_high_price, bearish_latch_bars_ago = self._resolve_directional_latch(
+            cross_mask=bearish_cross_mask,
+            reverse_cross_mask=bullish_cross_mask,
+            execution_frame=execution_frame,
+            defended_column="high",
+            violation_column="high",
+            bullish=False,
+        )
 
         score_4h = float(self.config.strong_bull_bias_score) if major_direction > 0 else 0.0
         score_1h = 0.0
@@ -511,6 +562,14 @@ class MultiTimeframeSignalEngine:
             and frontrun_impulse_confirmed
             and (bullish_memory_active or kdj_golden_cross)
         )
+        high_confidence_price_override = bool(bullish_score >= 70.0 and frontrun_near_breakout and not kdj_dead_cross)
+        medium_confidence_latch_breakout_ready = bool(
+            major_direction > 0
+            and bullish_ready
+            and bullish_score < 70.0
+            and bullish_latch_active
+            and prior_high_break
+        )
         bullish_urgency_active, bullish_urgency_decay_step, bullish_urgency_trigger_ready = self._resolve_bullish_urgency_window(
             bullish_ready=bullish_ready,
             kdj_dead_cross=kdj_dead_cross,
@@ -522,6 +581,10 @@ class MultiTimeframeSignalEngine:
             execution_obv_ready=execution_obv_ready,
             major_direction=major_direction,
         )
+        if bullish_urgency_active and not bullish_latch_active:
+            bullish_urgency_active = False
+            bullish_urgency_decay_step = None
+            bullish_urgency_trigger_ready = False
         major_bull_retest_ready = self._major_bull_retest_near_breakout_ready(
             major_direction=major_direction,
             bullish_ready=bullish_ready,
@@ -550,12 +613,17 @@ class MultiTimeframeSignalEngine:
             execution_entry_mode = "early_bullish_starter_limit"
             entry_size_multiplier = max(0.0, min(1.0, float(self.config.early_bullish_starter_fraction)))
 
+        state_label = "WAITING_SETUP"
         if early_bullish:
             reason = "early_bullish: 1h supertrend bullish + price above 4h lower band + 4h lower band slope flattening"
         elif bullish_memory_active and prior_high_break:
             reason = f"Triggered via Memory Window: KDJ crossed {bullish_cross_bars_ago} bars ago + Price Breakout NOW"
         elif starter_frontrun_ready:
             reason = f"starter_frontrun: gap={frontrun_gap_ratio * 100:.3f}% + 1m {int(getattr(self.config, 'starter_frontrun_impulse_bars', 3))} bullish bars + OBV confirmed"
+        elif high_confidence_price_override:
+            reason = f"price_led_override: bullish_score={bullish_score:.0f} + near_breakout_gap={frontrun_gap_ratio * 100:.3f}%"
+        elif medium_confidence_latch_breakout_ready:
+            reason = f"soft_latch_breakout: bullish_score={bullish_score:.0f} + latch_low={latch_low_price:.4f} + breakout confirmed"
         elif major_bull_retest_ready:
             if bullish_urgency_active and not bullish_memory_active:
                 if prior_high_break:
@@ -575,12 +643,10 @@ class MultiTimeframeSignalEngine:
             reason = f"Weak bull bias active: KDJ crossed {bullish_cross_bars_ago} bars ago + scale-in allowed before breakout"
         elif bullish_magnetism_ready:
             reason = f"磁吸力预判：距离轨道 {magnetism_distance_pct:.3f}%，OBV 已确认"
-        elif kdj_golden_cross:
-            reason = "kdj_golden_cross_waiting_breakout"
-        elif prior_high_break:
-            reason = "prior_high_break_waiting_kdj_memory"
         else:
-            reason = "waiting_execution_trigger"
+            if bullish_ready and (high_confidence_price_override or bullish_latch_active or kdj_golden_cross or frontrun_near_breakout):
+                state_label = "ARMED_READY"
+            reason = state_label
 
         execution_trigger = ExecutionTriggerSnapshot(
             kdj_golden_cross=kdj_golden_cross,
@@ -589,6 +655,10 @@ class MultiTimeframeSignalEngine:
             bearish_memory_active=bearish_memory_active,
             bullish_cross_bars_ago=bullish_cross_bars_ago,
             bearish_cross_bars_ago=bearish_cross_bars_ago,
+            bullish_latch_active=bullish_latch_active,
+            bearish_latch_active=bearish_latch_active,
+            latch_low_price=latch_low_price,
+            latch_high_price=latch_high_price,
             bullish_urgency_active=bullish_urgency_active,
             bullish_urgency_decay_step=bullish_urgency_decay_step,
             prior_high_break=prior_high_break,
@@ -600,9 +670,10 @@ class MultiTimeframeSignalEngine:
             frontrun_impulse_confirmed=frontrun_impulse_confirmed,
             frontrun_obv_confirmed=execution_obv_ready,
             frontrun_ready=starter_frontrun_ready,
+            state_label=state_label,
             reason=reason,
         )
-        fully_aligned = early_bullish or starter_frontrun_ready or major_bull_retest_ready or major_bull_impulse_reclaim_ready or (
+        fully_aligned = early_bullish or starter_frontrun_ready or high_confidence_price_override or medium_confidence_latch_breakout_ready or major_bull_retest_ready or major_bull_impulse_reclaim_ready or (
             bullish_ready and (
                 ((swing_direction > 0) and prior_high_break and (bullish_memory_active or bullish_urgency_active or kdj_golden_cross))
                 or (weak_bull_bias and bullish_memory_active)

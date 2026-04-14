@@ -181,6 +181,8 @@ def evaluate_timestamp(config_path: Path, target: str) -> dict:
             "execution_entry_mode": signal.execution_entry_mode,
             "execution_trigger_reason": signal.execution_trigger.reason,
             "execution_memory_active": signal.execution_trigger.bullish_memory_active,
+            "execution_latch_active": signal.execution_trigger.bullish_latch_active,
+            "execution_latch_price": signal.execution_trigger.latch_low_price,
             "execution_memory_bars_ago": signal.execution_trigger.bullish_cross_bars_ago,
             "execution_breakout": signal.execution_trigger.prior_high_break,
             "execution_frontrun_near_breakout": signal.execution_trigger.frontrun_near_breakout,
