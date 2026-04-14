@@ -381,6 +381,42 @@ class MultiTimeframeSignalEngine:
             return bonus
         return 0.0
 
+    def _resolve_early_bearish(self, *, major_direction: int, swing_direction: int, swing_frame: pd.DataFrame, major_supertrend: pd.DataFrame, swing_rsi: pd.Series, weak_bear_bias: bool, bearish_memory_active: bool, kdj_dead_cross: bool) -> bool:
+        if major_direction < 0 or len(swing_frame) < 1 or len(major_supertrend) < 2 or len(swing_rsi) < 2:
+            return False
+        current_price = float(swing_frame["close"].iloc[-1])
+        current_upper_band = float(major_supertrend["upper_band"].iloc[-1])
+        previous_upper_band = float(major_supertrend["upper_band"].iloc[-2])
+        current_atr = float(major_supertrend["atr"].iloc[-1])
+        upper_band_slope = current_upper_band - previous_upper_band
+        maximum_slope = float(self.config.early_bullish_lower_band_slope_atr_threshold) * max(current_atr, 1e-12)
+        rsi_sma = swing_rsi.rolling(max(2, int(self.config.recovery_rsi_sma_period)), min_periods=1).mean()
+        current_rsi = float(swing_rsi.iloc[-1])
+        current_rsi_sma = float(rsi_sma.iloc[-1])
+        previous_rsi = float(swing_rsi.iloc[-2])
+        rsi_slope = current_rsi - previous_rsi
+        rsi_buffer = max(0.0, 0.5 * abs(rsi_slope))
+        bearish_rsi_structure = current_rsi <= (current_rsi_sma + rsi_buffer) and rsi_slope < 0.0
+        swing_rollover_ready = swing_direction < 0 or bearish_rsi_structure
+        bearish_trigger_support = bearish_memory_active or kdj_dead_cross or weak_bear_bias
+        return current_price < current_upper_band and upper_band_slope <= maximum_slope and swing_rollover_ready and bearish_trigger_support
+
+    def _resolve_early_bearish_score_bonus(self, *, early_bearish: bool, swing_rsi: pd.Series) -> float:
+        if not early_bearish:
+            return 0.0
+        bonus = float(getattr(self.config, "early_bullish_score_bonus", 0.0))
+        if bonus <= 0.0 or len(swing_rsi) < 2:
+            return 0.0
+        rsi_sma = swing_rsi.rolling(max(2, int(self.config.recovery_rsi_sma_period)), min_periods=1).mean()
+        current_rsi = float(swing_rsi.iloc[-1])
+        current_rsi_sma = float(rsi_sma.iloc[-1])
+        previous_rsi = float(swing_rsi.iloc[-2])
+        rsi_slope = current_rsi - previous_rsi
+        rsi_buffer = max(0.0, 0.5 * abs(rsi_slope))
+        rollover_still_supported = current_rsi <= (current_rsi_sma + rsi_buffer)
+        if rollover_still_supported and current_rsi <= float(self.config.swing_rsi_ready_threshold):
+            return bonus
+        return 0.0
 
     def _has_starter_frontrun_impulse(self, execution_frame: pd.DataFrame) -> bool:
         impulse_bars = max(2, int(getattr(self.config, "starter_frontrun_impulse_bars", 3)))
@@ -494,16 +530,6 @@ class MultiTimeframeSignalEngine:
             and float(swing_frame["close"].iloc[-1]) < float(recovery_ema.iloc[-1])
             and (float(recovery_ema.iloc[-1]) - float(recovery_ema.iloc[max(0, len(recovery_ema) - 1 - max(1, int(self.config.recovery_ema_slope_lookback)))])) <= float(self.config.recovery_ema_flat_tolerance_atr_ratio) * max(current_major_atr, 1e-12)
         )
-        current_price_for_bias = float(swing_frame["close"].iloc[-1])
-        current_upper_band = float(major_supertrend["upper_band"].iloc[-1])
-        previous_upper_band = float(major_supertrend["upper_band"].iloc[-2]) if len(major_supertrend) >= 2 else current_upper_band
-        upper_band_slope = current_upper_band - previous_upper_band
-        early_bearish = bool(
-            major_direction >= 0
-            and swing_direction < 0
-            and current_price_for_bias < current_upper_band
-            and upper_band_slope <= float(self.config.early_bullish_lower_band_slope_atr_threshold) * max(current_major_atr, 1e-12)
-        )
 
         current_k = float(execution_kdj["k"].iloc[-1])
         current_d = float(execution_kdj["d"].iloc[-1])
@@ -521,6 +547,16 @@ class MultiTimeframeSignalEngine:
         bearish_cross_bars_ago = self._bars_since_last_true(bearish_cross_mask, memory_bars)
         bullish_memory_active = bullish_cross_bars_ago is not None and bullish_cross_bars_ago < memory_bars
         bearish_memory_active = bearish_cross_bars_ago is not None
+        early_bearish = self._resolve_early_bearish(
+            major_direction=major_direction,
+            swing_direction=swing_direction,
+            swing_frame=swing_frame,
+            major_supertrend=major_supertrend,
+            swing_rsi=swing_rsi,
+            weak_bear_bias=weak_bear_bias,
+            bearish_memory_active=bearish_memory_active,
+            kdj_dead_cross=kdj_dead_cross,
+        )
         bullish_latch_active, latch_low_price, bullish_latch_bars_ago = self._resolve_directional_latch(
             cross_mask=bullish_cross_mask,
             reverse_cross_mask=bearish_cross_mask,
@@ -559,7 +595,7 @@ class MultiTimeframeSignalEngine:
             elif weak_bear_bias:
                 bearish_score_1h = float(self.config.weak_bull_bias_score)
         bearish_score_rsi = float(self.config.dynamic_rsi_trend_score) if current_swing_rsi <= float(self.config.dynamic_rsi_floor) and swing_rsi_slope < 0.0 else 0.0
-        bearish_score_early = float(getattr(self.config, "early_bullish_score_bonus", 0.0)) if early_bearish and current_swing_rsi <= float(self.config.swing_rsi_ready_threshold) else 0.0
+        bearish_score_early = self._resolve_early_bearish_score_bonus(early_bearish=early_bearish, swing_rsi=swing_rsi)
         bearish_score_kdj = float(getattr(self.config, "kdj_memory_score_bonus", 0.0)) if bearish_memory_active else 0.0
         bearish_score = bearish_score_4h + bearish_score_1h + bearish_score_rsi + bearish_score_early + bearish_score_kdj
         drive_first_tradeable = bullish_score >= float(getattr(self.config, "drive_first_tradeable_score", 60.0))

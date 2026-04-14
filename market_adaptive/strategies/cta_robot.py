@@ -388,7 +388,15 @@ class CTARobot(BaseStrategyRobot):
         )
         obv_bias = 1 if obv_confirmation.above_sma else -1 if obv_confirmation.below_sma else 0
         bullish_raw_direction = 1 if (mtf_signal.fully_aligned and int(mtf_signal.major_direction) >= 0 and not bool(getattr(mtf_signal, "bearish_ready", False))) else 0
-        bearish_raw_direction = -1 if (mtf_signal.fully_aligned and int(mtf_signal.major_direction) < 0 and bool(getattr(mtf_signal, "bearish_ready", False))) else 0
+        bearish_raw_direction = -1 if (
+            mtf_signal.fully_aligned
+            and bool(getattr(mtf_signal, "bearish_ready", False))
+            and (
+                int(mtf_signal.major_direction) < 0
+                or bool(getattr(mtf_signal, "weak_bear_bias", False))
+                or bool(getattr(mtf_signal, "early_bearish", False))
+            )
+        ) else 0
         raw_direction = bullish_raw_direction if bullish_raw_direction != 0 else bearish_raw_direction
         obv_threshold, obv_exempt = self._resolve_obv_gate(mtf_signal)
         drive_first_tradeable = bool(float(mtf_signal.bullish_score) >= float(getattr(self.config, "drive_first_tradeable_score", 60.0)))
