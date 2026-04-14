@@ -742,3 +742,107 @@ class CTAHeartbeatTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class CTAShortSignalTests(unittest.TestCase):
+    def test_build_trend_signal_can_emit_short_direction_from_normal_path(self) -> None:
+        robot = CTARobot(
+            client=DummyClient(),
+            database=DummyDatabase(),
+            config=CTAConfig(symbol="BTC/USDT", obv_zscore_threshold=0.6),
+            execution_config=ExecutionConfig(),
+            notifier=None,
+            risk_manager=None,
+            sentiment_analyst=None,
+        )
+        execution_frame = pd.DataFrame({
+            "timestamp": pd.to_datetime([1_700_000_000_000], unit="ms", utc=True),
+            "open": [100.0],
+            "high": [101.0],
+            "low": [98.0],
+            "close": [99.0],
+            "volume": [1000.0],
+        })
+        trigger = ExecutionTriggerSnapshot(
+            kdj_golden_cross=False,
+            kdj_dead_cross=True,
+            bullish_memory_active=False,
+            bearish_memory_active=True,
+            bullish_cross_bars_ago=None,
+            bearish_cross_bars_ago=1,
+            prior_high_break=False,
+            prior_low_break=True,
+            prior_high=101.5,
+            prior_low=99.5,
+            reason="Triggered via Bearish Memory Window: KDJ crossed 1 bars ago + Price Breakdown NOW",
+            frontrun_near_breakout=False,
+        )
+        mtf_signal = MTFSignal(
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            major_direction=-1,
+            major_bias_score=60.0,
+            weak_bull_bias=False,
+            early_bullish=False,
+            entry_size_multiplier=1.0,
+            swing_rsi=42.0,
+            swing_rsi_slope=-1.2,
+            bullish_score=0.0,
+            bullish_threshold=55.0,
+            bullish_ready=False,
+            execution_entry_mode="breakout_confirmed",
+            execution_trigger=trigger,
+            fully_aligned=True,
+            current_price=99.0,
+            execution_obv_zscore=-1.0,
+            execution_obv_threshold=0.6,
+            execution_atr=1.2,
+            atr_price_ratio_pct=1.2,
+            server_time_iso="",
+            local_time_iso="",
+            server_local_skew_ms=0,
+            major_timestamp_ms=1,
+            swing_timestamp_ms=1,
+            execution_timestamp_ms=1,
+            data_alignment_valid=True,
+            data_mismatch_ms=0,
+            blocker_reason="",
+            major_frame=execution_frame.copy(),
+            swing_frame=execution_frame.copy(),
+            execution_frame=execution_frame,
+            weak_bear_bias=False,
+            early_bearish=False,
+            bearish_score=70.0,
+            bearish_threshold=55.0,
+            bearish_ready=True,
+        )
+        obv_snapshot = OBVConfirmationSnapshot(
+            current_obv=900.0,
+            sma_value=1000.0,
+            increment_value=-5.0,
+            increment_mean=-1.0,
+            increment_std=2.0,
+            zscore=-1.0,
+        )
+        volume_profile = type("VolumeProfile", (), {
+            "poc_price": 100.0,
+            "value_area_low": 98.0,
+            "value_area_high": 101.0,
+            "above_poc": lambda self, price: False,
+            "contains_price": lambda self, price: True,
+            "above_value_area": lambda self, price: False,
+        })()
+
+        with (
+            patch.object(robot.mtf_engine, "build_signal", return_value=mtf_signal),
+            patch("market_adaptive.strategies.cta_robot.compute_obv", return_value=pd.Series([1.0])),
+            patch("market_adaptive.strategies.cta_robot.compute_atr", return_value=pd.Series([1.2])),
+            patch("market_adaptive.strategies.cta_robot.compute_obv_confirmation_snapshot", return_value=obv_snapshot),
+            patch("market_adaptive.strategies.cta_robot.compute_volume_profile", return_value=volume_profile),
+        ):
+            signal = robot._build_trend_signal()
+
+        assert signal is not None
+        self.assertEqual(signal.direction, -1)
+        self.assertEqual(signal.raw_direction, -1)
+        self.assertTrue(signal.bearish_ready)

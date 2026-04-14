@@ -171,8 +171,8 @@ class SignalProfiler:
 
     def record(self, signal: "MTFSignal", *, grid_center_price: float | None = None, blocker_reason: str = "") -> CycleAuditRecord:
         self.counters.total_cycles += 1
-        passed_regime = bool(signal.major_direction > 0 or signal.weak_bull_bias or signal.early_bullish)
-        passed_swing = bool(signal.bullish_ready)
+        passed_regime = bool(abs(int(signal.major_direction)) > 0 or getattr(signal, "weak_bull_bias", False) or getattr(signal, "early_bullish", False) or getattr(signal, "weak_bear_bias", False) or getattr(signal, "early_bearish", False))
+        passed_swing = bool(signal.bullish_ready or getattr(signal, "bearish_ready", False))
         passed_trigger = bool(signal.fully_aligned)
         if passed_regime:
             self.counters.passed_regime += 1

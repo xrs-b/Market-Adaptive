@@ -252,6 +252,7 @@ def replay_cta(config_path: Path, hours: int) -> dict:
         ema_slope = float(recovery_ema.iloc[-1]) - float(recovery_ema.iloc[-1 - slope_lookback])
         flat_tolerance = float(cta.recovery_ema_flat_tolerance_atr_ratio) * max(float(major_supertrend["atr"].iloc[-1]), 1e-12)
         weak_bull_bias = major_direction <= 0 and float(swing_frame["close"].iloc[-1]) > float(recovery_ema.iloc[-1]) and ema_slope >= -flat_tolerance
+        weak_bear_bias = major_direction >= 0 and float(swing_frame["close"].iloc[-1]) < float(recovery_ema.iloc[-1]) and ema_slope <= flat_tolerance
         if major_direction > 0:
             major_bias_score = float(cta.strong_bull_bias_score)
         else:
@@ -280,6 +281,17 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             elif weak_bull_bias:
                 score_1h = float(cta.weak_bull_bias_score)
         bullish_score = score_4h + score_1h + swing_score + early_recovery_score
+        early_bearish = bool(major_direction >= 0 and swing_direction < 0 and float(swing_frame["close"].iloc[-1]) < float(major_supertrend["upper_band"].iloc[-1]))
+        bearish_score = (float(cta.strong_bull_bias_score) if major_direction < 0 else 0.0)
+        if bearish_score <= 0.0:
+            if swing_direction < 0:
+                bearish_score += float(getattr(cta, "swing_supertrend_bullish_score", 0.0))
+            elif weak_bear_bias:
+                bearish_score += float(cta.weak_bull_bias_score)
+        if current_rsi <= float(cta.dynamic_rsi_floor) and rsi_slope < 0.0:
+            bearish_score += float(cta.dynamic_rsi_trend_score)
+        if early_bearish and current_rsi <= float(cta.swing_rsi_ready_threshold):
+            bearish_score += float(getattr(cta, "early_bullish_score_bonus", 0.0))
         execution_obv = compute_obv(exec_frame)
         execution_obv_confirmation = compute_obv_confirmation_snapshot(exec_frame, obv=execution_obv, sma_period=cta.obv_sma_period, zscore_window=cta.obv_zscore_window)
         execution_atr = float(compute_atr(exec_frame, length=cta.atr_period).iloc[-1])
@@ -292,6 +304,7 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             if current_major_atr > 0 and rail_distance < magnetism_limit and execution_obv_confirmation.zscore > float(cta.magnetism_obv_zscore_threshold):
                 bullish_score = max(bullish_score, float(cta.bullish_ready_score_threshold))
         bullish_ready = bullish_score >= float(cta.bullish_ready_score_threshold)
+        bearish_ready = bearish_score >= float(cta.bullish_ready_score_threshold)
         drive_first_tradeable = bullish_score >= float(getattr(cta, "drive_first_tradeable_score", 60.0))
 
         execution_kdj = compute_kdj(exec_frame, length=cta.kdj_length, k_smoothing=cta.kdj_k_smoothing, d_smoothing=cta.kdj_d_smoothing)
@@ -307,12 +320,24 @@ def replay_cta(config_path: Path, hours: int) -> dict:
                 bullish_cross_bars_ago = bars_ago
                 break
         bullish_memory_active = bullish_cross_bars_ago is not None and bullish_cross_bars_ago < max(1, int(cta.kdj_signal_memory_bars))
+        bearish_cross_mask = (execution_kdj["k"].shift(1) >= execution_kdj["d"].shift(1)) & (execution_kdj["k"] < execution_kdj["d"])
+        recent_bear = bearish_cross_mask.fillna(False).astype(bool).tail(max(1, int(cta.kdj_signal_memory_bars)))
+        bearish_cross_bars_ago = None
+        for bars_ago, value in enumerate(reversed(recent_bear.tolist())):
+            if value:
+                bearish_cross_bars_ago = bars_ago
+                break
+        bearish_memory_active = bearish_cross_bars_ago is not None and bearish_cross_bars_ago < max(1, int(cta.kdj_signal_memory_bars))
         prior_high = exec_frame["high"].shift(1).rolling(max(1, int(cta.execution_breakout_lookback)), min_periods=max(1, int(cta.execution_breakout_lookback))).max().iloc[-1]
         prior_high_break = not pd.isna(prior_high) and current_price > float(prior_high)
         frontrun_gap_ratio = 999.0
         if not pd.isna(prior_high) and abs(float(prior_high)) > 1e-12:
             frontrun_gap_ratio = max(0.0, (float(prior_high) - current_price) / float(prior_high))
         frontrun_near_breakout = frontrun_gap_ratio <= float(getattr(cta, "starter_frontrun_breakout_buffer_ratio", 0.002))
+        short_frontrun_gap_ratio = 999.0
+        if not pd.isna(prior_low) and abs(float(prior_low)) > 1e-12:
+            short_frontrun_gap_ratio = max(0.0, (current_price - float(prior_low)) / float(prior_low))
+        short_frontrun_near_breakout = short_frontrun_gap_ratio <= float(getattr(cta, "starter_frontrun_breakout_buffer_ratio", 0.002))
         impulse_bars = max(2, int(getattr(cta, "starter_frontrun_impulse_bars", 3)))
         volume_window = max(impulse_bars + 1, int(getattr(cta, "starter_frontrun_volume_window", 12)))
         frontrun_impulse_confirmed = False
@@ -366,6 +391,8 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             starter_frontrun_breakout_buffer_ratio=float(getattr(cta, "starter_frontrun_breakout_buffer_ratio", 0.002)),
             bullish_memory_retest_breakout_buffer_ratio=float(getattr(cta, "bullish_memory_retest_breakout_buffer_ratio", 0.0026)),
         )
+        bearish_breakout_ready = bool(major_direction < 0 and bearish_ready and prior_low_break and (bearish_memory_active or kdj_dead_cross))
+        bearish_retest_ready = bool(major_direction < 0 and bearish_ready and bearish_memory_active and short_frontrun_near_breakout)
         trigger_reason = classify_waiting_execution_trigger(
             bullish_ready=bullish_ready,
             state_label="ARMED_READY" if bullish_ready and (kdj_golden_cross or frontrun_near_breakout) else "WAITING_SETUP",
@@ -377,7 +404,15 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             frontrun_gap_ratio=frontrun_gap_ratio,
             execution_trigger_proximity_budget_ratio=execution_trigger_proximity_budget_ratio,
         )
-        if early_bullish:
+        if early_bearish:
+            trigger_reason = "early_bearish"
+        elif bearish_memory_active and prior_low_break and major_direction < 0 and bearish_ready:
+            trigger_reason = "bearish_memory+breakdown"
+        elif bearish_retest_ready:
+            trigger_reason = "major_bear_retest_ready"
+        elif bearish_breakout_ready:
+            trigger_reason = "bearish_breakdown_ready"
+        elif early_bullish:
             trigger_reason = "early_bullish"
         elif bullish_memory_active and prior_high_break:
             trigger_reason = "memory+breakout"
@@ -410,8 +445,9 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             bullish_ready = False
             fully_aligned = False
 
-        passed_mtf_regime = bool(major_direction > 0 or weak_bull_bias or early_bullish)
-        passed_bullish_ready = bool(bullish_ready)
+        fully_aligned = bool(fully_aligned or early_bearish or bearish_breakout_ready or bearish_retest_ready)
+        passed_mtf_regime = bool(major_direction != 0 or weak_bull_bias or early_bullish or weak_bear_bias or early_bearish)
+        passed_bullish_ready = bool(bullish_ready or bearish_ready)
         passed_trigger = bool(fully_aligned)
         obv_gate = resolve_dynamic_obv_gate(
             bullish_score=bullish_score,

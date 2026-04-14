@@ -32,13 +32,18 @@ class TrendSignal:
     major_direction: int
     major_bias_score: float = 0.0
     weak_bull_bias: bool = False
+    weak_bear_bias: bool = False
     early_bullish: bool = False
+    early_bearish: bool = False
     entry_size_multiplier: float = 1.0
     swing_rsi: float = 0.0
     swing_rsi_slope: float = 0.0
     bullish_score: float = 0.0
+    bearish_score: float = 0.0
     bullish_threshold: float = 0.0
+    bearish_threshold: float = 0.0
     bullish_ready: bool = False
+    bearish_ready: bool = False
     execution_entry_mode: str = "breakout_confirmed"
     execution_golden_cross: bool = False
     execution_breakout: bool = False
@@ -382,17 +387,22 @@ class CTARobot(BaseStrategyRobot):
             zscore_window=self.config.obv_zscore_window,
         )
         obv_bias = 1 if obv_confirmation.above_sma else -1 if obv_confirmation.below_sma else 0
-        raw_direction = 1 if mtf_signal.fully_aligned else 0
+        bullish_raw_direction = 1 if (mtf_signal.fully_aligned and int(mtf_signal.major_direction) >= 0 and not bool(getattr(mtf_signal, "bearish_ready", False))) else 0
+        bearish_raw_direction = -1 if (mtf_signal.fully_aligned and int(mtf_signal.major_direction) < 0 and bool(getattr(mtf_signal, "bearish_ready", False))) else 0
+        raw_direction = bullish_raw_direction if bullish_raw_direction != 0 else bearish_raw_direction
         obv_threshold, obv_exempt = self._resolve_obv_gate(mtf_signal)
         drive_first_tradeable = bool(float(mtf_signal.bullish_score) >= float(getattr(self.config, "drive_first_tradeable_score", 60.0)))
         relaxed_obv_allowed = bool(
-            int(mtf_signal.major_direction) > 0
+            raw_direction > 0
+            and int(mtf_signal.major_direction) > 0
             and drive_first_tradeable
             and float(obv_confirmation.zscore) > float(obv_threshold)
         )
-        volume_filter_passed = raw_direction > 0 and (
-            obv_exempt or obv_confirmation.buy_confirmed(zscore_threshold=obv_threshold) or relaxed_obv_allowed
-        )
+        volume_filter_passed = False
+        if raw_direction > 0:
+            volume_filter_passed = bool(obv_exempt or obv_confirmation.buy_confirmed(zscore_threshold=obv_threshold) or relaxed_obv_allowed)
+        elif raw_direction < 0:
+            volume_filter_passed = bool(obv_exempt or obv_confirmation.sell_confirmed(zscore_threshold=obv_threshold))
         current_price = float(execution_frame["close"].iloc[-1])
         volume_profile = compute_volume_profile(
             execution_frame,
@@ -468,6 +478,20 @@ class CTARobot(BaseStrategyRobot):
                 relaxed_reasons.append(
                     f"RSI({float(mtf_signal.swing_rsi):.2f}) tolerated with Score({float(mtf_signal.bullish_score):.0f})"
                 )
+        elif raw_direction < 0:
+            obv_confirmation_passed = volume_filter_passed
+            if not volume_filter_passed:
+                final_direction = 0
+                long_setup_blocked = True
+                long_setup_reason = "obv_strength_not_confirmed"
+            elif volume_profile is None:
+                final_direction = 0
+                long_setup_blocked = True
+                long_setup_reason = "missing_volume_profile"
+            elif float(current_price) >= float(volume_profile.poc_price):
+                final_direction = 0
+                long_setup_blocked = True
+                long_setup_reason = "above_poc"
 
         blocker_reason = mtf_signal.blocker_reason
         if long_setup_blocked:
@@ -482,13 +506,18 @@ class CTARobot(BaseStrategyRobot):
             major_direction=mtf_signal.major_direction,
             major_bias_score=mtf_signal.major_bias_score,
             weak_bull_bias=mtf_signal.weak_bull_bias,
+            weak_bear_bias=bool(getattr(mtf_signal, "weak_bear_bias", False)),
             early_bullish=mtf_signal.early_bullish,
+            early_bearish=bool(getattr(mtf_signal, "early_bearish", False)),
             entry_size_multiplier=mtf_signal.entry_size_multiplier,
             swing_rsi=mtf_signal.swing_rsi,
             swing_rsi_slope=mtf_signal.swing_rsi_slope,
             bullish_score=mtf_signal.bullish_score,
+            bearish_score=float(getattr(mtf_signal, "bearish_score", 0.0)),
             bullish_threshold=mtf_signal.bullish_threshold,
+            bearish_threshold=float(getattr(mtf_signal, "bearish_threshold", 0.0)),
             bullish_ready=mtf_signal.bullish_ready,
+            bearish_ready=bool(getattr(mtf_signal, "bearish_ready", False)),
             execution_entry_mode=mtf_signal.execution_entry_mode,
             execution_golden_cross=mtf_signal.execution_trigger.kdj_golden_cross,
             execution_breakout=mtf_signal.execution_trigger.prior_high_break,

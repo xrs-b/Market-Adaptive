@@ -1055,3 +1055,48 @@ class MTFEngineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ShortSideMTFEngineTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = DummyClient()
+        self.config = CTAConfig(symbol="BTC/USDT", major_timeframe="4h", swing_timeframe="1h", execution_timeframe="15m", execution_breakout_lookback=3, kdj_length=5)
+        self.engine = MultiTimeframeSignalEngine(self.client, self.config)
+
+    def _set_ohlcv(self, timeframe: str, closes: list[float], step_ms: int) -> None:
+        common_end = 1_700_086_400_000
+        base = common_end - len(closes) * step_ms
+        self.client.ohlcv_by_timeframe[timeframe] = [
+            [base + index * step_ms, close + 0.3, close + 0.6, close - 0.4, close, 100 + index * 5]
+            for index, close in enumerate(closes)
+        ]
+
+    def _mock_bearish_kdj(self, bars: int, dead_cross_bar_from_end: int):
+        import pandas as pd
+        k_values = [60.0] * bars
+        d_values = [50.0] * bars
+        cross_index = bars - dead_cross_bar_from_end - 1
+        k_values[cross_index - 1] = 55.0
+        d_values[cross_index - 1] = 50.0
+        k_values[cross_index] = 45.0
+        d_values[cross_index] = 50.0
+        for index in range(cross_index + 1, bars):
+            k_values[index] = 44.0
+            d_values[index] = 49.0
+        return pd.DataFrame({"k": k_values, "d": d_values})
+
+    def test_engine_can_emit_bearish_ready_breakdown_path(self) -> None:
+        self._set_ohlcv("4h", [260 - 2.0 * index for index in range(60)], 14_400_000)
+        self._set_ohlcv("1h", [160 - 1.0 * index for index in range(60)], 3_600_000)
+        execution_closes = [120 - index * 0.25 for index in range(55)] + [106.0, 105.2, 104.8, 104.1, 103.4]
+        self._set_ohlcv("15m", execution_closes, 900_000)
+
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=self._mock_bearish_kdj(bars=60, dead_cross_bar_from_end=1)):
+            signal = self.engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.bearish_ready)
+        self.assertGreater(signal.bearish_score, 0.0)
+        self.assertTrue(signal.execution_trigger.prior_low_break)
+        self.assertTrue(signal.fully_aligned)
+        self.assertIn("Bearish", signal.execution_trigger.reason)
