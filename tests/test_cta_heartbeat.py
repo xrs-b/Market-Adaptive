@@ -90,9 +90,35 @@ class CTAHeartbeatTests(unittest.TestCase):
             sentiment_analyst=None,
         )
 
-        self.assertEqual(robot._resolve_obv_gate(self._build_mtf_signal(bullish_score=55.0)), (0.6, False))
+        self.assertEqual(
+            robot._resolve_obv_gate(
+                self._build_mtf_signal(bullish_score=55.0, trigger_reason="waiting_execution_trigger")
+            ),
+            (0.6, False),
+        )
         self.assertEqual(robot._resolve_obv_gate(self._build_mtf_signal(bullish_score=65.0)), (0.0, False))
         self.assertEqual(robot._resolve_obv_gate(self._build_mtf_signal(bullish_score=80.0)), (-1.0, True))
+
+    def test_high_quality_post_trigger_signal_gets_narrow_obv_softening(self) -> None:
+        robot = CTARobot(
+            client=DummyClient(),
+            database=DummyDatabase(),
+            config=CTAConfig(symbol="BTC/USDT", obv_zscore_threshold=0.6),
+            execution_config=ExecutionConfig(),
+            notifier=None,
+            risk_manager=None,
+            sentiment_analyst=None,
+        )
+
+        self.assertEqual(
+            robot._resolve_obv_gate(
+                self._build_mtf_signal(
+                    bullish_score=60.0,
+                    trigger_reason="major_bull_retest_ready: gap=0.120% + KDJ memory 2 bars ago",
+                )
+            ),
+            (0.5, False),
+        )
 
     def test_recovery_context_relaxes_obv_gate_even_when_score_is_below_mid_tier(self) -> None:
         robot = CTARobot(

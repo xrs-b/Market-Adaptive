@@ -212,6 +212,42 @@ class OBVGateTests(unittest.TestCase):
         self.assertFalse(gate.passed(failing))
         self.assertEqual(gate.check_summary(passing), "[Short] OBV (-0.02) <= Dynamic Threshold (0.0) -> Passed")
 
+    def test_high_quality_post_trigger_long_softens_threshold_without_below_sma_exception(self) -> None:
+        gate = resolve_dynamic_obv_gate(
+            bullish_score=60.0,
+            configured_threshold=0.6,
+            trigger_reason="major_bull_retest_ready: gap=0.120% + KDJ memory 2 bars ago",
+        )
+        softened_pass = OBVConfirmationSnapshot(1100.0, 1000.0, 5.0, 1.0, 2.0, 0.55)
+        strict_fail = OBVConfirmationSnapshot(1100.0, 1000.0, 5.0, 1.0, 2.0, 0.49)
+        below_sma_fail = OBVConfirmationSnapshot(990.0, 1000.0, 5.0, 1.0, 2.0, 0.55)
+
+        self.assertEqual((gate.threshold, gate.exempt, gate.side), (0.5, False, "long"))
+        self.assertTrue(gate.passed(softened_pass))
+        self.assertFalse(gate.passed(strict_fail))
+        self.assertFalse(gate.passed(below_sma_fail))
+
+    def test_memory_breakout_softening_does_not_unblock_negative_recovery_style_case(self) -> None:
+        gate = resolve_dynamic_obv_gate(
+            bullish_score=60.0,
+            configured_threshold=0.6,
+            trigger_reason="Triggered via Memory Window: KDJ crossed 2 bars ago + Price Breakout NOW",
+        )
+        clearly_negative = OBVConfirmationSnapshot(1100.0, 1000.0, -5.0, -1.0, 2.0, -0.20)
+
+        self.assertEqual((gate.threshold, gate.exempt, gate.side), (0.5, False, "long"))
+        self.assertFalse(gate.passed(clearly_negative))
+
+    def test_recovery_context_does_not_receive_post_trigger_softening(self) -> None:
+        gate = resolve_dynamic_obv_gate(
+            bullish_score=60.0,
+            configured_threshold=0.6,
+            early_bullish=True,
+            trigger_reason="major_bull_retest_ready: gap=0.120% + KDJ memory 2 bars ago",
+        )
+
+        self.assertEqual((gate.threshold, gate.exempt, gate.side), (0.0, False, "long"))
+
     def test_strict_short_gate_preserves_downside_confirmation_requirement(self) -> None:
         gate = resolve_dynamic_obv_gate(bullish_score=55.0, configured_threshold=1.0, side="short")
         passing = OBVConfirmationSnapshot(900.0, 1000.0, -5.0, -1.0, 2.0, -0.7)

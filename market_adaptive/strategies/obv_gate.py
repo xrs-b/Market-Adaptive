@@ -25,6 +25,14 @@ _SHORT_RECOVERY_MARKERS = (
     "fade",
 )
 
+_HIGH_QUALITY_LONG_TRIGGER_MARKERS = (
+    "major_bull_retest_ready",
+    "memory+breakout",
+    "triggered via memory window",
+)
+
+_POST_TRIGGER_SOFT_OBV_THRESHOLD = 0.50
+
 
 def _contains_any_marker(text: str, markers: tuple[str, ...]) -> bool:
     haystack = str(text or "").lower()
@@ -75,6 +83,29 @@ def _is_recovery_context(
     if bool(early_bullish) or bool(weak_bull_bias):
         return True
     return _contains_any_marker(trigger_reason, _LONG_RECOVERY_MARKERS) or _contains_any_marker(execution_entry_mode, _LONG_RECOVERY_MARKERS)
+
+
+def _is_high_quality_long_post_trigger_context(
+    *,
+    side: str = "long",
+    bullish_score: float,
+    early_bullish: bool = False,
+    weak_bull_bias: bool = False,
+    early_bearish: bool = False,
+    weak_bear_bias: bool = False,
+    trigger_reason: str = "",
+    execution_entry_mode: str = "",
+) -> bool:
+    if str(side).lower() != "long":
+        return False
+    if bool(early_bullish) or bool(weak_bull_bias) or bool(early_bearish) or bool(weak_bear_bias):
+        return False
+    score = float(bullish_score)
+    if score < 55.0 or score >= 65.0:
+        return False
+    if _contains_any_marker(execution_entry_mode, _LONG_RECOVERY_MARKERS) or _contains_any_marker(trigger_reason, _LONG_RECOVERY_MARKERS):
+        return False
+    return _contains_any_marker(trigger_reason, _HIGH_QUALITY_LONG_TRIGGER_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -143,6 +174,17 @@ def resolve_dynamic_obv_gate(
         return OBVGateDecision(threshold=0.0, exempt=False, side=resolved_side)
     if float(bullish_score) >= 65.0:
         return OBVGateDecision(threshold=0.0, exempt=False, side=resolved_side)
+    if _is_high_quality_long_post_trigger_context(
+        side=resolved_side,
+        bullish_score=float(bullish_score),
+        early_bullish=early_bullish,
+        weak_bull_bias=weak_bull_bias,
+        early_bearish=early_bearish,
+        weak_bear_bias=weak_bear_bias,
+        trigger_reason=trigger_reason,
+        execution_entry_mode=execution_entry_mode,
+    ):
+        return OBVGateDecision(threshold=min(strict_threshold, _POST_TRIGGER_SOFT_OBV_THRESHOLD), exempt=False, side=resolved_side)
     return OBVGateDecision(threshold=strict_threshold, exempt=False, side=resolved_side)
 
 
