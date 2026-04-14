@@ -48,7 +48,10 @@ from market_adaptive.indicators import (
     ohlcv_to_dataframe,
 )
 from market_adaptive.oracles.market_oracle import indicator_confirms_trend
-from market_adaptive.strategies.mtf_engine import classify_waiting_execution_trigger
+from market_adaptive.strategies.mtf_engine import (
+    classify_waiting_execution_trigger,
+    resolve_execution_trigger_proximity_budget_ratio,
+)
 from market_adaptive.strategies.obv_gate import resolve_dynamic_obv_gate
 from market_adaptive.strategies.order_flow_sentinel import OrderFlowSentinel
 from market_adaptive.timeframe_utils import maybe_use_closed_candles
@@ -332,6 +335,10 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             and (prior_high_break or (execution_obv_ready and frontrun_near_breakout))
             and not (bullish_memory_active or kdj_golden_cross)
         )
+        execution_trigger_proximity_budget_ratio = resolve_execution_trigger_proximity_budget_ratio(
+            starter_frontrun_breakout_buffer_ratio=float(getattr(cta, "starter_frontrun_breakout_buffer_ratio", 0.002)),
+            bullish_memory_retest_breakout_buffer_ratio=float(getattr(cta, "bullish_memory_retest_breakout_buffer_ratio", 0.0026)),
+        )
         trigger_reason = classify_waiting_execution_trigger(
             bullish_ready=bullish_ready,
             state_label="ARMED_READY" if bullish_ready and (kdj_golden_cross or frontrun_near_breakout) else "WAITING_SETUP",
@@ -340,6 +347,8 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             bullish_urgency_active=bullish_urgency_active,
             prior_high_break=prior_high_break,
             frontrun_near_breakout=frontrun_near_breakout,
+            frontrun_gap_ratio=frontrun_gap_ratio,
+            execution_trigger_proximity_budget_ratio=execution_trigger_proximity_budget_ratio,
         )
         if early_bullish:
             trigger_reason = "early_bullish"

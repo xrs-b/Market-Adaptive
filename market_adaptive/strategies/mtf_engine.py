@@ -21,6 +21,13 @@ from market_adaptive.timeframe_utils import maybe_use_closed_candles
 logger = logging.getLogger(__name__)
 
 
+def resolve_execution_trigger_proximity_budget_ratio(*, starter_frontrun_breakout_buffer_ratio: float, bullish_memory_retest_breakout_buffer_ratio: float) -> float:
+    return max(
+        float(starter_frontrun_breakout_buffer_ratio),
+        float(bullish_memory_retest_breakout_buffer_ratio),
+    )
+
+
 def classify_waiting_execution_trigger(
     *,
     bullish_ready: bool,
@@ -30,12 +37,17 @@ def classify_waiting_execution_trigger(
     bullish_urgency_active: bool,
     prior_high_break: bool,
     frontrun_near_breakout: bool,
+    frontrun_gap_ratio: float,
+    execution_trigger_proximity_budget_ratio: float,
 ) -> str:
     if not bullish_ready:
         return "waiting_execution_trigger"
     if frontrun_near_breakout or state_label == "ARMED_READY" or prior_high_break:
         return "waiting_execution_trigger_near_breakout"
-    if bullish_memory_active or bullish_latch_active or bullish_urgency_active:
+    stale_execution_memory = bool(
+        frontrun_gap_ratio > max(0.0, float(execution_trigger_proximity_budget_ratio))
+    )
+    if (bullish_memory_active or bullish_latch_active or bullish_urgency_active) and not stale_execution_memory:
         return "waiting_execution_trigger_memory_desync"
     return "waiting_execution_trigger_drift"
 
@@ -151,9 +163,9 @@ class MultiTimeframeSignalEngine:
     ) -> bool:
         if major_direction <= 0 or not bullish_ready or not bullish_memory_active:
             return False
-        tolerance_ratio = max(
-            float(getattr(self.config, "starter_frontrun_breakout_buffer_ratio", 0.002)),
-            float(getattr(self.config, "bullish_memory_retest_breakout_buffer_ratio", 0.0026)),
+        tolerance_ratio = resolve_execution_trigger_proximity_budget_ratio(
+            starter_frontrun_breakout_buffer_ratio=float(getattr(self.config, "starter_frontrun_breakout_buffer_ratio", 0.002)),
+            bullish_memory_retest_breakout_buffer_ratio=float(getattr(self.config, "bullish_memory_retest_breakout_buffer_ratio", 0.0026)),
         )
         return frontrun_gap_ratio <= tolerance_ratio
 
@@ -209,9 +221,9 @@ class MultiTimeframeSignalEngine:
         decay_step = bullish_cross_bars_ago - memory_bars + 1
         if decay_step < 1 or decay_step > decay_bars:
             return False, None, False
-        retest_tolerance_ratio = max(
-            float(getattr(self.config, "starter_frontrun_breakout_buffer_ratio", 0.002)),
-            float(getattr(self.config, "bullish_memory_retest_breakout_buffer_ratio", 0.0026)),
+        retest_tolerance_ratio = resolve_execution_trigger_proximity_budget_ratio(
+            starter_frontrun_breakout_buffer_ratio=float(getattr(self.config, "starter_frontrun_breakout_buffer_ratio", 0.002)),
+            bullish_memory_retest_breakout_buffer_ratio=float(getattr(self.config, "bullish_memory_retest_breakout_buffer_ratio", 0.0026)),
         )
         price_location_guard = bool(prior_high_break or frontrun_near_breakout or frontrun_gap_ratio <= retest_tolerance_ratio)
         if not price_location_guard:
@@ -635,6 +647,11 @@ class MultiTimeframeSignalEngine:
             and not (bullish_memory_active or kdj_golden_cross)
         )
 
+        execution_trigger_proximity_budget_ratio = resolve_execution_trigger_proximity_budget_ratio(
+            starter_frontrun_breakout_buffer_ratio=float(getattr(self.config, "starter_frontrun_breakout_buffer_ratio", 0.002)),
+            bullish_memory_retest_breakout_buffer_ratio=float(getattr(self.config, "bullish_memory_retest_breakout_buffer_ratio", 0.0026)),
+        )
+
         execution_entry_mode = "breakout_confirmed"
         entry_size_multiplier = 1.0
         if weak_bull_bias:
@@ -687,6 +704,8 @@ class MultiTimeframeSignalEngine:
                 bullish_urgency_active=bullish_urgency_active,
                 prior_high_break=prior_high_break,
                 frontrun_near_breakout=frontrun_near_breakout,
+                frontrun_gap_ratio=frontrun_gap_ratio,
+                execution_trigger_proximity_budget_ratio=execution_trigger_proximity_budget_ratio,
             )
 
         execution_trigger = ExecutionTriggerSnapshot(

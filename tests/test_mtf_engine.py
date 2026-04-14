@@ -31,6 +31,8 @@ class WaitingExecutionTriggerClassificationTests(unittest.TestCase):
             bullish_urgency_active=False,
             prior_high_break=False,
             frontrun_near_breakout=True,
+            frontrun_gap_ratio=0.0015,
+            execution_trigger_proximity_budget_ratio=0.0026,
         )
 
         self.assertEqual(reason, "waiting_execution_trigger_near_breakout")
@@ -44,6 +46,8 @@ class WaitingExecutionTriggerClassificationTests(unittest.TestCase):
             bullish_urgency_active=False,
             prior_high_break=False,
             frontrun_near_breakout=False,
+            frontrun_gap_ratio=0.0020,
+            execution_trigger_proximity_budget_ratio=0.0026,
         )
 
         self.assertEqual(reason, "waiting_execution_trigger_memory_desync")
@@ -57,6 +61,23 @@ class WaitingExecutionTriggerClassificationTests(unittest.TestCase):
             bullish_urgency_active=False,
             prior_high_break=False,
             frontrun_near_breakout=False,
+            frontrun_gap_ratio=0.0035,
+            execution_trigger_proximity_budget_ratio=0.0026,
+        )
+
+        self.assertEqual(reason, "waiting_execution_trigger_drift")
+
+    def test_downgrades_stale_memory_desync_to_drift_when_price_has_left_retest_zone(self) -> None:
+        reason = classify_waiting_execution_trigger(
+            bullish_ready=True,
+            state_label="WAITING_SETUP",
+            bullish_memory_active=True,
+            bullish_latch_active=True,
+            bullish_urgency_active=True,
+            prior_high_break=False,
+            frontrun_near_breakout=False,
+            frontrun_gap_ratio=0.0042,
+            execution_trigger_proximity_budget_ratio=0.0026,
         )
 
         self.assertEqual(reason, "waiting_execution_trigger_drift")
