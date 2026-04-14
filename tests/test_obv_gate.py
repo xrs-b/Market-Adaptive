@@ -66,11 +66,11 @@ class OBVGateTests(unittest.TestCase):
         mid = resolve_dynamic_obv_gate(bullish_score=65.0, configured_threshold=1.0)
         high = resolve_dynamic_obv_gate(bullish_score=80.0, configured_threshold=1.0)
 
-        self.assertEqual((low.threshold, low.exempt), (0.6, False))
-        self.assertEqual((mid.threshold, mid.exempt), (0.0, False))
-        self.assertEqual((high.threshold, high.exempt), (-1.0, True))
+        self.assertEqual((low.threshold, low.exempt, low.side), (0.6, False, "long"))
+        self.assertEqual((mid.threshold, mid.exempt, mid.side), (0.0, False, "long"))
+        self.assertEqual((high.threshold, high.exempt, high.side), (-1.0, True, "long"))
 
-    def test_recovery_context_relaxes_low_score_gate_to_non_negative_obv(self) -> None:
+    def test_long_recovery_context_relaxes_low_score_gate_to_non_negative_obv(self) -> None:
         early = resolve_dynamic_obv_gate(
             bullish_score=40.0,
             configured_threshold=1.0,
@@ -82,25 +82,56 @@ class OBVGateTests(unittest.TestCase):
             weak_bull_bias=True,
         )
 
-        self.assertEqual((early.threshold, early.exempt), (0.0, False))
-        self.assertEqual((weak.threshold, weak.exempt), (0.0, False))
+        self.assertEqual((early.threshold, early.exempt, early.side), (0.0, False, "long"))
+        self.assertEqual((weak.threshold, weak.exempt, weak.side), (0.0, False, "long"))
 
-    def test_trigger_reason_and_entry_mode_can_mark_recovery_context(self) -> None:
-        by_reason = resolve_dynamic_obv_gate(
+    def test_short_recovery_context_relaxes_low_score_gate_to_neutral_obv_ceiling(self) -> None:
+        early = resolve_dynamic_obv_gate(
+            bullish_score=40.0,
+            configured_threshold=1.0,
+            side="short",
+            early_bearish=True,
+        )
+        weak = resolve_dynamic_obv_gate(
+            bullish_score=40.0,
+            configured_threshold=1.0,
+            side="short",
+            weak_bear_bias=True,
+        )
+
+        self.assertEqual((early.threshold, early.exempt, early.side), (0.0, False, "short"))
+        self.assertEqual((weak.threshold, weak.exempt, weak.side), (0.0, False, "short"))
+
+    def test_trigger_reason_and_entry_mode_can_mark_recovery_context_for_both_sides(self) -> None:
+        long_by_reason = resolve_dynamic_obv_gate(
             bullish_score=40.0,
             configured_threshold=1.0,
             trigger_reason="early_bullish: lower band flattening recovery",
         )
-        by_mode = resolve_dynamic_obv_gate(
+        long_by_mode = resolve_dynamic_obv_gate(
             bullish_score=40.0,
             configured_threshold=1.0,
             execution_entry_mode="weak_bull_scale_in_limit",
         )
+        short_by_reason = resolve_dynamic_obv_gate(
+            bullish_score=40.0,
+            configured_threshold=1.0,
+            side="short",
+            trigger_reason="early_bearish: topping distribution rolling over",
+        )
+        short_by_mode = resolve_dynamic_obv_gate(
+            bullish_score=40.0,
+            configured_threshold=1.0,
+            side="short",
+            execution_entry_mode="weak_bear_scale_in_limit",
+        )
 
-        self.assertEqual((by_reason.threshold, by_reason.exempt), (0.0, False))
-        self.assertEqual((by_mode.threshold, by_mode.exempt), (0.0, False))
+        self.assertEqual((long_by_reason.threshold, long_by_reason.exempt, long_by_reason.side), (0.0, False, "long"))
+        self.assertEqual((long_by_mode.threshold, long_by_mode.exempt, long_by_mode.side), (0.0, False, "long"))
+        self.assertEqual((short_by_reason.threshold, short_by_reason.exempt, short_by_reason.side), (0.0, False, "short"))
+        self.assertEqual((short_by_mode.threshold, short_by_mode.exempt, short_by_mode.side), (0.0, False, "short"))
 
-    def test_signal_wrapper_uses_context_aware_recovery_gate(self) -> None:
+    def test_signal_wrapper_preserves_long_recovery_context_even_when_major_regime_is_still_bearish(self) -> None:
         signal = self._build_signal(
             major_direction=-1,
             early_bullish=True,
@@ -122,7 +153,30 @@ class OBVGateTests(unittest.TestCase):
 
         gate = resolve_dynamic_obv_gate_for_signal(signal, configured_threshold=1.0)
 
-        self.assertEqual((gate.threshold, gate.exempt), (0.0, False))
+        self.assertEqual((gate.threshold, gate.exempt, gate.side), (0.0, False, "long"))
+
+    def test_signal_wrapper_infers_short_side_from_bearish_context_markers(self) -> None:
+        signal = self._build_signal(
+            major_direction=-1,
+            execution_entry_mode="weak_bear_scale_in_limit",
+            execution_trigger=ExecutionTriggerSnapshot(
+                kdj_golden_cross=False,
+                kdj_dead_cross=False,
+                bullish_memory_active=False,
+                bearish_memory_active=True,
+                bullish_cross_bars_ago=None,
+                bearish_cross_bars_ago=2,
+                prior_high_break=False,
+                prior_low_break=True,
+                prior_high=None,
+                prior_low=None,
+                reason="early_bearish: distribution rollover after failed push",
+            ),
+        )
+
+        gate = resolve_dynamic_obv_gate_for_signal(signal, configured_threshold=1.0)
+
+        self.assertEqual((gate.threshold, gate.exempt, gate.side), (0.0, False, "short"))
 
     def test_exempt_gate_bypasses_below_sma_and_negative_zscore(self) -> None:
         gate = resolve_dynamic_obv_gate(bullish_score=85.0, configured_threshold=0.6)
@@ -138,7 +192,7 @@ class OBVGateTests(unittest.TestCase):
         self.assertTrue(gate.exempt)
         self.assertTrue(gate.passed(snapshot))
 
-    def test_mid_tier_gate_requires_non_negative_zscore_confirmation(self) -> None:
+    def test_mid_tier_long_gate_requires_non_negative_zscore_confirmation(self) -> None:
         gate = resolve_dynamic_obv_gate(bullish_score=70.0, configured_threshold=0.6)
         passing = OBVConfirmationSnapshot(1100.0, 1000.0, 5.0, 1.0, 2.0, 0.1)
         failing = OBVConfirmationSnapshot(1100.0, 1000.0, 5.0, 1.0, 2.0, -0.1)
@@ -146,6 +200,27 @@ class OBVGateTests(unittest.TestCase):
         self.assertFalse(gate.exempt)
         self.assertTrue(gate.passed(passing))
         self.assertFalse(gate.passed(failing))
+        self.assertEqual(gate.check_summary(passing), "[Long] OBV (0.10) >= Dynamic Threshold (0.0) -> Passed")
+
+    def test_mid_tier_short_gate_requires_non_positive_zscore_confirmation(self) -> None:
+        gate = resolve_dynamic_obv_gate(bullish_score=70.0, configured_threshold=0.6, side="short")
+        passing = OBVConfirmationSnapshot(900.0, 1000.0, -5.0, -1.0, 2.0, -0.02)
+        failing = OBVConfirmationSnapshot(900.0, 1000.0, -5.0, -1.0, 2.0, 0.02)
+
+        self.assertFalse(gate.exempt)
+        self.assertTrue(gate.passed(passing))
+        self.assertFalse(gate.passed(failing))
+        self.assertEqual(gate.check_summary(passing), "[Short] OBV (-0.02) <= Dynamic Threshold (0.0) -> Passed")
+
+    def test_strict_short_gate_preserves_downside_confirmation_requirement(self) -> None:
+        gate = resolve_dynamic_obv_gate(bullish_score=55.0, configured_threshold=1.0, side="short")
+        passing = OBVConfirmationSnapshot(900.0, 1000.0, -5.0, -1.0, 2.0, -0.7)
+        failing = OBVConfirmationSnapshot(900.0, 1000.0, -5.0, -1.0, 2.0, -0.4)
+
+        self.assertEqual((gate.threshold, gate.exempt, gate.side), (0.6, False, "short"))
+        self.assertTrue(gate.passed(passing))
+        self.assertFalse(gate.passed(failing))
+        self.assertEqual(gate.check_summary(passing), "[Short] OBV (-0.70) <= Dynamic Threshold (-0.6) -> Passed")
 
 
 if __name__ == "__main__":
