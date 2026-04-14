@@ -140,6 +140,88 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.fully_aligned)
         self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger")
 
+    def test_engine_keeps_short_decaying_urgency_window_after_memory_expires_near_breakout(self) -> None:
+        config = CTAConfig(
+            symbol="BTC/USDT",
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            kdj_signal_memory_bars=5,
+            kdj_urgency_decay_bars=2,
+        )
+        engine = MultiTimeframeSignalEngine(self.client, config)
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.25 for index in range(54)] + [103.8, 104.3, 104.9, 105.4, 105.8, 105.93]
+        self._set_ohlcv("15m", execution_closes, 900_000)
+
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=5)
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.bullish_ready)
+        self.assertFalse(signal.execution_trigger.bullish_memory_active)
+        self.assertTrue(signal.execution_trigger.bullish_urgency_active)
+        self.assertEqual(signal.execution_trigger.bullish_urgency_decay_step, 1)
+        self.assertFalse(signal.execution_trigger.prior_high_break)
+        self.assertTrue(signal.fully_aligned)
+        self.assertIn("decaying urgency window step=1/2", signal.execution_trigger.reason)
+
+    def test_engine_expires_decaying_urgency_window_after_configured_bars(self) -> None:
+        config = CTAConfig(
+            symbol="BTC/USDT",
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            kdj_signal_memory_bars=5,
+            kdj_urgency_decay_bars=2,
+        )
+        engine = MultiTimeframeSignalEngine(self.client, config)
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.25 for index in range(54)] + [103.8, 104.3, 104.9, 105.4, 105.8, 105.93]
+        self._set_ohlcv("15m", execution_closes, 900_000)
+
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=7)
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.bullish_ready)
+        self.assertFalse(signal.execution_trigger.bullish_memory_active)
+        self.assertFalse(signal.execution_trigger.bullish_urgency_active)
+        self.assertFalse(signal.fully_aligned)
+        self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger")
+
+    def test_engine_blocks_decaying_urgency_window_on_kdj_dead_cross(self) -> None:
+        config = CTAConfig(
+            symbol="BTC/USDT",
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            kdj_signal_memory_bars=5,
+            kdj_urgency_decay_bars=2,
+        )
+        engine = MultiTimeframeSignalEngine(self.client, config)
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.25 for index in range(54)] + [103.8, 104.3, 104.9, 105.4, 105.8, 105.93]
+        self._set_ohlcv("15m", execution_closes, 900_000)
+
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=5)
+        mocked_kdj.loc[58, ["k", "d"]] = [56.0, 51.0]
+        mocked_kdj.loc[59, ["k", "d"]] = [49.0, 54.0]
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.bullish_ready)
+        self.assertFalse(signal.execution_trigger.bullish_memory_active)
+        self.assertFalse(signal.execution_trigger.bullish_urgency_active)
+        self.assertFalse(signal.fully_aligned)
+        self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger")
+
     def test_engine_allows_major_bull_impulse_reclaim_after_breakout_when_kdj_memory_expired(self) -> None:
         self._load_bullish_major_and_swing()
         execution_closes = [90 + index * 0.2 for index in range(54)] + [100.0, 100.4, 100.9, 101.7, 102.8, 103.9]

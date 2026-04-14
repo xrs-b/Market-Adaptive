@@ -177,6 +177,7 @@ class CTAConfig:
     kdj_k_smoothing: int = 3
     kdj_d_smoothing: int = 3
     kdj_signal_memory_bars: int = 5
+    kdj_urgency_decay_bars: int = 2
     execution_breakout_lookback: int = 3
     obv_signal_period: int = 8
     obv_signal_window: int = 8
@@ -249,6 +250,7 @@ class CTAConfig:
         if self.boosted_risk_percent_per_trade <= 0:
             self.boosted_risk_percent_per_trade = self.risk_percent_per_trade
         self.kdj_signal_memory_bars = max(1, int(self.kdj_signal_memory_bars))
+        self.kdj_urgency_decay_bars = max(0, int(self.kdj_urgency_decay_bars))
         self.bullish_memory_retest_breakout_buffer_ratio = max(
             float(self.starter_frontrun_breakout_buffer_ratio),
             float(self.bullish_memory_retest_breakout_buffer_ratio),
@@ -604,6 +606,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         kdj_length=int(cta_payload.get("kdj_length", 9)),
         kdj_k_smoothing=int(cta_payload.get("kdj_k_smoothing", 3)),
         kdj_d_smoothing=int(cta_payload.get("kdj_d_smoothing", 3)),
+        kdj_urgency_decay_bars=int(cta_payload.get("kdj_urgency_decay_bars", 2)),
         execution_breakout_lookback=int(cta_payload.get("execution_breakout_lookback", 3)),
         obv_signal_period=int(cta_payload.get("obv_signal_period", 8)),
         obv_signal_window=int(cta_payload.get("obv_signal_window", cta_payload.get("obv_slope_window", 8))),

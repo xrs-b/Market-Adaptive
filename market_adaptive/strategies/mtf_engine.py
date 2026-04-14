@@ -43,6 +43,9 @@ class ExecutionTriggerSnapshot:
     prior_low_break: bool
     prior_high: float | None
     prior_low: float | None
+    frontrun_gap_ratio: float = 0.0
+    bullish_urgency_active: bool = False
+    bullish_urgency_decay_step: int | None = None
     frontrun_near_breakout: bool = False
     frontrun_impulse_confirmed: bool = False
     frontrun_obv_confirmed: bool = False
@@ -128,6 +131,42 @@ class MultiTimeframeSignalEngine:
             float(getattr(self.config, "bullish_memory_retest_breakout_buffer_ratio", 0.0026)),
         )
         return frontrun_gap_ratio <= tolerance_ratio
+
+    def _resolve_bullish_urgency_window(
+        self,
+        *,
+        bullish_ready: bool,
+        kdj_dead_cross: bool,
+        bullish_cross_bars_ago: int | None,
+        prior_high_break: bool,
+        frontrun_near_breakout: bool,
+        frontrun_gap_ratio: float,
+        frontrun_impulse_confirmed: bool,
+        execution_obv_ready: bool,
+        major_direction: int,
+    ) -> tuple[bool, int | None, bool]:
+        if not bullish_ready or kdj_dead_cross or bullish_cross_bars_ago is None:
+            return False, None, False
+        memory_bars = max(1, int(self.config.kdj_signal_memory_bars))
+        decay_bars = max(0, int(getattr(self.config, "kdj_urgency_decay_bars", 0)))
+        if decay_bars <= 0 or bullish_cross_bars_ago < memory_bars:
+            return False, None, False
+        decay_step = bullish_cross_bars_ago - memory_bars + 1
+        if decay_step < 1 or decay_step > decay_bars:
+            return False, None, False
+        retest_tolerance_ratio = max(
+            float(getattr(self.config, "starter_frontrun_breakout_buffer_ratio", 0.002)),
+            float(getattr(self.config, "bullish_memory_retest_breakout_buffer_ratio", 0.0026)),
+        )
+        price_location_guard = bool(prior_high_break or frontrun_near_breakout or frontrun_gap_ratio <= retest_tolerance_ratio)
+        if not price_location_guard:
+            return False, None, False
+        breakout_reclaim_guard = bool(prior_high_break or (major_direction > 0 and frontrun_near_breakout and (frontrun_impulse_confirmed or execution_obv_ready)))
+        urgency_trigger_ready = bool(
+            decay_step == 1 and price_location_guard
+            or decay_step > 1 and breakout_reclaim_guard
+        )
+        return True, decay_step, urgency_trigger_ready
 
     def _check_timeframe_alignment(self, major_frame: pd.DataFrame, swing_frame: pd.DataFrame, execution_frame: pd.DataFrame) -> TimeframeAlignmentCheck:
         major_ts = int(pd.Timestamp(major_frame["timestamp"].iloc[-1]).value // 1_000_000)
@@ -369,9 +408,10 @@ class MultiTimeframeSignalEngine:
         bearish_cross_mask = (execution_kdj["k"].shift(1) >= execution_kdj["d"].shift(1)) & (execution_kdj["k"] < execution_kdj["d"])
         memory_bars = max(1, int(self.config.kdj_signal_memory_bars))
 
-        bullish_cross_bars_ago = self._bars_since_last_true(bullish_cross_mask, memory_bars)
+        urgency_scan_bars = memory_bars + max(0, int(getattr(self.config, "kdj_urgency_decay_bars", 0)))
+        bullish_cross_bars_ago = self._bars_since_last_true(bullish_cross_mask, urgency_scan_bars)
         bearish_cross_bars_ago = self._bars_since_last_true(bearish_cross_mask, memory_bars)
-        bullish_memory_active = bullish_cross_bars_ago is not None
+        bullish_memory_active = bullish_cross_bars_ago is not None and bullish_cross_bars_ago < memory_bars
         bearish_memory_active = bearish_cross_bars_ago is not None
 
         score_4h = float(self.config.strong_bull_bias_score) if major_direction > 0 else 0.0
@@ -471,12 +511,23 @@ class MultiTimeframeSignalEngine:
             and frontrun_impulse_confirmed
             and (bullish_memory_active or kdj_golden_cross)
         )
+        bullish_urgency_active, bullish_urgency_decay_step, bullish_urgency_trigger_ready = self._resolve_bullish_urgency_window(
+            bullish_ready=bullish_ready,
+            kdj_dead_cross=kdj_dead_cross,
+            bullish_cross_bars_ago=bullish_cross_bars_ago,
+            prior_high_break=prior_high_break,
+            frontrun_near_breakout=frontrun_near_breakout,
+            frontrun_gap_ratio=frontrun_gap_ratio,
+            frontrun_impulse_confirmed=frontrun_impulse_confirmed,
+            execution_obv_ready=execution_obv_ready,
+            major_direction=major_direction,
+        )
         major_bull_retest_ready = self._major_bull_retest_near_breakout_ready(
             major_direction=major_direction,
             bullish_ready=bullish_ready,
             bullish_memory_active=bullish_memory_active,
             frontrun_gap_ratio=frontrun_gap_ratio,
-        )
+        ) or bullish_urgency_trigger_ready
         major_bull_impulse_reclaim_ready = bool(
             major_direction > 0
             and bullish_ready
@@ -506,7 +557,13 @@ class MultiTimeframeSignalEngine:
         elif starter_frontrun_ready:
             reason = f"starter_frontrun: gap={frontrun_gap_ratio * 100:.3f}% + 1m {int(getattr(self.config, 'starter_frontrun_impulse_bars', 3))} bullish bars + OBV confirmed"
         elif major_bull_retest_ready:
-            reason = f"major_bull_retest_ready: gap={frontrun_gap_ratio * 100:.3f}% + KDJ memory {bullish_cross_bars_ago} bars ago"
+            if bullish_urgency_active and not bullish_memory_active:
+                if prior_high_break:
+                    reason = f"major_bull_retest_ready: decaying urgency window step={bullish_urgency_decay_step}/{max(1, int(getattr(self.config, 'kdj_urgency_decay_bars', 0)))} + breakout reclaim after KDJ memory expiry ({bullish_cross_bars_ago} bars ago)"
+                else:
+                    reason = f"major_bull_retest_ready: decaying urgency window step={bullish_urgency_decay_step}/{max(1, int(getattr(self.config, 'kdj_urgency_decay_bars', 0)))} + near-breakout hold after KDJ memory expiry ({bullish_cross_bars_ago} bars ago)"
+            else:
+                reason = f"major_bull_retest_ready: gap={frontrun_gap_ratio * 100:.3f}% + KDJ memory {bullish_cross_bars_ago} bars ago"
         elif major_bull_impulse_reclaim_ready:
             if prior_high_break:
                 reason = "major_bull_impulse_reclaim_ready: breakout reclaimed with 15m impulse despite expired KDJ memory"
@@ -532,11 +589,14 @@ class MultiTimeframeSignalEngine:
             bearish_memory_active=bearish_memory_active,
             bullish_cross_bars_ago=bullish_cross_bars_ago,
             bearish_cross_bars_ago=bearish_cross_bars_ago,
+            bullish_urgency_active=bullish_urgency_active,
+            bullish_urgency_decay_step=bullish_urgency_decay_step,
             prior_high_break=prior_high_break,
             prior_low_break=prior_low_break,
             prior_high=prior_high,
             prior_low=prior_low,
             frontrun_near_breakout=frontrun_near_breakout,
+            frontrun_gap_ratio=frontrun_gap_ratio,
             frontrun_impulse_confirmed=frontrun_impulse_confirmed,
             frontrun_obv_confirmed=execution_obv_ready,
             frontrun_ready=starter_frontrun_ready,
@@ -544,10 +604,10 @@ class MultiTimeframeSignalEngine:
         )
         fully_aligned = early_bullish or starter_frontrun_ready or major_bull_retest_ready or major_bull_impulse_reclaim_ready or (
             bullish_ready and (
-                ((swing_direction > 0) and prior_high_break and (bullish_memory_active or kdj_golden_cross))
+                ((swing_direction > 0) and prior_high_break and (bullish_memory_active or bullish_urgency_active or kdj_golden_cross))
                 or (weak_bull_bias and bullish_memory_active)
                 or rail_momentum_ready
-                or (not weak_bull_bias and prior_high_break and (bullish_memory_active or kdj_golden_cross))
+                or (not weak_bull_bias and prior_high_break and (bullish_memory_active or bullish_urgency_active or kdj_golden_cross))
             )
         )
         if not alignment.valid:
