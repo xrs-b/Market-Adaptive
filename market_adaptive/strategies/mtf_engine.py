@@ -461,6 +461,16 @@ class MultiTimeframeSignalEngine:
             and frontrun_near_breakout
             and bullish_memory_active
         )
+        major_bull_impulse_reclaim_ready = bool(
+            major_direction > 0
+            and bullish_ready
+            and frontrun_impulse_confirmed
+            and (
+                prior_high_break
+                or (execution_obv_ready and frontrun_near_breakout)
+            )
+            and not (bullish_memory_active or kdj_golden_cross)
+        )
 
         execution_entry_mode = "breakout_confirmed"
         entry_size_multiplier = 1.0
@@ -481,6 +491,11 @@ class MultiTimeframeSignalEngine:
             reason = f"starter_frontrun: gap={frontrun_gap_ratio * 100:.3f}% + 1m {int(getattr(self.config, 'starter_frontrun_impulse_bars', 3))} bullish bars + OBV confirmed"
         elif major_bull_retest_ready:
             reason = f"major_bull_retest_ready: gap={frontrun_gap_ratio * 100:.3f}% + KDJ memory {bullish_cross_bars_ago} bars ago"
+        elif major_bull_impulse_reclaim_ready:
+            if prior_high_break:
+                reason = "major_bull_impulse_reclaim_ready: breakout reclaimed with 15m impulse despite expired KDJ memory"
+            else:
+                reason = f"major_bull_impulse_reclaim_ready: gap={frontrun_gap_ratio * 100:.3f}% + 15m impulse + OBV confirmed"
         elif rail_momentum_ready:
             reason = "rail_momentum_ready: near major rail + 15m momentum confirmation"
         elif weak_bull_bias and bullish_memory_active:
@@ -511,7 +526,7 @@ class MultiTimeframeSignalEngine:
             frontrun_ready=starter_frontrun_ready,
             reason=reason,
         )
-        fully_aligned = early_bullish or starter_frontrun_ready or major_bull_retest_ready or (
+        fully_aligned = early_bullish or starter_frontrun_ready or major_bull_retest_ready or major_bull_impulse_reclaim_ready or (
             bullish_ready and (
                 ((swing_direction > 0) and prior_high_break and (bullish_memory_active or kdj_golden_cross))
                 or (weak_bull_bias and bullish_memory_active)

@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from market_adaptive.config import CTAConfig
+from market_adaptive.indicators import OBVConfirmationSnapshot
 from market_adaptive.strategies.mtf_engine import MultiTimeframeSignalEngine
 
 
@@ -120,6 +121,66 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.execution_trigger.prior_high_break)
         self.assertFalse(signal.fully_aligned)
         self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger")
+
+    def test_engine_allows_major_bull_impulse_reclaim_after_breakout_when_kdj_memory_expired(self) -> None:
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.2 for index in range(54)] + [100.0, 100.4, 100.9, 101.7, 102.8, 103.9]
+        execution_volumes = [100.0 + index for index in range(54)] + [140.0, 150.0, 160.0, 240.0, 260.0, 280.0]
+        self._set_ohlcv("15m", execution_closes, 900_000, volumes=execution_volumes)
+
+        import pandas as pd
+        mocked_kdj = pd.DataFrame({"k": [56.0] * 60, "d": [51.0] * 60})
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = self.engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.bullish_ready)
+        self.assertFalse(signal.execution_trigger.bullish_memory_active)
+        self.assertTrue(signal.execution_trigger.prior_high_break)
+        self.assertTrue(signal.execution_trigger.frontrun_impulse_confirmed)
+        self.assertTrue(signal.fully_aligned)
+        self.assertIn("major_bull_impulse_reclaim_ready", signal.execution_trigger.reason)
+
+    def test_engine_allows_major_bull_impulse_reclaim_near_breakout_with_obv_when_kdj_memory_expired(self) -> None:
+        config = CTAConfig(
+            symbol="BTC/USDT",
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            starter_frontrun_breakout_buffer_ratio=0.002,
+        )
+        engine = MultiTimeframeSignalEngine(self.client, config)
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.25 for index in range(54)] + [103.8, 104.3, 104.9, 105.4, 105.8, 105.99]
+        execution_volumes = [100.0 + index for index in range(54)] + [160.0, 170.0, 180.0, 220.0, 235.0, 250.0]
+        self._set_ohlcv("15m", execution_closes, 900_000, volumes=execution_volumes)
+
+        import pandas as pd
+        mocked_kdj = pd.DataFrame({"k": [56.0] * 60, "d": [51.0] * 60})
+        confirmed_obv = OBVConfirmationSnapshot(
+            current_obv=10.0,
+            sma_value=1.0,
+            increment_value=2.0,
+            increment_mean=0.5,
+            increment_std=0.3,
+            zscore=2.0,
+        )
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj), patch(
+            "market_adaptive.strategies.mtf_engine.compute_obv_confirmation_snapshot",
+            return_value=confirmed_obv,
+        ):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.bullish_ready)
+        self.assertFalse(signal.execution_trigger.bullish_memory_active)
+        self.assertFalse(signal.execution_trigger.prior_high_break)
+        self.assertTrue(signal.execution_trigger.frontrun_near_breakout)
+        self.assertTrue(signal.execution_trigger.frontrun_impulse_confirmed)
+        self.assertTrue(signal.fully_aligned)
+        self.assertIn("major_bull_impulse_reclaim_ready", signal.execution_trigger.reason)
 
     def test_engine_allows_weak_bull_bias_before_major_supertrend_flip(self) -> None:
         major_closes = [200 - 0.5 * index for index in range(60)]
