@@ -21,6 +21,25 @@ from market_adaptive.timeframe_utils import maybe_use_closed_candles
 logger = logging.getLogger(__name__)
 
 
+def classify_waiting_execution_trigger(
+    *,
+    bullish_ready: bool,
+    state_label: str,
+    bullish_memory_active: bool,
+    bullish_latch_active: bool,
+    bullish_urgency_active: bool,
+    prior_high_break: bool,
+    frontrun_near_breakout: bool,
+) -> str:
+    if not bullish_ready:
+        return "waiting_execution_trigger"
+    if frontrun_near_breakout or state_label == "ARMED_READY" or prior_high_break:
+        return "waiting_execution_trigger_near_breakout"
+    if bullish_memory_active or bullish_latch_active or bullish_urgency_active:
+        return "waiting_execution_trigger_memory_desync"
+    return "waiting_execution_trigger_drift"
+
+
 @dataclass
 class TimeframeAlignmentCheck:
     major_timestamp_ms: int
@@ -660,7 +679,15 @@ class MultiTimeframeSignalEngine:
         else:
             if bullish_ready and (high_confidence_price_override or bullish_latch_active or kdj_golden_cross or frontrun_near_breakout):
                 state_label = "ARMED_READY"
-            reason = state_label
+            reason = classify_waiting_execution_trigger(
+                bullish_ready=bullish_ready,
+                state_label=state_label,
+                bullish_memory_active=bullish_memory_active,
+                bullish_latch_active=bullish_latch_active,
+                bullish_urgency_active=bullish_urgency_active,
+                prior_high_break=prior_high_break,
+                frontrun_near_breakout=frontrun_near_breakout,
+            )
 
         execution_trigger = ExecutionTriggerSnapshot(
             kdj_golden_cross=kdj_golden_cross,

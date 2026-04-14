@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from market_adaptive.config import CTAConfig
 from market_adaptive.indicators import OBVConfirmationSnapshot
-from market_adaptive.strategies.mtf_engine import MultiTimeframeSignalEngine
+from market_adaptive.strategies.mtf_engine import MultiTimeframeSignalEngine, classify_waiting_execution_trigger
 
 
 class DummyClient:
@@ -19,6 +19,47 @@ class DummyClient:
 
     def fetch_server_time(self) -> int | None:
         return self.server_time_ms
+
+
+class WaitingExecutionTriggerClassificationTests(unittest.TestCase):
+    def test_classifies_near_breakout_waiting(self) -> None:
+        reason = classify_waiting_execution_trigger(
+            bullish_ready=True,
+            state_label="ARMED_READY",
+            bullish_memory_active=False,
+            bullish_latch_active=False,
+            bullish_urgency_active=False,
+            prior_high_break=False,
+            frontrun_near_breakout=True,
+        )
+
+        self.assertEqual(reason, "waiting_execution_trigger_near_breakout")
+
+    def test_classifies_memory_desync_waiting(self) -> None:
+        reason = classify_waiting_execution_trigger(
+            bullish_ready=True,
+            state_label="WAITING_SETUP",
+            bullish_memory_active=True,
+            bullish_latch_active=False,
+            bullish_urgency_active=False,
+            prior_high_break=False,
+            frontrun_near_breakout=False,
+        )
+
+        self.assertEqual(reason, "waiting_execution_trigger_memory_desync")
+
+    def test_classifies_drift_waiting(self) -> None:
+        reason = classify_waiting_execution_trigger(
+            bullish_ready=True,
+            state_label="WAITING_SETUP",
+            bullish_memory_active=False,
+            bullish_latch_active=False,
+            bullish_urgency_active=False,
+            prior_high_break=False,
+            frontrun_near_breakout=False,
+        )
+
+        self.assertEqual(reason, "waiting_execution_trigger_drift")
 
 
 class MTFEngineTests(unittest.TestCase):
@@ -64,7 +105,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.execution_trigger.kdj_golden_cross)
         self.assertFalse(signal.execution_trigger.prior_high_break)
         self.assertFalse(signal.fully_aligned)
-        self.assertEqual(signal.execution_trigger.reason, "WAITING_SETUP")
+        self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger_drift")
 
     def test_engine_confirms_entry_when_execution_breaks_prior_high(self) -> None:
         self._load_bullish_major_and_swing()
@@ -138,7 +179,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.execution_trigger.bullish_memory_active)
         self.assertFalse(signal.execution_trigger.prior_high_break)
         self.assertFalse(signal.fully_aligned)
-        self.assertEqual(signal.execution_trigger.reason, "WAITING_SETUP")
+        self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger_drift")
 
     def test_engine_keeps_short_decaying_urgency_window_after_memory_expires_near_breakout(self) -> None:
         config = CTAConfig(
@@ -192,7 +233,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.execution_trigger.bullish_memory_active)
         self.assertFalse(signal.execution_trigger.bullish_urgency_active)
         self.assertFalse(signal.fully_aligned)
-        self.assertEqual(signal.execution_trigger.reason, "ARMED_READY")
+        self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger_near_breakout")
 
     def test_engine_blocks_decaying_urgency_window_on_kdj_dead_cross(self) -> None:
         config = CTAConfig(
@@ -221,7 +262,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.execution_trigger.bullish_urgency_active)
         self.assertTrue(signal.execution_trigger.bearish_latch_active)
         self.assertFalse(signal.fully_aligned)
-        self.assertEqual(signal.execution_trigger.reason, "WAITING_SETUP")
+        self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger_drift")
 
     def test_engine_allows_major_bull_impulse_reclaim_after_breakout_when_kdj_memory_expired(self) -> None:
         self._load_bullish_major_and_swing()
@@ -799,7 +840,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.execution_trigger.bullish_memory_active)
         self.assertFalse(signal.execution_trigger.bullish_latch_active)
         self.assertFalse(signal.fully_aligned)
-        self.assertEqual(signal.execution_trigger.reason, "WAITING_SETUP")
+        self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger_near_breakout")
 
     def test_engine_flags_starter_frontrun_when_breakout_is_within_last_point_two_percent(self) -> None:
         config = CTAConfig(

@@ -23,6 +23,13 @@ class StopReplay(Exception):
     pass
 
 
+class ReplayTriggerClassificationTests(unittest.TestCase):
+    def test_replay_imports_same_waiting_trigger_classifier_as_live_engine(self) -> None:
+        from market_adaptive.strategies.mtf_engine import classify_waiting_execution_trigger
+
+        self.assertIs(analyze_trade_opportunities.classify_waiting_execution_trigger, classify_waiting_execution_trigger)
+
+
 class ReplayExecutionCandlePreferenceTests(unittest.TestCase):
     def test_replay_cta_respects_execution_candle_preference(self) -> None:
         cfg = SimpleNamespace(
