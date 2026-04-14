@@ -18,6 +18,7 @@ from market_adaptive.risk import CTARiskProfile, LogicalPositionSnapshot
 from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies.base import BaseStrategyRobot
 from market_adaptive.strategies.mtf_engine import MTFSignal, MultiTimeframeSignalEngine
+from market_adaptive.strategies.obv_gate import resolve_dynamic_obv_gate_for_signal
 from market_adaptive.strategies.order_flow_sentinel import OrderFlowAssessment, OrderFlowSentinel
 from market_adaptive.strategies.signal_profiler import SignalProfiler
 
@@ -47,7 +48,7 @@ class TrendSignal:
     mtf_aligned: bool = False
     obv_bias: int = 0
     obv_confirmation: OBVConfirmationSnapshot = field(default_factory=lambda: OBVConfirmationSnapshot(0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-    obv_threshold: float = 0.0
+    obv_threshold: float | None = None
     obv_confirmation_passed: bool = False
     volume_filter_passed: bool = False
     volume_profile: VolumeProfileSnapshot | None = None
@@ -377,7 +378,7 @@ class CTARobot(BaseStrategyRobot):
         )
 
     def _effective_signal_obv_threshold(self, signal: TrendSignal) -> float:
-        if signal.obv_threshold != 0.0:
+        if signal.obv_threshold is not None:
             return float(signal.obv_threshold)
         return float(self.config.obv_zscore_threshold)
 

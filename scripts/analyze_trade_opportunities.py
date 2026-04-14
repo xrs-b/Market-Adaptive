@@ -23,6 +23,7 @@ from market_adaptive.indicators import (
     ohlcv_to_dataframe,
 )
 from market_adaptive.oracles.market_oracle import indicator_confirms_trend
+from market_adaptive.strategies.obv_gate import resolve_dynamic_obv_gate
 from market_adaptive.strategies.order_flow_sentinel import OrderFlowSentinel
 from market_adaptive.timeframe_utils import maybe_use_closed_candles
 
@@ -236,8 +237,12 @@ def replay_cta(config_path: Path, hours: int) -> dict:
         passed_mtf_regime = bool(major_direction > 0 or weak_bull_bias or early_bullish)
         passed_bullish_ready = bool(bullish_ready)
         passed_trigger = bool(fully_aligned)
-        volume_filter_passed = fully_aligned and execution_obv_confirmation.buy_confirmed(zscore_threshold=cta.obv_zscore_threshold)
-        passed_obv = bool(execution_obv_confirmation.above_sma and volume_filter_passed)
+        obv_gate = resolve_dynamic_obv_gate(
+            bullish_score=bullish_score,
+            configured_threshold=cta.obv_zscore_threshold,
+        )
+        volume_filter_passed = fully_aligned and obv_gate.passed(execution_obv_confirmation)
+        passed_obv = bool((obv_gate.exempt or execution_obv_confirmation.above_sma) and volume_filter_passed)
         volume_profile = compute_volume_profile(exec_frame, lookback_hours=cta.volume_profile_lookback_hours, value_area_pct=cta.volume_profile_value_area_pct, bin_count=cta.volume_profile_bin_count)
         passed_volume_profile = bool(volume_profile and volume_profile.above_poc(current_price) and not volume_profile.contains_price(current_price) and volume_profile.above_value_area(current_price))
 
@@ -252,7 +257,7 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             blocker = "Blocked_By_Bullish_Score" if bullish_score > 0 else "Blocked_By_RSI_Threshold"
         elif not passed_trigger:
             blocker = f"Blocked_By_Trigger:{trigger_reason}"
-        elif not execution_obv_confirmation.above_sma:
+        elif not obv_gate.exempt and not execution_obv_confirmation.above_sma:
             blocker = "Blocked_By_OBV_BELOW_SMA"
         elif not volume_filter_passed:
             blocker = "Blocked_By_OBV_STRENGTH_NOT_CONFIRMED"

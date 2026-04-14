@@ -179,8 +179,49 @@ class CTAHeartbeatTests(unittest.TestCase):
         self.assertFalse(signal.long_setup_blocked)
         self.assertTrue(signal.obv_confirmation_passed)
         self.assertAlmostEqual(signal.obv_threshold, 0.0)
+        self.assertAlmostEqual(robot._effective_signal_obv_threshold(signal), 0.0)
 
+    def test_heartbeat_payload_uses_relaxed_zero_obv_threshold_without_falling_back(self) -> None:
+        robot = CTARobot(
+            client=DummyClient(),
+            database=DummyDatabase(),
+            config=CTAConfig(symbol="BTC/USDT", obv_zscore_threshold=0.6, heartbeat_interval_seconds=300.0),
+            execution_config=ExecutionConfig(),
+            notifier=None,
+            risk_manager=None,
+            sentiment_analyst=None,
+        )
+        signal = TrendSignal(
+            direction=0,
+            raw_direction=1,
+            major_direction=1,
+            bullish_ready=True,
+            execution_breakout=True,
+            execution_memory_active=True,
+            execution_trigger_reason="memory+breakout",
+            mtf_aligned=True,
+            obv_bias=1,
+            obv_confirmation=OBVConfirmationSnapshot(
+                current_obv=2310.0,
+                sma_value=261.1,
+                increment_value=277.0,
+                increment_mean=38.5,
+                increment_std=191.26,
+                zscore=0.1,
+            ),
+            obv_threshold=0.0,
+            obv_confirmation_passed=True,
+            volume_filter_passed=True,
+            long_setup_blocked=False,
+            price=100.0,
+            atr=1.2,
+            risk_percent=0.03,
+        )
 
+        payload = robot._build_signal_heartbeat_payload(signal)
+
+        self.assertEqual(payload["obv_zscore_threshold"], 0.0)
+        self.assertAlmostEqual(payload["obv_zscore_gap"], 0.1)
 
     def test_build_signal_heartbeat_payload_contains_zscore_gaps(self) -> None:
         robot = CTARobot(
