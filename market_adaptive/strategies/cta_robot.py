@@ -96,6 +96,13 @@ class CTANearMissSample:
     price: float
 
 
+@dataclass(frozen=True)
+class ValueAreaDecision:
+    inside_value_area: bool
+    blocked: bool
+    reason: str | None = None
+
+
 @dataclass
 class EntryOrderResult:
     order: dict
@@ -194,6 +201,59 @@ class CTARobot(BaseStrategyRobot):
             configured_threshold=float(self.config.obv_zscore_threshold),
         )
         return float(decision.threshold), bool(decision.exempt)
+
+    def _evaluate_value_area_decision(
+        self,
+        *,
+        volume_profile: VolumeProfileSnapshot | None,
+        current_price: float,
+        atr_value: float,
+        major_direction: int,
+        bullish_score: float,
+        execution_frontrun_near_breakout: bool,
+    ) -> ValueAreaDecision:
+        if volume_profile is None:
+            return ValueAreaDecision(inside_value_area=False, blocked=False)
+
+        inside_value_area = bool(volume_profile.contains_price(current_price))
+        if not inside_value_area:
+            return ValueAreaDecision(inside_value_area=False, blocked=False)
+
+        edge_threshold = 0.5 * max(0.0, float(atr_value))
+        value_area_high = float(volume_profile.value_area_high)
+        value_area_low = float(volume_profile.value_area_low)
+
+        if float(bullish_score) >= 75.0 and bool(execution_frontrun_near_breakout):
+            return ValueAreaDecision(inside_value_area=True, blocked=False, reason='High Momentum')
+
+        if int(major_direction) > 0 and float(current_price) > value_area_high - edge_threshold:
+            return ValueAreaDecision(inside_value_area=True, blocked=False, reason='Edge Proximity')
+
+        if int(major_direction) < 0 and float(current_price) < value_area_low + edge_threshold:
+            return ValueAreaDecision(inside_value_area=True, blocked=False, reason='Edge Proximity')
+
+        return ValueAreaDecision(inside_value_area=True, blocked=True)
+
+    def _log_value_area_event(
+        self,
+        *,
+        volume_profile: VolumeProfileSnapshot | None,
+        current_price: float,
+        decision: ValueAreaDecision,
+    ) -> None:
+        if volume_profile is None or not decision.inside_value_area:
+            return
+        context = (
+            f'POC: {float(volume_profile.poc_price):.4f}, '
+            f'VAH: {float(volume_profile.value_area_high):.4f}, '
+            f'VAL: {float(volume_profile.value_area_low):.4f}, '
+            f'Price: {float(current_price):.4f}'
+        )
+        if decision.blocked:
+            logger.info('Blocked: Inside VA [%s]', context)
+            return
+        if decision.reason:
+            logger.info('Passed: VA Override [Reason: %s] [%s]', decision.reason, context)
 
     def should_notify_action(self, action: str) -> bool:
         if action in {
@@ -313,6 +373,14 @@ class CTARobot(BaseStrategyRobot):
 
         if raw_direction > 0:
             obv_confirmation_passed = volume_filter_passed
+            value_area_decision = self._evaluate_value_area_decision(
+                volume_profile=volume_profile,
+                current_price=current_price,
+                atr_value=float(atr_series.iloc[-1]),
+                major_direction=int(mtf_signal.major_direction),
+                bullish_score=float(mtf_signal.bullish_score),
+                execution_frontrun_near_breakout=bool(mtf_signal.execution_trigger.frontrun_near_breakout),
+            )
             if not obv_exempt and not obv_confirmation.above_sma:
                 long_setup_blocked = True
                 long_setup_reason = "obv_below_sma"
@@ -325,12 +393,25 @@ class CTARobot(BaseStrategyRobot):
             elif not volume_profile.above_poc(current_price):
                 long_setup_blocked = True
                 long_setup_reason = "below_poc"
-            elif volume_profile.contains_price(current_price):
+            elif value_area_decision.blocked:
                 long_setup_blocked = True
                 long_setup_reason = "inside_value_area"
+            elif value_area_decision.inside_value_area and value_area_decision.reason:
+                self._log_value_area_event(
+                    volume_profile=volume_profile,
+                    current_price=current_price,
+                    decision=value_area_decision,
+                )
             elif not volume_profile.above_value_area(current_price):
                 long_setup_blocked = True
                 long_setup_reason = "below_value_area_high"
+
+            if long_setup_reason == "inside_value_area":
+                self._log_value_area_event(
+                    volume_profile=volume_profile,
+                    current_price=current_price,
+                    decision=value_area_decision,
+                )
 
             if long_setup_blocked:
                 final_direction = 0

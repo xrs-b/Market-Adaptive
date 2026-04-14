@@ -3,6 +3,31 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ValueAreaDecision:
+    inside_value_area: bool
+    blocked: bool
+    reason: str | None = None
+
+
+def evaluate_value_area_decision(*, volume_profile, current_price: float, atr_value: float, major_direction: int, bullish_score: float, execution_frontrun_near_breakout: bool) -> ValueAreaDecision:
+    if volume_profile is None:
+        return ValueAreaDecision(inside_value_area=False, blocked=False)
+    inside_value_area = bool(volume_profile.contains_price(current_price))
+    if not inside_value_area:
+        return ValueAreaDecision(inside_value_area=False, blocked=False)
+    edge_threshold = 0.5 * max(0.0, float(atr_value))
+    value_area_high = float(volume_profile.value_area_high)
+    value_area_low = float(volume_profile.value_area_low)
+    if float(bullish_score) >= 75.0 and bool(execution_frontrun_near_breakout):
+        return ValueAreaDecision(inside_value_area=True, blocked=False, reason="High Momentum")
+    if int(major_direction) > 0 and float(current_price) > value_area_high - edge_threshold:
+        return ValueAreaDecision(inside_value_area=True, blocked=False, reason="Edge Proximity")
+    if int(major_direction) < 0 and float(current_price) < value_area_low + edge_threshold:
+        return ValueAreaDecision(inside_value_area=True, blocked=False, reason="Edge Proximity")
+    return ValueAreaDecision(inside_value_area=True, blocked=True)
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
@@ -354,7 +379,15 @@ def replay_cta(config_path: Path, hours: int) -> dict:
         volume_filter_passed = fully_aligned and obv_gate.passed(execution_obv_confirmation)
         passed_obv = bool((obv_gate.exempt or execution_obv_confirmation.above_sma) and volume_filter_passed)
         volume_profile = compute_volume_profile(exec_frame, lookback_hours=cta.volume_profile_lookback_hours, value_area_pct=cta.volume_profile_value_area_pct, bin_count=cta.volume_profile_bin_count)
-        passed_volume_profile = bool(volume_profile and volume_profile.above_poc(current_price) and not volume_profile.contains_price(current_price) and volume_profile.above_value_area(current_price))
+        value_area_decision = evaluate_value_area_decision(
+            volume_profile=volume_profile,
+            current_price=current_price,
+            atr_value=execution_atr,
+            major_direction=major_direction,
+            bullish_score=bullish_score,
+            execution_frontrun_near_breakout=bool(getattr(trigger, "frontrun_near_breakout", False)),
+        )
+        passed_volume_profile = bool(volume_profile and volume_profile.above_poc(current_price) and (not value_area_decision.blocked) and (value_area_decision.reason is not None or volume_profile.above_value_area(current_price)))
 
         blocker = "PASSED"
         if not passed_market_regime:
@@ -375,9 +408,9 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             blocker = "Blocked_By_MISSING_VOLUME_PROFILE"
         elif not volume_profile.above_poc(current_price):
             blocker = "Blocked_By_BELOW_POC"
-        elif volume_profile.contains_price(current_price):
+        elif value_area_decision.blocked:
             blocker = "Blocked_By_INSIDE_VALUE_AREA"
-        elif not volume_profile.above_value_area(current_price):
+        elif not value_area_decision.reason and not volume_profile.above_value_area(current_price):
             blocker = "Blocked_By_BELOW_VALUE_AREA_HIGH"
 
         sentiment_blocked = False

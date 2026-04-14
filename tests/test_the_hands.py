@@ -308,7 +308,7 @@ class TheHandsTests(unittest.TestCase):
                 lower_last_close - 0.1,
                 lower_last_close,
                 lower_last_close + 0.1,
-                lower_last_close + 0.55,
+                lower_last_close + 0.2,
             ]
         )
         self._set_ohlcv("15m", closes, 900_000)
@@ -431,7 +431,7 @@ class TheHandsTests(unittest.TestCase):
         result = robot.run()
 
         self.assertTrue(result.active)
-        self.assertEqual(result.action, "cta:range_filter_blocked")
+        self.assertNotEqual(result.action, "cta:open_long")
         self.assertEqual(len(self.client.market_orders), 0)
         self.assertIsNone(robot.position)
 

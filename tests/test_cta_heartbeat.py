@@ -21,7 +21,7 @@ class DummyDatabase:
 
 
 class CTAHeartbeatTests(unittest.TestCase):
-    def _build_mtf_signal(self, *, bullish_score: float, fully_aligned: bool = True, weak_bull_bias: bool = False, early_bullish: bool = False, execution_entry_mode: str = "breakout_confirmed", trigger_reason: str = "Triggered via Memory Window") -> MTFSignal:
+    def _build_mtf_signal(self, *, bullish_score: float, fully_aligned: bool = True, weak_bull_bias: bool = False, early_bullish: bool = False, execution_entry_mode: str = "breakout_confirmed", trigger_reason: str = "Triggered via Memory Window", frontrun_near_breakout: bool = False, major_direction: int = 1) -> MTFSignal:
         execution_frame = pd.DataFrame({
             "timestamp": pd.to_datetime([1_700_000_000_000], unit="ms", utc=True),
             "open": [99.0],
@@ -42,12 +42,13 @@ class CTAHeartbeatTests(unittest.TestCase):
             prior_high=99.5,
             prior_low=98.0,
             reason=trigger_reason,
+            frontrun_near_breakout=frontrun_near_breakout,
         )
         return MTFSignal(
             major_timeframe="4h",
             swing_timeframe="1h",
             execution_timeframe="15m",
-            major_direction=1,
+            major_direction=major_direction,
             major_bias_score=60.0,
             weak_bull_bias=weak_bull_bias,
             early_bullish=early_bullish,
@@ -77,6 +78,151 @@ class CTAHeartbeatTests(unittest.TestCase):
             major_frame=execution_frame.copy(),
             swing_frame=execution_frame.copy(),
             execution_frame=execution_frame,
+        )
+
+
+    def test_high_momentum_near_breakout_can_override_inside_value_area_block(self) -> None:
+        robot = CTARobot(
+            client=DummyClient(),
+            database=DummyDatabase(),
+            config=CTAConfig(symbol="BTC/USDT", obv_zscore_threshold=0.6),
+            execution_config=ExecutionConfig(),
+            notifier=None,
+            risk_manager=None,
+            sentiment_analyst=None,
+        )
+        mtf_signal = self._build_mtf_signal(bullish_score=75.0, frontrun_near_breakout=True)
+        obv_snapshot = OBVConfirmationSnapshot(
+            current_obv=1100.0,
+            sma_value=1000.0,
+            increment_value=5.0,
+            increment_mean=1.0,
+            increment_std=2.0,
+            zscore=1.0,
+        )
+        volume_profile = type("VolumeProfile", (), {
+            "poc_price": 99.0,
+            "value_area_low": 98.5,
+            "value_area_high": 100.5,
+            "above_poc": lambda self, price: True,
+            "contains_price": lambda self, price: True,
+            "above_value_area": lambda self, price: False,
+        })()
+
+        with (
+            patch.object(robot.mtf_engine, "build_signal", return_value=mtf_signal),
+            patch("market_adaptive.strategies.cta_robot.compute_obv", return_value=pd.Series([1.0])),
+            patch("market_adaptive.strategies.cta_robot.compute_atr", return_value=pd.Series([1.2])),
+            patch("market_adaptive.strategies.cta_robot.compute_obv_confirmation_snapshot", return_value=obv_snapshot),
+            patch("market_adaptive.strategies.cta_robot.compute_volume_profile", return_value=volume_profile),
+            patch("market_adaptive.strategies.cta_robot.logger") as mock_logger,
+        ):
+            signal = robot._build_trend_signal()
+
+        assert signal is not None
+        self.assertEqual(signal.direction, 1)
+        self.assertFalse(signal.long_setup_blocked)
+        self.assertEqual(signal.long_setup_reason, "")
+        self.assertEqual(signal.blocker_reason, "")
+        mock_logger.info.assert_called_with(
+            "Passed: VA Override [Reason: %s] [%s]",
+            "High Momentum",
+            "POC: 99.0000, VAH: 100.5000, VAL: 98.5000, Price: 100.0000",
+        )
+
+    def test_edge_proximity_can_treat_price_as_effectively_exiting_value_area(self) -> None:
+        robot = CTARobot(
+            client=DummyClient(),
+            database=DummyDatabase(),
+            config=CTAConfig(symbol="BTC/USDT", obv_zscore_threshold=0.6),
+            execution_config=ExecutionConfig(),
+            notifier=None,
+            risk_manager=None,
+            sentiment_analyst=None,
+        )
+        mtf_signal = self._build_mtf_signal(bullish_score=60.0)
+        obv_snapshot = OBVConfirmationSnapshot(
+            current_obv=1100.0,
+            sma_value=1000.0,
+            increment_value=5.0,
+            increment_mean=1.0,
+            increment_std=2.0,
+            zscore=1.0,
+        )
+        volume_profile = type("VolumeProfile", (), {
+            "poc_price": 99.0,
+            "value_area_low": 98.0,
+            "value_area_high": 100.4,
+            "above_poc": lambda self, price: True,
+            "contains_price": lambda self, price: True,
+            "above_value_area": lambda self, price: False,
+        })()
+
+        with (
+            patch.object(robot.mtf_engine, "build_signal", return_value=mtf_signal),
+            patch("market_adaptive.strategies.cta_robot.compute_obv", return_value=pd.Series([1.0])),
+            patch("market_adaptive.strategies.cta_robot.compute_atr", return_value=pd.Series([1.0])),
+            patch("market_adaptive.strategies.cta_robot.compute_obv_confirmation_snapshot", return_value=obv_snapshot),
+            patch("market_adaptive.strategies.cta_robot.compute_volume_profile", return_value=volume_profile),
+            patch("market_adaptive.strategies.cta_robot.logger") as mock_logger,
+        ):
+            signal = robot._build_trend_signal()
+
+        assert signal is not None
+        self.assertEqual(signal.direction, 1)
+        self.assertFalse(signal.long_setup_blocked)
+        mock_logger.info.assert_called_with(
+            "Passed: VA Override [Reason: %s] [%s]",
+            "Edge Proximity",
+            "POC: 99.0000, VAH: 100.4000, VAL: 98.0000, Price: 100.0000",
+        )
+
+    def test_inside_value_area_block_logs_boundaries_when_no_override_applies(self) -> None:
+        robot = CTARobot(
+            client=DummyClient(),
+            database=DummyDatabase(),
+            config=CTAConfig(symbol="BTC/USDT", obv_zscore_threshold=0.6),
+            execution_config=ExecutionConfig(),
+            notifier=None,
+            risk_manager=None,
+            sentiment_analyst=None,
+        )
+        mtf_signal = self._build_mtf_signal(bullish_score=60.0)
+        obv_snapshot = OBVConfirmationSnapshot(
+            current_obv=1100.0,
+            sma_value=1000.0,
+            increment_value=5.0,
+            increment_mean=1.0,
+            increment_std=2.0,
+            zscore=1.0,
+        )
+        volume_profile = type("VolumeProfile", (), {
+            "poc_price": 99.0,
+            "value_area_low": 98.0,
+            "value_area_high": 101.5,
+            "above_poc": lambda self, price: True,
+            "contains_price": lambda self, price: True,
+            "above_value_area": lambda self, price: False,
+        })()
+
+        with (
+            patch.object(robot.mtf_engine, "build_signal", return_value=mtf_signal),
+            patch("market_adaptive.strategies.cta_robot.compute_obv", return_value=pd.Series([1.0])),
+            patch("market_adaptive.strategies.cta_robot.compute_atr", return_value=pd.Series([1.0])),
+            patch("market_adaptive.strategies.cta_robot.compute_obv_confirmation_snapshot", return_value=obv_snapshot),
+            patch("market_adaptive.strategies.cta_robot.compute_volume_profile", return_value=volume_profile),
+            patch("market_adaptive.strategies.cta_robot.logger") as mock_logger,
+        ):
+            signal = robot._build_trend_signal()
+
+        assert signal is not None
+        self.assertEqual(signal.direction, 0)
+        self.assertTrue(signal.long_setup_blocked)
+        self.assertEqual(signal.long_setup_reason, "inside_value_area")
+        self.assertEqual(signal.blocker_reason, "Blocked_By_INSIDE_VALUE_AREA")
+        mock_logger.info.assert_called_with(
+            "Blocked: Inside VA [%s]",
+            "POC: 99.0000, VAH: 101.5000, VAL: 98.0000, Price: 100.0000",
         )
 
     def test_resolve_obv_gate_uses_bullish_score_tiers(self) -> None:
