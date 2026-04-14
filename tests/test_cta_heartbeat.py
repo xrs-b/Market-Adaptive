@@ -21,7 +21,7 @@ class DummyDatabase:
 
 
 class CTAHeartbeatTests(unittest.TestCase):
-    def _build_mtf_signal(self, *, bullish_score: float, fully_aligned: bool = True) -> MTFSignal:
+    def _build_mtf_signal(self, *, bullish_score: float, fully_aligned: bool = True, weak_bull_bias: bool = False, early_bullish: bool = False, execution_entry_mode: str = "breakout_confirmed", trigger_reason: str = "Triggered via Memory Window") -> MTFSignal:
         execution_frame = pd.DataFrame({
             "timestamp": pd.to_datetime([1_700_000_000_000], unit="ms", utc=True),
             "open": [99.0],
@@ -41,7 +41,7 @@ class CTAHeartbeatTests(unittest.TestCase):
             prior_low_break=False,
             prior_high=99.5,
             prior_low=98.0,
-            reason="Triggered via Memory Window",
+            reason=trigger_reason,
         )
         return MTFSignal(
             major_timeframe="4h",
@@ -49,15 +49,15 @@ class CTAHeartbeatTests(unittest.TestCase):
             execution_timeframe="15m",
             major_direction=1,
             major_bias_score=60.0,
-            weak_bull_bias=False,
-            early_bullish=False,
+            weak_bull_bias=weak_bull_bias,
+            early_bullish=early_bullish,
             entry_size_multiplier=1.0,
             swing_rsi=58.0,
             swing_rsi_slope=1.2,
             bullish_score=bullish_score,
             bullish_threshold=55.0,
             bullish_ready=True,
-            execution_entry_mode="breakout_confirmed",
+            execution_entry_mode=execution_entry_mode,
             execution_trigger=trigger,
             fully_aligned=fully_aligned,
             current_price=100.0,
@@ -93,6 +93,40 @@ class CTAHeartbeatTests(unittest.TestCase):
         self.assertEqual(robot._resolve_obv_gate(self._build_mtf_signal(bullish_score=55.0)), (0.6, False))
         self.assertEqual(robot._resolve_obv_gate(self._build_mtf_signal(bullish_score=65.0)), (0.0, False))
         self.assertEqual(robot._resolve_obv_gate(self._build_mtf_signal(bullish_score=80.0)), (-1.0, True))
+
+    def test_recovery_context_relaxes_obv_gate_even_when_score_is_below_mid_tier(self) -> None:
+        robot = CTARobot(
+            client=DummyClient(),
+            database=DummyDatabase(),
+            config=CTAConfig(symbol="BTC/USDT", obv_zscore_threshold=0.6),
+            execution_config=ExecutionConfig(),
+            notifier=None,
+            risk_manager=None,
+            sentiment_analyst=None,
+        )
+
+        self.assertEqual(
+            robot._resolve_obv_gate(
+                self._build_mtf_signal(
+                    bullish_score=40.0,
+                    weak_bull_bias=True,
+                    execution_entry_mode="weak_bull_scale_in_limit",
+                    trigger_reason="Weak bull bias active: scale-in allowed before breakout",
+                )
+            ),
+            (0.0, False),
+        )
+        self.assertEqual(
+            robot._resolve_obv_gate(
+                self._build_mtf_signal(
+                    bullish_score=40.0,
+                    early_bullish=True,
+                    execution_entry_mode="early_bullish_starter_limit",
+                    trigger_reason="early_bullish: 1h supertrend bullish + recovery",
+                )
+            ),
+            (0.0, False),
+        )
 
     def test_high_score_signal_is_not_blocked_by_negative_obv_when_exempt(self) -> None:
         robot = CTARobot(

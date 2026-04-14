@@ -240,6 +240,16 @@ def replay_cta(config_path: Path, hours: int) -> dict:
         obv_gate = resolve_dynamic_obv_gate(
             bullish_score=bullish_score,
             configured_threshold=cta.obv_zscore_threshold,
+            early_bullish=early_bullish,
+            weak_bull_bias=weak_bull_bias,
+            trigger_reason=trigger_reason,
+            execution_entry_mode=(
+                "early_bullish_starter_limit"
+                if early_bullish
+                else "weak_bull_scale_in_limit"
+                if weak_bull_bias
+                else "breakout_confirmed"
+            ),
         )
         volume_filter_passed = fully_aligned and obv_gate.passed(execution_obv_confirmation)
         passed_obv = bool((obv_gate.exempt or execution_obv_confirmation.above_sma) and volume_filter_passed)

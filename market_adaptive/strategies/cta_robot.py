@@ -186,13 +186,11 @@ class CTARobot(BaseStrategyRobot):
         self._time_provider = time.time
 
     def _resolve_obv_gate(self, signal: MTFSignal) -> tuple[float, bool]:
-        bias_score = float(signal.bullish_score)
-        strict_threshold = min(float(self.config.obv_zscore_threshold), 0.60)
-        if bias_score >= 80.0:
-            return -1.0, True
-        if bias_score >= 65.0:
-            return 0.0, False
-        return strict_threshold, False
+        decision = resolve_dynamic_obv_gate_for_signal(
+            signal,
+            configured_threshold=float(self.config.obv_zscore_threshold),
+        )
+        return float(decision.threshold), bool(decision.exempt)
 
     def should_notify_action(self, action: str) -> bool:
         if action in {
