@@ -254,11 +254,12 @@ def replay_cta(config_path: Path, hours: int) -> dict:
 
         swing_supertrend = compute_supertrend(swing_frame, length=cta.supertrend_period, multiplier=cta.supertrend_multiplier)
         recovery_ema = swing_frame["close"].ewm(span=cta.recovery_ema_period, adjust=False).mean()
+        current_recovery_ema = float(recovery_ema.iloc[-1])
         slope_lookback = max(1, min(int(cta.recovery_ema_slope_lookback), len(recovery_ema) - 1))
-        ema_slope = float(recovery_ema.iloc[-1]) - float(recovery_ema.iloc[-1 - slope_lookback])
+        ema_slope = current_recovery_ema - float(recovery_ema.iloc[-1 - slope_lookback])
         flat_tolerance = float(cta.recovery_ema_flat_tolerance_atr_ratio) * max(float(major_supertrend["atr"].iloc[-1]), 1e-12)
-        weak_bull_bias = major_direction <= 0 and float(swing_frame["close"].iloc[-1]) > float(recovery_ema.iloc[-1]) and ema_slope >= -flat_tolerance
-        weak_bear_bias = major_direction >= 0 and float(swing_frame["close"].iloc[-1]) < float(recovery_ema.iloc[-1]) and ema_slope <= flat_tolerance
+        weak_bull_bias = major_direction <= 0 and float(swing_frame["close"].iloc[-1]) > current_recovery_ema and ema_slope >= -flat_tolerance
+        weak_bear_bias = major_direction >= 0 and float(swing_frame["close"].iloc[-1]) < current_recovery_ema and ema_slope <= flat_tolerance
         if major_direction > 0:
             major_bias_score = float(cta.strong_bull_bias_score)
         else:
@@ -319,10 +320,7 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             magnetism_limit = float(cta.magnetism_rail_atr_multiplier) * current_major_atr
             if current_major_atr > 0 and rail_distance < magnetism_limit and execution_obv_confirmation.zscore > float(cta.magnetism_obv_zscore_threshold):
                 bullish_score = max(bullish_score, float(cta.bullish_ready_score_threshold))
-        bullish_ready = bullish_score >= float(cta.bullish_ready_score_threshold)
-        bearish_ready = bearish_score >= float(cta.bullish_ready_score_threshold)
-        drive_first_tradeable = bullish_score >= float(getattr(cta, "drive_first_tradeable_score", 60.0))
-
+        bullish_threshold = float(cta.bullish_ready_score_threshold)
         execution_kdj = compute_kdj(exec_frame, length=cta.kdj_length, k_smoothing=cta.kdj_k_smoothing, d_smoothing=cta.kdj_d_smoothing)
         current_k = float(execution_kdj["k"].iloc[-1]); current_d = float(execution_kdj["d"].iloc[-1])
         previous_k = float(execution_kdj["k"].iloc[-2]); previous_d = float(execution_kdj["d"].iloc[-2])
@@ -344,9 +342,45 @@ def replay_cta(config_path: Path, hours: int) -> dict:
                 bearish_cross_bars_ago = bars_ago
                 break
         bearish_memory_active = bearish_cross_bars_ago is not None and bearish_cross_bars_ago < max(1, int(cta.kdj_signal_memory_bars))
-        early_bearish = bool(early_bearish and (bearish_memory_active or kdj_dead_cross or weak_bear_bias))
+        bearish_bridge_rollover = bool(
+            major_direction >= 0
+            and bearish_memory_active
+            and float(swing_frame["close"].iloc[-1]) < current_recovery_ema
+            and current_rsi <= current_rsi_sma
+            and rsi_slope < 0.0
+        )
+        weak_bear_bias = bool(weak_bear_bias or bearish_bridge_rollover)
+        early_bearish = bool(
+            major_direction >= 0
+            and (swing_direction < 0 or bearish_rsi_structure)
+            and float(swing_frame["close"].iloc[-1]) < current_upper_band
+            and upper_band_slope <= float(cta.early_bullish_lower_band_slope_atr_threshold) * max(float(major_supertrend["atr"].iloc[-1]), 1e-12)
+            and (bearish_memory_active or kdj_dead_cross or weak_bear_bias)
+        )
+        bearish_score = (float(cta.strong_bull_bias_score) if major_direction < 0 else 0.0)
+        if bearish_score <= 0.0:
+            if swing_direction < 0 or early_bearish:
+                bearish_score += float(getattr(cta, "swing_supertrend_bullish_score", 0.0))
+            elif weak_bear_bias:
+                bearish_score += float(cta.weak_bull_bias_score)
+        if current_rsi <= float(cta.dynamic_rsi_floor) and rsi_slope < 0.0:
+            bearish_score += float(cta.dynamic_rsi_trend_score)
+        if early_bearish and current_rsi <= (current_rsi_sma + rsi_buffer) and current_rsi <= float(cta.swing_rsi_ready_threshold):
+            bearish_score += float(getattr(cta, "early_bullish_score_bonus", 0.0))
         if bearish_memory_active:
             bearish_score += float(getattr(cta, "kdj_memory_score_bonus", 0.0))
+        bearish_threshold = float(cta.bullish_ready_score_threshold)
+        if major_direction >= 0 and early_bearish:
+            bearish_threshold = min(
+                bearish_threshold,
+                max(
+                    float(getattr(cta, "swing_supertrend_bullish_score", 0.0)) + float(getattr(cta, "kdj_memory_score_bonus", 0.0)),
+                    bearish_threshold - float(getattr(cta, "kdj_memory_score_bonus", 0.0)) - 5.0,
+                ),
+            )
+        bullish_ready = bullish_score >= bullish_threshold
+        bearish_ready = bearish_score >= bearish_threshold
+        drive_first_tradeable = bullish_score >= float(getattr(cta, "drive_first_tradeable_score", 60.0))
         prior_high_series = exec_frame["high"].shift(1).rolling(max(1, int(cta.execution_breakout_lookback)), min_periods=max(1, int(cta.execution_breakout_lookback))).max()
         prior_low_series = exec_frame["low"].shift(1).rolling(max(1, int(cta.execution_breakout_lookback)), min_periods=max(1, int(cta.execution_breakout_lookback))).min()
         prior_high_value = prior_high_series.iloc[-1]

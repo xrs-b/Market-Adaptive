@@ -520,15 +520,20 @@ class MultiTimeframeSignalEngine:
         swing_direction = int(swing_supertrend["direction"].iloc[-1])
         alignment = self._check_timeframe_alignment(major_frame, swing_frame, execution_frame)
         current_swing_rsi = float(swing_rsi.iloc[-1])
+        swing_rsi_sma = swing_rsi.rolling(max(2, int(self.config.recovery_rsi_sma_period)), min_periods=1).mean()
+        current_rsi_sma = float(swing_rsi_sma.iloc[-1])
         current_major_atr = float(major_supertrend["atr"].iloc[-1])
         early_bullish = major_direction <= 0 and self._resolve_early_bullish(major_frame, swing_frame, major_supertrend)
         major_bias_score, weak_bull_bias = self._resolve_major_bias(major_direction, swing_frame, swing_supertrend, current_major_atr)
         swing_score, swing_rsi_slope = self._resolve_swing_readiness(swing_rsi)
         recovery_ema = swing_frame["close"].ewm(span=max(2, int(self.config.recovery_ema_period)), adjust=False).mean()
+        current_recovery_ema = float(recovery_ema.iloc[-1])
+        recovery_ema_lookback_index = max(0, len(recovery_ema) - 1 - max(1, int(self.config.recovery_ema_slope_lookback)))
+        recovery_ema_slope = current_recovery_ema - float(recovery_ema.iloc[recovery_ema_lookback_index])
         weak_bear_bias = bool(
             major_direction >= 0
-            and float(swing_frame["close"].iloc[-1]) < float(recovery_ema.iloc[-1])
-            and (float(recovery_ema.iloc[-1]) - float(recovery_ema.iloc[max(0, len(recovery_ema) - 1 - max(1, int(self.config.recovery_ema_slope_lookback)))])) <= float(self.config.recovery_ema_flat_tolerance_atr_ratio) * max(current_major_atr, 1e-12)
+            and float(swing_frame["close"].iloc[-1]) < current_recovery_ema
+            and recovery_ema_slope <= float(self.config.recovery_ema_flat_tolerance_atr_ratio) * max(current_major_atr, 1e-12)
         )
 
         current_k = float(execution_kdj["k"].iloc[-1])
@@ -547,6 +552,14 @@ class MultiTimeframeSignalEngine:
         bearish_cross_bars_ago = self._bars_since_last_true(bearish_cross_mask, memory_bars)
         bullish_memory_active = bullish_cross_bars_ago is not None and bullish_cross_bars_ago < memory_bars
         bearish_memory_active = bearish_cross_bars_ago is not None
+        bearish_bridge_rollover = bool(
+            major_direction >= 0
+            and bearish_memory_active
+            and float(swing_frame["close"].iloc[-1]) < current_recovery_ema
+            and current_swing_rsi <= current_rsi_sma
+            and swing_rsi_slope < 0.0
+        )
+        weak_bear_bias = bool(weak_bear_bias or bearish_bridge_rollover)
         early_bearish = self._resolve_early_bearish(
             major_direction=major_direction,
             swing_direction=swing_direction,
@@ -590,7 +603,7 @@ class MultiTimeframeSignalEngine:
         bearish_score_4h = float(self.config.strong_bull_bias_score) if major_direction < 0 else 0.0
         bearish_score_1h = 0.0
         if bearish_score_4h <= 0.0:
-            if swing_direction < 0:
+            if swing_direction < 0 or early_bearish:
                 bearish_score_1h = float(getattr(self.config, "swing_supertrend_bullish_score", 0.0))
             elif weak_bear_bias:
                 bearish_score_1h = float(self.config.weak_bull_bias_score)
@@ -660,6 +673,14 @@ class MultiTimeframeSignalEngine:
 
         bullish_threshold = float(self.config.bullish_ready_score_threshold)
         bearish_threshold = float(self.config.bullish_ready_score_threshold)
+        if major_direction >= 0 and early_bearish:
+            bearish_threshold = min(
+                bearish_threshold,
+                max(
+                    float(getattr(self.config, "swing_supertrend_bullish_score", 0.0)) + float(getattr(self.config, "kdj_memory_score_bonus", 0.0)),
+                    bearish_threshold - float(getattr(self.config, "kdj_memory_score_bonus", 0.0)) - 5.0,
+                ),
+            )
         rsi_relax_score = float(getattr(self.config, "aggressive_rsi_relax_score", 70.0))
         rsi_extreme_threshold = float(getattr(self.config, "aggressive_rsi_extreme_threshold", 85.0))
         rsi_rollover_blocked = bool(

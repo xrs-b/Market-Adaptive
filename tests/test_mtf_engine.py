@@ -603,6 +603,55 @@ class MTFEngineTests(unittest.TestCase):
         self.assertTrue(signal.fully_aligned)
         self.assertEqual(signal.execution_entry_mode, "early_bearish_starter_limit")
 
+    def test_engine_can_open_bearish_bridge_before_swing_supertrend_flips(self) -> None:
+        self._set_ohlcv("4h", [100.0 + 0.6 * index for index in range(60)], 14_400_000)
+        swing_closes = [120.0] * 45 + [119.8, 119.5, 119.2, 118.9, 118.5, 118.1, 117.7, 117.3, 116.9, 116.5, 116.1, 115.7, 115.3, 114.9, 114.5]
+        self._set_ohlcv("1h", swing_closes, 3_600_000)
+        self._set_ohlcv("15m", [120.0] * 58 + [118.8, 117.6], 900_000)
+        import pandas as pd
+        mocked_kdj = pd.DataFrame({"k": [60.0] * 58 + [70.0, 20.0], "d": [55.0] * 58 + [60.0, 40.0]})
+
+        major_supertrend = pd.DataFrame(
+            {
+                "direction": [1] * 60,
+                "lower_band": [100.0] * 60,
+                "upper_band": [121.0] * 58 + [118.6, 118.65],
+                "supertrend": [100.0] * 60,
+                "atr": [2.0] * 60,
+            }
+        )
+        swing_supertrend = pd.DataFrame(
+            {
+                "direction": [1] * 60,
+                "lower_band": [110.0] * 60,
+                "upper_band": [122.0] * 60,
+                "supertrend": [122.0] * 60,
+                "atr": [1.0] * 60,
+            }
+        )
+
+        mocked_rsi = pd.Series([58.0] * 58 + [44.0, 40.0])
+
+        with (
+            patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj),
+            patch("market_adaptive.strategies.mtf_engine.compute_rsi", return_value=mocked_rsi),
+            patch(
+                "market_adaptive.strategies.mtf_engine.compute_supertrend",
+                side_effect=[major_supertrend, swing_supertrend],
+            ),
+        ):
+            signal = self.engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertGreaterEqual(signal.major_direction, 0)
+        self.assertTrue(signal.weak_bear_bias)
+        self.assertTrue(signal.early_bearish)
+        self.assertGreaterEqual(signal.bearish_score, signal.bearish_threshold)
+        self.assertTrue(signal.bearish_ready)
+        self.assertTrue(signal.fully_aligned)
+        self.assertEqual(signal.execution_entry_mode, "early_bearish_starter_limit")
+
     def test_engine_dynamic_rsi_ready_on_positive_slope_above_45(self) -> None:
         self._set_ohlcv("4h", [220 - 2.0 * (59 - index) for index in range(60)], 14_400_000)
         swing_closes = [100.0] * 45 + [99.8, 99.6, 99.7, 99.9, 100.2, 100.6, 101.1, 101.7, 102.4, 103.2, 104.1, 105.0, 106.0, 107.0, 108.0]
