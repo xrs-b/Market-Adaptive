@@ -110,6 +110,23 @@ def _major_bull_retest_near_breakout_ready(
     return frontrun_gap_ratio <= tolerance_ratio
 
 
+def _trend_continuation_near_breakout_ready(
+    *,
+    major_direction: int,
+    bullish_score: float,
+    frontrun_near_breakout: bool,
+    prior_high_break: bool,
+    kdj_dead_cross: bool,
+    execution_obv_ready: bool,
+    execution_obv_zscore: float,
+) -> bool:
+    if major_direction <= 0 or float(bullish_score) < 75.0:
+        return False
+    if not frontrun_near_breakout or prior_high_break or kdj_dead_cross:
+        return False
+    return bool(execution_obv_ready or float(execution_obv_zscore) > 0.0)
+
+
 def _resolve_bullish_urgency_window(
     *,
     cta,
@@ -309,6 +326,7 @@ def replay_cta(config_path: Path, hours: int) -> dict:
                 supported_volume = bool((recent["volume"] >= volume_mean * volume_multiplier).all())
                 frontrun_impulse_confirmed = bullish_bars and supported_volume
         execution_obv_ready = execution_obv_confirmation.buy_confirmed(zscore_threshold=float(cta.obv_zscore_threshold))
+        high_confidence_price_override = bool(bullish_score >= 75.0 and frontrun_near_breakout and not kdj_dead_cross)
         bullish_urgency_active, bullish_urgency_decay_step, bullish_urgency_trigger_ready = _resolve_bullish_urgency_window(
             cta=cta,
             bullish_ready=bullish_ready,
@@ -328,6 +346,15 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             bullish_memory_active=bullish_memory_active,
             frontrun_gap_ratio=frontrun_gap_ratio,
         ) or bullish_urgency_trigger_ready
+        trend_continuation_near_breakout_ready = _trend_continuation_near_breakout_ready(
+            major_direction=major_direction,
+            bullish_score=bullish_score,
+            frontrun_near_breakout=frontrun_near_breakout,
+            prior_high_break=prior_high_break,
+            kdj_dead_cross=kdj_dead_cross,
+            execution_obv_ready=execution_obv_ready,
+            execution_obv_zscore=float(execution_obv_confirmation.zscore),
+        )
         major_bull_impulse_reclaim_ready = bool(
             major_direction > 0
             and bullish_ready
@@ -354,6 +381,10 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             trigger_reason = "early_bullish"
         elif bullish_memory_active and prior_high_break:
             trigger_reason = "memory+breakout"
+        elif trend_continuation_near_breakout_ready:
+            trigger_reason = "trend_continuation_near_breakout_ready"
+        elif high_confidence_price_override:
+            trigger_reason = "price_led_override"
         elif major_bull_retest_ready:
             trigger_reason = "major_bull_retest_ready_urgency" if bullish_urgency_active and not bullish_memory_active else "major_bull_retest_ready"
         elif major_bull_impulse_reclaim_ready:
@@ -364,7 +395,7 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             trigger_reason = "kdj_cross_wait_breakout"
         elif prior_high_break:
             trigger_reason = "breakout_wait_memory"
-        fully_aligned = early_bullish or major_bull_retest_ready or major_bull_impulse_reclaim_ready or (bullish_ready and ((weak_bull_bias and bullish_memory_active) or ((not weak_bull_bias) and prior_high_break and (bullish_memory_active or bullish_urgency_active or kdj_golden_cross))))
+        fully_aligned = early_bullish or trend_continuation_near_breakout_ready or high_confidence_price_override or major_bull_retest_ready or major_bull_impulse_reclaim_ready or (bullish_ready and ((weak_bull_bias and bullish_memory_active) or ((not weak_bull_bias) and prior_high_break and (bullish_memory_active or bullish_urgency_active or kdj_golden_cross))))
 
         major_ts = int(pd.Timestamp(major_frame["timestamp"].iloc[-1]).value // 1_000_000)
         swing_ts = int(pd.Timestamp(swing_frame["timestamp"].iloc[-1]).value // 1_000_000)

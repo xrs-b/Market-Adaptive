@@ -169,6 +169,23 @@ class MultiTimeframeSignalEngine:
         )
         return frontrun_gap_ratio <= tolerance_ratio
 
+    def _trend_continuation_near_breakout_ready(
+        self,
+        *,
+        major_direction: int,
+        bullish_score: float,
+        frontrun_near_breakout: bool,
+        prior_high_break: bool,
+        kdj_dead_cross: bool,
+        execution_obv_ready: bool,
+        execution_obv_zscore: float,
+    ) -> bool:
+        if major_direction <= 0 or float(bullish_score) < 75.0:
+            return False
+        if not frontrun_near_breakout or prior_high_break or kdj_dead_cross:
+            return False
+        return bool(execution_obv_ready or float(execution_obv_zscore) > 0.0)
+
     @staticmethod
     def _resolve_directional_latch(
         *,
@@ -608,6 +625,15 @@ class MultiTimeframeSignalEngine:
             and (bullish_memory_active or kdj_golden_cross)
         )
         high_confidence_price_override = bool(bullish_score >= 75.0 and frontrun_near_breakout and not kdj_dead_cross)
+        trend_continuation_near_breakout_ready = self._trend_continuation_near_breakout_ready(
+            major_direction=major_direction,
+            bullish_score=bullish_score,
+            frontrun_near_breakout=frontrun_near_breakout,
+            prior_high_break=prior_high_break,
+            kdj_dead_cross=kdj_dead_cross,
+            execution_obv_ready=execution_obv_ready,
+            execution_obv_zscore=float(execution_obv_confirmation.zscore),
+        )
         medium_confidence_latch_breakout_ready = bool(
             major_direction > 0
             and bullish_ready
@@ -670,6 +696,8 @@ class MultiTimeframeSignalEngine:
             reason = f"Triggered via Memory Window: KDJ crossed {bullish_cross_bars_ago} bars ago + Price Breakout NOW"
         elif starter_frontrun_ready:
             reason = f"starter_frontrun: gap={frontrun_gap_ratio * 100:.3f}% + 1m {int(getattr(self.config, 'starter_frontrun_impulse_bars', 3))} bullish bars + OBV confirmed"
+        elif trend_continuation_near_breakout_ready:
+            reason = f"trend_continuation_near_breakout_ready: bullish_score={bullish_score:.0f} + gap={frontrun_gap_ratio * 100:.3f}% + obv_support={'confirmed' if execution_obv_ready else 'positive_zscore'}"
         elif high_confidence_price_override:
             reason = f"price_led_override: bullish_score={bullish_score:.0f} + near_breakout_gap={frontrun_gap_ratio * 100:.3f}%"
         elif medium_confidence_latch_breakout_ready:
@@ -733,7 +761,7 @@ class MultiTimeframeSignalEngine:
             state_label=state_label,
             reason=reason,
         )
-        fully_aligned = early_bullish or starter_frontrun_ready or high_confidence_price_override or medium_confidence_latch_breakout_ready or major_bull_retest_ready or major_bull_impulse_reclaim_ready or (
+        fully_aligned = early_bullish or starter_frontrun_ready or high_confidence_price_override or medium_confidence_latch_breakout_ready or trend_continuation_near_breakout_ready or major_bull_retest_ready or major_bull_impulse_reclaim_ready or (
             bullish_ready and (
                 ((swing_direction > 0) and prior_high_break and (bullish_memory_active or bullish_urgency_active or kdj_golden_cross))
                 or (weak_bull_bias and bullish_memory_active)

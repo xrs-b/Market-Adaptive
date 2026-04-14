@@ -806,7 +806,83 @@ class MTFEngineTests(unittest.TestCase):
         self.assertTrue(signal.fully_aligned)
         self.assertTrue(signal.rsi_blocking_overridden)
         self.assertEqual(signal.blocker_reason, "PASSED")
-        self.assertIn("price_led_override", signal.execution_trigger.reason)
+        self.assertTrue(any(tag in signal.execution_trigger.reason for tag in ("price_led_override", "trend_continuation_near_breakout_ready")))
+
+    def test_engine_allows_trend_continuation_near_breakout_with_positive_obv_support_after_memory_expiry(self) -> None:
+        config = CTAConfig(
+            symbol="BTC/USDT",
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            strong_bull_bias_score=75.0,
+            bullish_ready_score_threshold=55.0,
+        )
+        engine = MultiTimeframeSignalEngine(self.client, config)
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.25 for index in range(54)] + [103.8, 104.3, 104.9, 105.4, 105.8, 105.99]
+        self._set_ohlcv("15m", execution_closes, 900_000)
+
+        import pandas as pd
+        mocked_kdj = pd.DataFrame({"k": [56.0] * 60, "d": [51.0] * 60})
+        supportive_but_not_confirmed_obv = OBVConfirmationSnapshot(
+            current_obv=0.0,
+            sma_value=1.0,
+            increment_value=0.2,
+            increment_mean=0.0,
+            increment_std=1.0,
+            zscore=0.2,
+        )
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj), patch(
+            "market_adaptive.strategies.mtf_engine.compute_obv_confirmation_snapshot",
+            return_value=supportive_but_not_confirmed_obv,
+        ):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.bullish_ready)
+        self.assertFalse(signal.execution_trigger.bullish_memory_active)
+        self.assertFalse(signal.execution_trigger.prior_high_break)
+        self.assertTrue(signal.execution_trigger.frontrun_near_breakout)
+        self.assertTrue(signal.fully_aligned)
+        self.assertIn("trend_continuation_near_breakout_ready", signal.execution_trigger.reason)
+
+    def test_engine_keeps_trend_continuation_near_breakout_blocked_on_dead_cross(self) -> None:
+        config = CTAConfig(
+            symbol="BTC/USDT",
+            major_timeframe="4h",
+            swing_timeframe="1h",
+            execution_timeframe="15m",
+            strong_bull_bias_score=75.0,
+            bullish_ready_score_threshold=55.0,
+        )
+        engine = MultiTimeframeSignalEngine(self.client, config)
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.25 for index in range(54)] + [103.8, 104.3, 104.9, 105.4, 105.8, 105.99]
+        self._set_ohlcv("15m", execution_closes, 900_000)
+
+        import pandas as pd
+        dead_cross_kdj = pd.DataFrame({"k": [56.0] * 58 + [56.0, 49.0], "d": [51.0] * 58 + [51.0, 54.0]})
+        supportive_but_not_confirmed_obv = OBVConfirmationSnapshot(
+            current_obv=0.0,
+            sma_value=1.0,
+            increment_value=0.2,
+            increment_mean=0.0,
+            increment_std=1.0,
+            zscore=0.2,
+        )
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=dead_cross_kdj), patch(
+            "market_adaptive.strategies.mtf_engine.compute_obv_confirmation_snapshot",
+            return_value=supportive_but_not_confirmed_obv,
+        ):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.bullish_ready)
+        self.assertTrue(signal.execution_trigger.kdj_dead_cross)
+        self.assertFalse(signal.fully_aligned)
+        self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger_near_breakout")
 
     def test_engine_uses_soft_latch_breakout_for_medium_confidence_breakout_after_memory_expiry(self) -> None:
         config = CTAConfig(
