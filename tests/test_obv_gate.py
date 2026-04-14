@@ -238,6 +238,15 @@ class OBVGateTests(unittest.TestCase):
         self.assertEqual((gate.threshold, gate.exempt, gate.side), (0.5, False, "long"))
         self.assertFalse(gate.passed(clearly_negative))
 
+    def test_frontrun_near_breakout_relaxes_gate_to_non_negative_obv_even_below_mid_tier(self) -> None:
+        gate = resolve_dynamic_obv_gate(
+            bullish_score=55.0,
+            configured_threshold=1.0,
+            execution_frontrun_near_breakout=True,
+        )
+
+        self.assertEqual((gate.threshold, gate.exempt, gate.side), (0.0, False, "long"))
+
     def test_recovery_context_does_not_receive_post_trigger_softening(self) -> None:
         gate = resolve_dynamic_obv_gate(
             bullish_score=60.0,

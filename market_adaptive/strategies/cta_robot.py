@@ -103,6 +103,17 @@ class ValueAreaDecision:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class HighMomentumClearanceDecision:
+    eligible: bool
+    used_rsi_override: bool = False
+    used_value_area_override: bool = False
+
+    @property
+    def activated(self) -> bool:
+        return bool(self.eligible and self.used_rsi_override and self.used_value_area_override)
+
+
 @dataclass
 class EntryOrderResult:
     order: dict
@@ -201,6 +212,21 @@ class CTARobot(BaseStrategyRobot):
             configured_threshold=float(self.config.obv_zscore_threshold),
         )
         return float(decision.threshold), bool(decision.exempt)
+
+    def _evaluate_high_momentum_clearance(
+        self,
+        *,
+        mtf_signal: MTFSignal,
+        inside_value_area: bool,
+    ) -> HighMomentumClearanceDecision:
+        eligible = bool(float(mtf_signal.bullish_score) >= 75.0 and mtf_signal.execution_trigger.frontrun_near_breakout)
+        used_rsi_override = bool(eligible and getattr(mtf_signal, "rsi_blocking_overridden", False))
+        used_value_area_override = bool(eligible and inside_value_area)
+        return HighMomentumClearanceDecision(
+            eligible=eligible,
+            used_rsi_override=used_rsi_override,
+            used_value_area_override=used_value_area_override,
+        )
 
     def _evaluate_value_area_decision(
         self,
@@ -365,6 +391,11 @@ class CTARobot(BaseStrategyRobot):
             value_area_pct=self.config.volume_profile_value_area_pct,
             bin_count=self.config.volume_profile_bin_count,
         )
+        inside_value_area = bool(volume_profile.contains_price(current_price)) if volume_profile is not None else False
+        high_momentum_clearance = self._evaluate_high_momentum_clearance(
+            mtf_signal=mtf_signal,
+            inside_value_area=inside_value_area,
+        )
 
         final_direction = raw_direction
         long_setup_blocked = False
@@ -415,6 +446,9 @@ class CTARobot(BaseStrategyRobot):
 
             if long_setup_blocked:
                 final_direction = 0
+
+            if final_direction > 0 and high_momentum_clearance.activated:
+                logger.info("[FINAL_TRIGGER_OVERRIDE] Full Clearance - All Guards Relaxed for High Momentum Breakout")
 
         blocker_reason = mtf_signal.blocker_reason
         if long_setup_blocked:

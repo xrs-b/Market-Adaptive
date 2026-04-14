@@ -687,7 +687,7 @@ class MTFEngineTests(unittest.TestCase):
             major_timeframe="4h",
             swing_timeframe="1h",
             execution_timeframe="15m",
-            strong_bull_bias_score=70.0,
+            strong_bull_bias_score=75.0,
             bullish_ready_score_threshold=55.0,
         )
         engine = MultiTimeframeSignalEngine(self.client, config)
@@ -706,6 +706,8 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.execution_trigger.bullish_memory_active)
         self.assertTrue(signal.execution_trigger.frontrun_near_breakout)
         self.assertTrue(signal.fully_aligned)
+        self.assertTrue(signal.rsi_blocking_overridden)
+        self.assertEqual(signal.blocker_reason, "PASSED")
         self.assertIn("price_led_override", signal.execution_trigger.reason)
 
     def test_engine_uses_soft_latch_breakout_for_medium_confidence_breakout_after_memory_expiry(self) -> None:

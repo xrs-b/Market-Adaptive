@@ -146,6 +146,7 @@ def resolve_dynamic_obv_gate(
     weak_bull_bias: bool = False,
     early_bearish: bool = False,
     weak_bear_bias: bool = False,
+    execution_frontrun_near_breakout: bool = False,
     trigger_reason: str = "",
     execution_entry_mode: str = "",
 ) -> OBVGateDecision:
@@ -172,6 +173,8 @@ def resolve_dynamic_obv_gate(
         execution_entry_mode=execution_entry_mode,
     ):
         return OBVGateDecision(threshold=0.0, exempt=False, side=resolved_side)
+    if bool(execution_frontrun_near_breakout):
+        return OBVGateDecision(threshold=0.0, exempt=False, side=resolved_side)
     if float(bullish_score) >= 65.0:
         return OBVGateDecision(threshold=0.0, exempt=False, side=resolved_side)
     if _is_high_quality_long_post_trigger_context(
@@ -196,6 +199,7 @@ def resolve_dynamic_obv_gate_for_signal(signal: MTFSignal, *, configured_thresho
         major_direction=int(signal.major_direction),
         early_bullish=bool(signal.early_bullish),
         weak_bull_bias=bool(signal.weak_bull_bias),
+        execution_frontrun_near_breakout=bool(signal.execution_trigger.frontrun_near_breakout),
         trigger_reason=str(signal.execution_trigger.reason),
         execution_entry_mode=str(signal.execution_entry_mode),
     )

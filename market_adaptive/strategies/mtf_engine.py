@@ -93,6 +93,7 @@ class MTFSignal:
     major_frame: pd.DataFrame
     swing_frame: pd.DataFrame
     execution_frame: pd.DataFrame
+    rsi_blocking_overridden: bool = False
 
 
 class MultiTimeframeSignalEngine:
@@ -240,12 +241,13 @@ class MultiTimeframeSignalEngine:
             valid=valid,
         )
 
-    def _resolve_blocker_reason(self, *, data_alignment_valid: bool, major_direction: int, weak_bull_bias: bool, early_bullish: bool, swing_score: float, bullish_ready: bool, fully_aligned: bool, execution_reason: str) -> str:
+    def _resolve_blocker_reason(self, *, data_alignment_valid: bool, major_direction: int, weak_bull_bias: bool, early_bullish: bool, swing_score: float, bullish_ready: bool, fully_aligned: bool, execution_reason: str, bullish_score: float, execution_frontrun_near_breakout: bool) -> str:
         if not data_alignment_valid:
             return "DATA_MISMATCH_WARNING"
         if not (major_direction > 0 or weak_bull_bias or early_bullish):
             return "Blocked_By_SuperTrend_Regime"
-        if swing_score <= 0.0:
+        high_momentum_breakout_clearance = bool(float(bullish_score) >= 75.0 and execution_frontrun_near_breakout)
+        if swing_score <= 0.0 and not high_momentum_breakout_clearance:
             return "Blocked_By_RSI_Threshold"
         if not bullish_ready:
             return "Blocked_By_Bullish_Score"
@@ -562,7 +564,7 @@ class MultiTimeframeSignalEngine:
             and frontrun_impulse_confirmed
             and (bullish_memory_active or kdj_golden_cross)
         )
-        high_confidence_price_override = bool(bullish_score >= 70.0 and frontrun_near_breakout and not kdj_dead_cross)
+        high_confidence_price_override = bool(bullish_score >= 75.0 and frontrun_near_breakout and not kdj_dead_cross)
         medium_confidence_latch_breakout_ready = bool(
             major_direction > 0
             and bullish_ready
@@ -690,6 +692,7 @@ class MultiTimeframeSignalEngine:
         local_dt = datetime.now(timezone.utc)
         server_ts = self.client.fetch_server_time() if hasattr(self.client, "fetch_server_time") else None
         server_dt = datetime.fromtimestamp(server_ts / 1000.0, tz=timezone.utc) if server_ts else None
+        rsi_blocking_overridden = bool(swing_score <= 0.0 and float(bullish_score) >= 75.0 and frontrun_near_breakout)
         blocker_reason = self._resolve_blocker_reason(
             data_alignment_valid=alignment.valid,
             major_direction=major_direction,
@@ -699,6 +702,8 @@ class MultiTimeframeSignalEngine:
             bullish_ready=bullish_ready,
             fully_aligned=fully_aligned,
             execution_reason=reason,
+            bullish_score=bullish_score,
+            execution_frontrun_near_breakout=frontrun_near_breakout,
         )
 
         return MTFSignal(
@@ -735,4 +740,5 @@ class MultiTimeframeSignalEngine:
             major_frame=major_frame,
             swing_frame=swing_frame,
             execution_frame=execution_frame,
+            rsi_blocking_overridden=rsi_blocking_overridden,
         )
