@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from market_adaptive.indicators import OBVConfirmationSnapshot
+import pandas as pd
+
+from market_adaptive.indicators import OBVConfirmationSnapshot, compute_obv_confirmation_snapshot
 from market_adaptive.strategies.mtf_engine import MTFSignal
 
 
@@ -32,6 +34,8 @@ _HIGH_QUALITY_LONG_TRIGGER_MARKERS = (
 )
 
 _POST_TRIGGER_SOFT_OBV_THRESHOLD = 0.50
+_SHORT_RECOVERY_OBV_GRACE_ZSCORE_CEILING = 0.26
+_SHORT_RECOVERY_OBV_GRACE_LOOKBACK_BARS = 2
 
 
 def _contains_any_marker(text: str, markers: tuple[str, ...]) -> bool:
@@ -108,17 +112,50 @@ def _is_high_quality_long_post_trigger_context(
     return _contains_any_marker(trigger_reason, _HIGH_QUALITY_LONG_TRIGGER_MARKERS)
 
 
+def detect_recent_short_obv_confirmation(
+    execution_frame: pd.DataFrame,
+    *,
+    sma_period: int,
+    zscore_window: int,
+    lookback_bars: int = _SHORT_RECOVERY_OBV_GRACE_LOOKBACK_BARS,
+) -> bool:
+    frame = execution_frame if execution_frame is not None else pd.DataFrame()
+    if len(frame) < 2:
+        return False
+    max_lookback = max(1, int(lookback_bars))
+    end_index = len(frame) - 2
+    start_index = max(0, end_index - max_lookback + 1)
+    for idx in range(end_index, start_index - 1, -1):
+        snapshot = compute_obv_confirmation_snapshot(
+            frame.iloc[: idx + 1],
+            sma_period=int(sma_period),
+            zscore_window=int(zscore_window),
+        )
+        if snapshot.below_sma and float(snapshot.zscore) < 0.0:
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class OBVGateDecision:
     threshold: float
     exempt: bool
     side: str = "long"
+    short_recovery_grace_active: bool = False
+    short_recovery_grace_zscore_ceiling: float = _SHORT_RECOVERY_OBV_GRACE_ZSCORE_CEILING
 
     def passed(self, snapshot: OBVConfirmationSnapshot) -> bool:
         if self.exempt:
             return True
         if str(self.side).lower() == "short":
-            return bool(snapshot.sell_confirmed(zscore_threshold=self.threshold))
+            short_confirmed = bool(snapshot.sell_confirmed(zscore_threshold=self.threshold))
+            if short_confirmed:
+                return True
+            return bool(
+                self.short_recovery_grace_active
+                and bool(snapshot.below_sma)
+                and float(snapshot.zscore) <= float(self.short_recovery_grace_zscore_ceiling)
+            )
         return bool(snapshot.buy_confirmed(zscore_threshold=self.threshold))
 
     def check_summary(self, snapshot: OBVConfirmationSnapshot) -> str:
@@ -149,6 +186,7 @@ def resolve_dynamic_obv_gate(
     execution_frontrun_near_breakout: bool = False,
     trigger_reason: str = "",
     execution_entry_mode: str = "",
+    recent_short_obv_confirmation: bool = False,
 ) -> OBVGateDecision:
     resolved_side = _resolve_obv_side(
         side=side,
@@ -163,7 +201,7 @@ def resolve_dynamic_obv_gate(
     strict_threshold = min(float(configured_threshold), 0.60)
     if float(bullish_score) >= 80.0:
         return OBVGateDecision(threshold=-1.0, exempt=True, side=resolved_side)
-    if _is_recovery_context(
+    recovery_context = _is_recovery_context(
         side=resolved_side,
         early_bullish=early_bullish,
         weak_bull_bias=weak_bull_bias,
@@ -171,8 +209,19 @@ def resolve_dynamic_obv_gate(
         weak_bear_bias=weak_bear_bias,
         trigger_reason=trigger_reason,
         execution_entry_mode=execution_entry_mode,
-    ):
-        return OBVGateDecision(threshold=0.0, exempt=False, side=resolved_side)
+    )
+    short_recovery_grace_active = bool(
+        resolved_side == "short"
+        and recovery_context
+        and bool(recent_short_obv_confirmation)
+    )
+    if recovery_context:
+        return OBVGateDecision(
+            threshold=0.0,
+            exempt=False,
+            side=resolved_side,
+            short_recovery_grace_active=short_recovery_grace_active,
+        )
     if bool(execution_frontrun_near_breakout):
         return OBVGateDecision(threshold=-0.1 if resolved_side == "long" else 0.0, exempt=False, side=resolved_side)
     if resolved_side == "long" and major_direction is not None and int(major_direction) > 0 and float(bullish_score) >= 60.0:
@@ -193,7 +242,13 @@ def resolve_dynamic_obv_gate(
     return OBVGateDecision(threshold=strict_threshold, exempt=False, side=resolved_side)
 
 
-def resolve_dynamic_obv_gate_for_signal(signal: MTFSignal, *, configured_threshold: float) -> OBVGateDecision:
+def resolve_dynamic_obv_gate_for_signal(
+    signal: MTFSignal,
+    *,
+    configured_threshold: float,
+    obv_sma_period: int,
+    obv_zscore_window: int,
+) -> OBVGateDecision:
     return resolve_dynamic_obv_gate(
         bullish_score=float(signal.bullish_score),
         configured_threshold=float(configured_threshold),
@@ -201,7 +256,14 @@ def resolve_dynamic_obv_gate_for_signal(signal: MTFSignal, *, configured_thresho
         major_direction=int(signal.major_direction),
         early_bullish=bool(signal.early_bullish),
         weak_bull_bias=bool(signal.weak_bull_bias),
+        early_bearish=bool(getattr(signal, "early_bearish", False)),
+        weak_bear_bias=bool(getattr(signal, "weak_bear_bias", False)),
         execution_frontrun_near_breakout=bool(signal.execution_trigger.frontrun_near_breakout),
         trigger_reason=str(signal.execution_trigger.reason),
         execution_entry_mode=str(signal.execution_entry_mode),
+        recent_short_obv_confirmation=detect_recent_short_obv_confirmation(
+            signal.execution_frame,
+            sma_period=int(obv_sma_period),
+            zscore_window=int(obv_zscore_window),
+        ),
     )

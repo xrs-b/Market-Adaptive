@@ -213,12 +213,13 @@ class CTARobot(BaseStrategyRobot):
         self._last_near_miss_report_at = 0.0
         self._time_provider = time.time
 
-    def _resolve_obv_gate(self, signal: MTFSignal) -> tuple[float, bool]:
-        decision = resolve_dynamic_obv_gate_for_signal(
+    def _resolve_obv_gate(self, signal: MTFSignal):
+        return resolve_dynamic_obv_gate_for_signal(
             signal,
             configured_threshold=float(self.config.obv_zscore_threshold),
+            obv_sma_period=int(self.config.obv_sma_period),
+            obv_zscore_window=int(self.config.obv_zscore_window),
         )
-        return float(decision.threshold), bool(decision.exempt)
 
     def _evaluate_high_momentum_clearance(
         self,
@@ -398,7 +399,9 @@ class CTARobot(BaseStrategyRobot):
             )
         ) else 0
         raw_direction = bullish_raw_direction if bullish_raw_direction != 0 else bearish_raw_direction
-        obv_threshold, obv_exempt = self._resolve_obv_gate(mtf_signal)
+        obv_gate = self._resolve_obv_gate(mtf_signal)
+        obv_threshold = float(obv_gate.threshold)
+        obv_exempt = bool(obv_gate.exempt)
         drive_first_tradeable = bool(float(mtf_signal.bullish_score) >= float(getattr(self.config, "drive_first_tradeable_score", 60.0)))
         relaxed_obv_allowed = bool(
             raw_direction > 0
@@ -408,9 +411,9 @@ class CTARobot(BaseStrategyRobot):
         )
         volume_filter_passed = False
         if raw_direction > 0:
-            volume_filter_passed = bool(obv_exempt or obv_confirmation.buy_confirmed(zscore_threshold=obv_threshold) or relaxed_obv_allowed)
+            volume_filter_passed = bool(obv_gate.passed(obv_confirmation) or relaxed_obv_allowed)
         elif raw_direction < 0:
-            volume_filter_passed = bool(obv_exempt or obv_confirmation.sell_confirmed(zscore_threshold=obv_threshold))
+            volume_filter_passed = bool(obv_gate.passed(obv_confirmation))
         current_price = float(execution_frame["close"].iloc[-1])
         volume_profile = compute_volume_profile(
             execution_frame,

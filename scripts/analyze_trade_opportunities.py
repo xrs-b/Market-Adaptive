@@ -56,7 +56,7 @@ from market_adaptive.strategies.mtf_engine import (
     classify_waiting_execution_trigger,
     resolve_execution_trigger_proximity_budget_ratio,
 )
-from market_adaptive.strategies.obv_gate import resolve_dynamic_obv_gate
+from market_adaptive.strategies.obv_gate import detect_recent_short_obv_confirmation, resolve_dynamic_obv_gate
 from market_adaptive.strategies.order_flow_sentinel import OrderFlowSentinel
 from market_adaptive.timeframe_utils import maybe_use_closed_candles
 
@@ -553,6 +553,11 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             execution_frontrun_near_breakout=replay_near_breakout,
             trigger_reason=trigger_reason,
             execution_entry_mode=execution_entry_mode,
+            recent_short_obv_confirmation=detect_recent_short_obv_confirmation(
+                exec_frame,
+                sma_period=int(cta.obv_sma_period),
+                zscore_window=int(cta.obv_zscore_window),
+            ),
         )
         relaxed_obv_allowed = bool(
             replay_side == "long"
@@ -561,7 +566,7 @@ def replay_cta(config_path: Path, hours: int) -> dict:
             and float(execution_obv_confirmation.zscore) > float(obv_gate.threshold)
         )
         if replay_side == "short":
-            volume_filter_passed = fully_aligned and (obv_gate.exempt or execution_obv_confirmation.sell_confirmed(zscore_threshold=float(obv_gate.threshold)))
+            volume_filter_passed = fully_aligned and obv_gate.passed(execution_obv_confirmation)
         else:
             volume_filter_passed = fully_aligned and (obv_gate.passed(execution_obv_confirmation) or relaxed_obv_allowed)
         passed_obv = bool(volume_filter_passed)

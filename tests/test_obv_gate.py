@@ -151,7 +151,7 @@ class OBVGateTests(unittest.TestCase):
             ),
         )
 
-        gate = resolve_dynamic_obv_gate_for_signal(signal, configured_threshold=1.0)
+        gate = resolve_dynamic_obv_gate_for_signal(signal, configured_threshold=1.0, obv_sma_period=5, obv_zscore_window=5)
 
         self.assertEqual((gate.threshold, gate.exempt, gate.side), (0.0, False, "long"))
 
@@ -174,7 +174,7 @@ class OBVGateTests(unittest.TestCase):
             ),
         )
 
-        gate = resolve_dynamic_obv_gate_for_signal(signal, configured_threshold=1.0)
+        gate = resolve_dynamic_obv_gate_for_signal(signal, configured_threshold=1.0, obv_sma_period=5, obv_zscore_window=5)
 
         self.assertEqual((gate.threshold, gate.exempt, gate.side), (0.0, False, "short"))
 
@@ -238,14 +238,14 @@ class OBVGateTests(unittest.TestCase):
         self.assertEqual((gate.threshold, gate.exempt, gate.side), (0.5, False, "long"))
         self.assertFalse(gate.passed(clearly_negative))
 
-    def test_frontrun_near_breakout_relaxes_gate_to_non_negative_obv_even_below_mid_tier(self) -> None:
+    def test_frontrun_near_breakout_relaxes_gate_to_small_negative_obv_even_below_mid_tier(self) -> None:
         gate = resolve_dynamic_obv_gate(
             bullish_score=55.0,
             configured_threshold=1.0,
             execution_frontrun_near_breakout=True,
         )
 
-        self.assertEqual((gate.threshold, gate.exempt, gate.side), (0.0, False, "long"))
+        self.assertEqual((gate.threshold, gate.exempt, gate.side), (-0.1, False, "long"))
 
     def test_recovery_context_does_not_receive_post_trigger_softening(self) -> None:
         gate = resolve_dynamic_obv_gate(
@@ -256,6 +256,72 @@ class OBVGateTests(unittest.TestCase):
         )
 
         self.assertEqual((gate.threshold, gate.exempt, gate.side), (0.0, False, "long"))
+
+    def test_short_recovery_grace_allows_mild_positive_rebound_after_recent_bearish_confirmation(self) -> None:
+        gate = resolve_dynamic_obv_gate(
+            bullish_score=50.0,
+            configured_threshold=0.6,
+            side="short",
+            early_bearish=True,
+            recent_short_obv_confirmation=True,
+        )
+        mild_rebound = OBVConfirmationSnapshot(900.0, 1000.0, 1.0, -1.0, 2.0, 0.24)
+        too_positive = OBVConfirmationSnapshot(900.0, 1000.0, 1.0, -1.0, 2.0, 0.27)
+        above_sma = OBVConfirmationSnapshot(1001.0, 1000.0, 1.0, -1.0, 2.0, 0.20)
+
+        self.assertEqual((gate.threshold, gate.exempt, gate.side), (0.0, False, "short"))
+        self.assertTrue(gate.short_recovery_grace_active)
+        self.assertTrue(gate.passed(mild_rebound))
+        self.assertFalse(gate.passed(too_positive))
+        self.assertFalse(gate.passed(above_sma))
+
+    def test_short_recovery_grace_stays_off_without_recent_confirmation(self) -> None:
+        gate = resolve_dynamic_obv_gate(
+            bullish_score=50.0,
+            configured_threshold=0.6,
+            side="short",
+            early_bearish=True,
+            recent_short_obv_confirmation=False,
+        )
+        mild_rebound = OBVConfirmationSnapshot(900.0, 1000.0, 1.0, -1.0, 2.0, 0.24)
+
+        self.assertFalse(gate.short_recovery_grace_active)
+        self.assertFalse(gate.passed(mild_rebound))
+
+    def test_signal_wrapper_enables_short_recovery_grace_from_recent_execution_history(self) -> None:
+        signal = self._build_signal(
+            major_direction=-1,
+            early_bearish=True,
+            bullish_score=50.0,
+            execution_entry_mode="early_bearish_starter_limit",
+            execution_trigger=ExecutionTriggerSnapshot(
+                kdj_golden_cross=False,
+                kdj_dead_cross=False,
+                bullish_memory_active=False,
+                bearish_memory_active=True,
+                bullish_cross_bars_ago=None,
+                bearish_cross_bars_ago=1,
+                prior_high_break=False,
+                prior_low_break=True,
+                prior_high=None,
+                prior_low=None,
+                reason="early_bearish: distribution rollover after failed push",
+            ),
+            execution_frame=pd.DataFrame(
+                {
+                    "open": [100.0, 99.0, 98.0],
+                    "high": [101.0, 100.0, 99.0],
+                    "low": [99.0, 98.0, 97.0],
+                    "close": [99.0, 98.0, 98.2],
+                    "volume": [10.0, 10.0, 5.0],
+                }
+            ),
+        )
+
+        gate = resolve_dynamic_obv_gate_for_signal(signal, configured_threshold=0.6, obv_sma_period=2, obv_zscore_window=2)
+
+        self.assertTrue(gate.short_recovery_grace_active)
+        self.assertTrue(gate.passed(OBVConfirmationSnapshot(5.0, 7.5, 5.0, 0.0, 5.0, 0.20)))
 
     def test_strict_short_gate_preserves_downside_confirmation_requirement(self) -> None:
         gate = resolve_dynamic_obv_gate(bullish_score=55.0, configured_threshold=1.0, side="short")

@@ -256,6 +256,31 @@ class ReplayBearishPathTests(unittest.TestCase):
         self.assertGreater(result["bearish_live_direction_count"], 0)
         self.assertEqual(result["direction_counts"].get(-1), result["bearish_live_direction_count"])
 
+    def test_replay_short_recovery_grace_preserves_recent_bearish_obv_confirmation(self) -> None:
+        from market_adaptive.strategies.obv_gate import detect_recent_short_obv_confirmation, resolve_dynamic_obv_gate
 
+        exec_frame = pd.DataFrame(
+            {
+                "open": [100.0, 99.0, 98.0],
+                "high": [101.0, 100.0, 99.0],
+                "low": [99.0, 98.0, 97.0],
+                "close": [99.0, 98.0, 98.2],
+                "volume": [10.0, 10.0, 5.0],
+            }
+        )
+
+        gate = resolve_dynamic_obv_gate(
+            bullish_score=50.0,
+            configured_threshold=0.6,
+            side="short",
+            early_bearish=True,
+            execution_entry_mode="early_bearish_starter_limit",
+            trigger_reason="early_bearish: distribution rollover after failed push",
+            recent_short_obv_confirmation=detect_recent_short_obv_confirmation(exec_frame, sma_period=2, zscore_window=2),
+        )
+
+        self.assertTrue(gate.short_recovery_grace_active)
+
+    
 if __name__ == "__main__":
     unittest.main()

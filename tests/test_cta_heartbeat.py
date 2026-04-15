@@ -237,14 +237,13 @@ class CTAHeartbeatTests(unittest.TestCase):
             sentiment_analyst=None,
         )
 
-        self.assertEqual(
-            robot._resolve_obv_gate(
-                self._build_mtf_signal(bullish_score=55.0, trigger_reason="waiting_execution_trigger")
-            ),
-            (0.6, False),
-        )
-        self.assertEqual(robot._resolve_obv_gate(self._build_mtf_signal(bullish_score=65.0)), (-0.1, False))
-        self.assertEqual(robot._resolve_obv_gate(self._build_mtf_signal(bullish_score=80.0)), (-1.0, True))
+        low = robot._resolve_obv_gate(self._build_mtf_signal(bullish_score=55.0, trigger_reason="waiting_execution_trigger"))
+        mid = robot._resolve_obv_gate(self._build_mtf_signal(bullish_score=65.0))
+        high = robot._resolve_obv_gate(self._build_mtf_signal(bullish_score=80.0))
+
+        self.assertEqual((low.threshold, low.exempt), (0.6, False))
+        self.assertEqual((mid.threshold, mid.exempt), (-0.1, False))
+        self.assertEqual((high.threshold, high.exempt), (-1.0, True))
 
     def test_high_quality_post_trigger_signal_gets_narrow_obv_softening(self) -> None:
         robot = CTARobot(
@@ -257,15 +256,14 @@ class CTAHeartbeatTests(unittest.TestCase):
             sentiment_analyst=None,
         )
 
-        self.assertEqual(
-            robot._resolve_obv_gate(
-                self._build_mtf_signal(
-                    bullish_score=60.0,
-                    trigger_reason="major_bull_retest_ready: gap=0.120% + KDJ memory 2 bars ago",
-                )
-            ),
-            (-0.1, False),
+        gate = robot._resolve_obv_gate(
+            self._build_mtf_signal(
+                bullish_score=60.0,
+                trigger_reason="major_bull_retest_ready: gap=0.120% + KDJ memory 2 bars ago",
+            )
         )
+
+        self.assertEqual((gate.threshold, gate.exempt), (-0.1, False))
 
     def test_recovery_context_relaxes_obv_gate_even_when_score_is_below_mid_tier(self) -> None:
         robot = CTARobot(
@@ -278,28 +276,24 @@ class CTAHeartbeatTests(unittest.TestCase):
             sentiment_analyst=None,
         )
 
-        self.assertEqual(
-            robot._resolve_obv_gate(
-                self._build_mtf_signal(
-                    bullish_score=40.0,
-                    weak_bull_bias=True,
-                    execution_entry_mode="weak_bull_scale_in_limit",
-                    trigger_reason="Weak bull bias active: scale-in allowed before breakout",
-                )
-            ),
-            (0.0, False),
+        weak_gate = robot._resolve_obv_gate(
+            self._build_mtf_signal(
+                bullish_score=40.0,
+                weak_bull_bias=True,
+                execution_entry_mode="weak_bull_scale_in_limit",
+                trigger_reason="Weak bull bias active: scale-in allowed before breakout",
+            )
         )
-        self.assertEqual(
-            robot._resolve_obv_gate(
-                self._build_mtf_signal(
-                    bullish_score=40.0,
-                    early_bullish=True,
-                    execution_entry_mode="early_bullish_starter_limit",
-                    trigger_reason="early_bullish: 1h supertrend bullish + recovery",
-                )
-            ),
-            (0.0, False),
+        self.assertEqual((weak_gate.threshold, weak_gate.exempt), (0.0, False))
+        early_gate = robot._resolve_obv_gate(
+            self._build_mtf_signal(
+                bullish_score=40.0,
+                early_bullish=True,
+                execution_entry_mode="early_bullish_starter_limit",
+                trigger_reason="early_bullish: 1h supertrend bullish + recovery",
+            )
         )
+        self.assertEqual((early_gate.threshold, early_gate.exempt), (0.0, False))
 
     def test_logs_final_high_momentum_clearance_only_when_rsi_and_value_area_overrides_both_apply(self) -> None:
         robot = CTARobot(
