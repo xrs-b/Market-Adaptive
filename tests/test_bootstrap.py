@@ -100,6 +100,66 @@ class MarketAdaptiveBootstrapTests(unittest.TestCase):
 
             self.assertIsNotNone(row)
 
+    def test_database_initializer_migrates_legacy_status_check_constraints(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "market_adaptive.sqlite3"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE market_status (
+                        timestamp TEXT PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK(status IN ('trend', 'sideways')),
+                        adx_value REAL NOT NULL,
+                        volatility REAL NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE strategy_runtime_state (
+                        strategy_name TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        last_status TEXT NOT NULL CHECK(last_status IN ('trend', 'sideways')),
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (strategy_name, symbol)
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO market_status (timestamp, symbol, status, adx_value, volatility) VALUES (?, ?, ?, ?, ?)",
+                    ("2026-04-15T00:00:00+00:00", "BTC/USDT", "trend", 25.0, 0.02),
+                )
+                conn.execute(
+                    "INSERT INTO strategy_runtime_state (strategy_name, symbol, last_status, updated_at) VALUES (?, ?, ?, ?)",
+                    ("cta", "BTC/USDT", "sideways", "2026-04-15T00:00:00+00:00"),
+                )
+                conn.commit()
+
+            DatabaseInitializer(db_path).initialize()
+
+            with sqlite3.connect(db_path) as conn:
+                market_status_sql = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='market_status'"
+                ).fetchone()[0]
+                runtime_sql = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='strategy_runtime_state'"
+                ).fetchone()[0]
+                conn.execute(
+                    "INSERT INTO market_status (timestamp, symbol, status, adx_value, volatility) VALUES (?, ?, ?, ?, ?)",
+                    ("2026-04-15T00:05:00+00:00", "BTC/USDT", "trend_impulse", 28.0, 0.03),
+                )
+                conn.execute(
+                    "INSERT INTO strategy_runtime_state (strategy_name, symbol, last_status, updated_at) VALUES (?, ?, ?, ?)\n                     ON CONFLICT(strategy_name, symbol) DO UPDATE SET last_status=excluded.last_status, updated_at=excluded.updated_at",
+                    ("cta", "BTC/USDT", "trend_impulse", "2026-04-15T00:05:00+00:00"),
+                )
+                status_count = conn.execute("SELECT COUNT(*) FROM market_status").fetchone()[0]
+                conn.commit()
+
+            self.assertIn("trend_impulse", market_status_sql)
+            self.assertIn("trend_impulse", runtime_sql)
+            self.assertEqual(status_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

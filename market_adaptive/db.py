@@ -72,12 +72,56 @@ class DatabaseInitializer:
     def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.db_path) as conn:
+            self._migrate_legacy_status_tables(conn)
             conn.execute(MARKET_STATUS_SCHEMA)
             conn.execute(STRATEGY_RUNTIME_STATE_SCHEMA)
             conn.execute(SYSTEM_STATE_SCHEMA)
             for statement in MARKET_STATUS_INDEXES:
                 conn.execute(statement)
             conn.commit()
+
+    def _table_sql(self, conn: sqlite3.Connection, table_name: str) -> str:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        return str(row[0]) if row and row[0] else ""
+
+    def _migrate_legacy_status_tables(self, conn: sqlite3.Connection) -> None:
+        self._migrate_market_status_table(conn)
+        self._migrate_strategy_runtime_state_table(conn)
+
+    def _migrate_market_status_table(self, conn: sqlite3.Connection) -> None:
+        sql = self._table_sql(conn, "market_status")
+        if not sql or "trend_impulse" in sql:
+            return
+        conn.execute("ALTER TABLE market_status RENAME TO market_status_legacy")
+        conn.execute(MARKET_STATUS_SCHEMA)
+        for statement in MARKET_STATUS_INDEXES:
+            conn.execute(statement)
+        conn.execute(
+            """
+            INSERT INTO market_status (timestamp, symbol, status, adx_value, volatility)
+            SELECT timestamp, symbol, status, adx_value, volatility
+            FROM market_status_legacy
+            """
+        )
+        conn.execute("DROP TABLE market_status_legacy")
+
+    def _migrate_strategy_runtime_state_table(self, conn: sqlite3.Connection) -> None:
+        sql = self._table_sql(conn, "strategy_runtime_state")
+        if not sql or "trend_impulse" in sql:
+            return
+        conn.execute("ALTER TABLE strategy_runtime_state RENAME TO strategy_runtime_state_legacy")
+        conn.execute(STRATEGY_RUNTIME_STATE_SCHEMA)
+        conn.execute(
+            """
+            INSERT INTO strategy_runtime_state (strategy_name, symbol, last_status, updated_at)
+            SELECT strategy_name, symbol, last_status, updated_at
+            FROM strategy_runtime_state_legacy
+            """
+        )
+        conn.execute("DROP TABLE strategy_runtime_state_legacy")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
