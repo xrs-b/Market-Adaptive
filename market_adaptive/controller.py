@@ -148,6 +148,26 @@ class MainController:
             f"今日盈亏率：{daily_pnl_pct:+.2f}%"
         )
 
+    def push_account_equity_report(
+        self,
+        *,
+        title: str = "账号资金汇总",
+        current_equity: float | None = None,
+        prefix: str | None = None,
+        suffix: str | None = None,
+    ) -> str:
+        report = self.build_account_equity_report(current_equity=current_equity)
+        lines: list[str] = []
+        if prefix:
+            lines.append(str(prefix).rstrip())
+        lines.append(report)
+        if suffix:
+            lines.append(str(suffix).rstrip())
+        message = "\n".join(lines)
+        if self.notifier is not None:
+            self.notifier.send(title, message)
+        return message
+
     def start(self) -> None:
         self.database.initialize()
         self.install_signal_handlers()
@@ -157,13 +177,11 @@ class MainController:
         if self.config.runtime.start_grid_websocket_on_boot:
             self.grid_robot.start_background_websocket()
         self.logger.info("Main Controller started | daily_start_equity=%.4f", self.risk_control.daily_start_equity or 0.0)
-        self.notifier.send(
-            "系统已启动",
-            (
-                "交易系统已完成启动。\n"
-                f"{account_report}\n"
-                f"监控交易对：{', '.join(self.symbols)}"
-            ),
+        self.push_account_equity_report(
+            title="系统已启动",
+            current_equity=current_equity,
+            prefix="交易系统已完成启动。",
+            suffix=f"监控交易对：{', '.join(self.symbols)}",
         )
 
         worker_specs = [

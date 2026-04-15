@@ -194,6 +194,22 @@ class MainControllerTests(unittest.TestCase):
         self.assertIn("今日盈亏：+200.0000 USDT", report)
         self.assertIn("今日盈亏率：+0.21%", report)
 
+    def test_push_account_equity_report_uses_dedicated_title(self) -> None:
+        self.config.runtime.account_initial_equity = 95400.0
+        controller = MainController(self.config, self.database)
+        controller.notifier = DummyNotifier()
+        controller.risk_client = DummyAccountClient(equity=96000.0, pnl=0.0)
+        controller.risk_control.client = controller.risk_client
+        timestamp = datetime.now(timezone.utc).isoformat()
+        self.database.upsert_system_state(SystemStateRecord("risk_daily_start_date", datetime.now(timezone.utc).astimezone(ZoneInfo(self.config.runtime.timezone)).date().isoformat(), timestamp))
+        self.database.upsert_system_state(SystemStateRecord("risk_daily_start_equity", "95800.0", timestamp))
+
+        message = controller.push_account_equity_report(title="账号资金汇总", current_equity=96000.0)
+
+        self.assertTrue(any(title == "账号资金汇总" for title, _ in controller.notifier.messages))
+        self.assertIn("初始资金：95400.0000 USDT", message)
+        self.assertIn("总盈亏：+600.0000 USDT", message)
+
     def test_runtime_context_is_shared_between_cta_and_grid(self) -> None:
         controller = MainController(self.config, self.database)
 
