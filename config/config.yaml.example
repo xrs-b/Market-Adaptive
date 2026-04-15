@@ -21,6 +21,7 @@ runtime:
   shutdown_cancel_open_orders: true
   start_grid_websocket_on_boot: true
   shutdown_join_timeout_seconds: 5.0
+  account_initial_equity: 0.0
 
 risk_control:
   daily_loss_cutoff_pct: 0.05

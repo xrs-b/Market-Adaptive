@@ -176,6 +176,24 @@ class MainControllerTests(unittest.TestCase):
         self.assertIn("BTC/USDT", controller.shutdown_client.closed_symbols)
         self.assertTrue(any(title == "系统已停止" for title, _ in controller.notifier.messages))
 
+    def test_build_account_equity_report_includes_total_and_daily_pnl(self) -> None:
+        self.config.runtime.account_initial_equity = 95400.0
+        controller = MainController(self.config, self.database)
+        controller.risk_client = DummyAccountClient(equity=96000.0, pnl=0.0)
+        controller.risk_control.client = controller.risk_client
+        timestamp = datetime.now(timezone.utc).isoformat()
+        self.database.upsert_system_state(SystemStateRecord("risk_daily_start_date", datetime.now(timezone.utc).astimezone(ZoneInfo(self.config.runtime.timezone)).date().isoformat(), timestamp))
+        self.database.upsert_system_state(SystemStateRecord("risk_daily_start_equity", "95800.0", timestamp))
+
+        report = controller.build_account_equity_report(current_equity=96000.0)
+
+        self.assertIn("初始资金：95400.0000 USDT", report)
+        self.assertIn("总盈亏：+600.0000 USDT", report)
+        self.assertIn("总盈亏率：+0.63%", report)
+        self.assertIn("今日起始资金：95800.0000 USDT", report)
+        self.assertIn("今日盈亏：+200.0000 USDT", report)
+        self.assertIn("今日盈亏率：+0.21%", report)
+
     def test_runtime_context_is_shared_between_cta_and_grid(self) -> None:
         controller = MainController(self.config, self.database)
 

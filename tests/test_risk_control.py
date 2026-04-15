@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from market_adaptive.config import RiskControlConfig, RuntimeConfig
-from market_adaptive.db import DatabaseInitializer
+from market_adaptive.db import DatabaseInitializer, SystemStateRecord
 from market_adaptive.risk import CTARiskProfile, GridRiskProfile, LogicalPositionSnapshot, RiskControlManager
 from market_adaptive.testsupport import DummyNotifier
 
@@ -371,6 +372,19 @@ class RiskControlManagerTests(unittest.TestCase):
 
         self.assertIn("reset_local_state", result)
         self.assertEqual(reset_events, [("BTC/USDT", "exchange_flat")])
+
+    def test_daily_baseline_rollover_sends_daily_fund_snapshot(self) -> None:
+        self.database.upsert_system_state(SystemStateRecord("account_initial_equity", "95400.0", "2026-04-14T00:00:00+00:00"))
+        self.database.upsert_system_state(SystemStateRecord("risk_daily_start_date", "2026-04-14", "2026-04-14T00:00:00+00:00"))
+        self.database.upsert_system_state(SystemStateRecord("risk_daily_start_equity", "95800.0", "2026-04-14T00:00:00+00:00"))
+
+        self.manager._sync_daily_baseline(current_equity=96000.0, now=datetime(2026, 4, 15, 0, 1, tzinfo=timezone.utc))
+
+        self.assertTrue(any(title == "每日资金快照" for title, _ in self.manager.notifier.messages))
+        message = next(body for title, body in self.manager.notifier.messages if title == "每日资金快照")
+        self.assertIn("初始资金：95400.0000 USDT", message)
+        self.assertIn("总盈亏：+600.0000 USDT", message)
+        self.assertIn("今日起始资金：96000.0000 USDT", message)
 
     def test_daily_loss_circuit_breaker_flattens_and_stops(self) -> None:
         self.client.equity = 940.0

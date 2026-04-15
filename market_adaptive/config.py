@@ -56,6 +56,7 @@ class RuntimeConfig:
     shutdown_cancel_open_orders: bool = True
     start_grid_websocket_on_boot: bool = True
     shutdown_join_timeout_seconds: float = 5.0
+    account_initial_equity: float = 0.0
 
 
 @dataclass
@@ -515,6 +516,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         shutdown_cancel_open_orders=bool(runtime_payload.get("shutdown_cancel_open_orders", True)),
         start_grid_websocket_on_boot=bool(runtime_payload.get("start_grid_websocket_on_boot", True)),
         shutdown_join_timeout_seconds=float(runtime_payload.get("shutdown_join_timeout_seconds", 5.0)),
+        account_initial_equity=float(runtime_payload.get("account_initial_equity", 0.0)),
     )
     risk_control = RiskControlConfig(
         daily_loss_cutoff_pct=float(risk_payload.get("daily_loss_cutoff_pct", 0.05)),

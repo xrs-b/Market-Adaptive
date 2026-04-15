@@ -646,6 +646,7 @@ class RiskControlManager:
             self.daily_start_equity = float(stored_equity.state_value)
             return
 
+        previous_date = stored_date.state_value if stored_date is not None else None
         self.daily_start_date = current_date
         self.daily_start_equity = float(current_equity)
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -655,6 +656,24 @@ class RiskControlManager:
         self.database.upsert_system_state(
             SystemStateRecord("risk_daily_start_equity", f"{self.daily_start_equity:.12f}", timestamp)
         )
+        if previous_date is not None and previous_date != current_date and self.notifier is not None:
+            baseline_state = self.database.get_system_state("account_initial_equity")
+            initial_equity = float(baseline_state.state_value) if baseline_state is not None else float(current_equity)
+            total_pnl = float(current_equity) - initial_equity
+            total_pnl_pct = (total_pnl / initial_equity * 100.0) if initial_equity > 0 else 0.0
+            self.notifier.send(
+                "每日资金快照",
+                (
+                    f"日期：{self.daily_start_date}\n"
+                    f"初始资金：{initial_equity:.4f} USDT\n"
+                    f"当前权益：{float(current_equity):.4f} USDT\n"
+                    f"总盈亏：{total_pnl:+.4f} USDT\n"
+                    f"总盈亏率：{total_pnl_pct:+.2f}%\n"
+                    f"今日起始资金：{self.daily_start_equity:.4f} USDT\n"
+                    f"今日盈亏：{0.0:+.4f} USDT\n"
+                    f"今日盈亏率：{0.0:+.2f}%"
+                ),
+            )
 
     def _persist_system_status(self, status: str) -> None:
         timestamp = datetime.now(timezone.utc).isoformat()

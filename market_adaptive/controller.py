@@ -120,10 +120,40 @@ class MainController:
     def latest_total_pnl(self) -> float:
         return self.risk_control.latest_total_pnl
 
+    def _sync_total_equity_baseline(self, *, current_equity: float) -> float:
+        configured = max(0.0, float(getattr(self.config.runtime, "account_initial_equity", 0.0) or 0.0))
+        baseline = configured if configured > 0 else float(current_equity)
+        timestamp = datetime.now(timezone.utc).isoformat()
+        stored = self.database.get_system_state("account_initial_equity")
+        if stored is None or abs(float(stored.state_value) - baseline) > 1e-9:
+            self.database.upsert_system_state(SystemStateRecord("account_initial_equity", f"{baseline:.12f}", timestamp))
+        return baseline
+
+    def build_account_equity_report(self, *, current_equity: float | None = None) -> str:
+        equity = float(current_equity) if current_equity is not None else float(self.risk_client.fetch_total_equity("USDT"))
+        self.risk_control._sync_daily_baseline(current_equity=equity)
+        initial_equity = self._sync_total_equity_baseline(current_equity=equity)
+        daily_start_equity = float(self.risk_control.daily_start_equity or equity)
+        total_pnl = equity - initial_equity
+        total_pnl_pct = (total_pnl / initial_equity * 100.0) if initial_equity > 0 else 0.0
+        daily_pnl = equity - daily_start_equity
+        daily_pnl_pct = (daily_pnl / daily_start_equity * 100.0) if daily_start_equity > 0 else 0.0
+        return (
+            f"当前权益：{equity:.4f} USDT\n"
+            f"初始资金：{initial_equity:.4f} USDT\n"
+            f"总盈亏：{total_pnl:+.4f} USDT\n"
+            f"总盈亏率：{total_pnl_pct:+.2f}%\n"
+            f"今日起始资金：{daily_start_equity:.4f} USDT\n"
+            f"今日盈亏：{daily_pnl:+.4f} USDT\n"
+            f"今日盈亏率：{daily_pnl_pct:+.2f}%"
+        )
+
     def start(self) -> None:
         self.database.initialize()
         self.install_signal_handlers()
         self.risk_control.initialize()
+        current_equity = float(self.risk_client.fetch_total_equity("USDT"))
+        account_report = self.build_account_equity_report(current_equity=current_equity)
         if self.config.runtime.start_grid_websocket_on_boot:
             self.grid_robot.start_background_websocket()
         self.logger.info("Main Controller started | daily_start_equity=%.4f", self.risk_control.daily_start_equity or 0.0)
@@ -131,7 +161,7 @@ class MainController:
             "系统已启动",
             (
                 "交易系统已完成启动。\n"
-                f"今日起始权益：{(self.risk_control.daily_start_equity or 0.0):.4f} USDT\n"
+                f"{account_report}\n"
                 f"监控交易对：{', '.join(self.symbols)}"
             ),
         )
