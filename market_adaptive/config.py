@@ -204,6 +204,9 @@ class CTAConfig:
     atr_period: int = 14
     atr_trailing_multiplier: float = 2.5
     stop_loss_atr: float = 2.0
+    dynamic_stop_loss_enabled: bool = True
+    dynamic_stop_loss_min_scale: float = 0.85
+    dynamic_stop_loss_max_scale: float = 1.05
     risk_percent_per_trade: float = 0.02
     boosted_risk_percent_per_trade: float = 0.03
     first_take_profit_pct: float = 0.02
@@ -297,6 +300,8 @@ class CTAConfig:
         self.aggressive_rsi_extreme_threshold = max(self.aggressive_rsi_relax_score, float(self.aggressive_rsi_extreme_threshold))
         self.aggressive_obv_zscore_floor = float(self.aggressive_obv_zscore_floor)
         self.value_area_edge_atr_multiplier = max(0.0, float(self.value_area_edge_atr_multiplier))
+        self.dynamic_stop_loss_min_scale = max(0.1, float(self.dynamic_stop_loss_min_scale))
+        self.dynamic_stop_loss_max_scale = max(self.dynamic_stop_loss_min_scale, float(self.dynamic_stop_loss_max_scale))
         self.weak_bias_fast_ema = max(2, int(self.weak_bias_fast_ema))
         self.weak_bias_slow_ema = max(self.weak_bias_fast_ema + 1, int(self.weak_bias_slow_ema))
         self.obv_signal_window = max(1, int(self.obv_signal_window))
@@ -668,6 +673,9 @@ def load_config(config_path: str | Path) -> AppConfig:
         atr_period=int(cta_payload.get("atr_period", 14)),
         atr_trailing_multiplier=float(cta_payload.get("atr_trailing_multiplier", 2.5)),
         stop_loss_atr=float(cta_payload.get("stop_loss_atr", 2.0)),
+        dynamic_stop_loss_enabled=bool(cta_payload.get("dynamic_stop_loss_enabled", True)),
+        dynamic_stop_loss_min_scale=float(cta_payload.get("dynamic_stop_loss_min_scale", 0.85)),
+        dynamic_stop_loss_max_scale=float(cta_payload.get("dynamic_stop_loss_max_scale", 1.05)),
         risk_percent_per_trade=cta_base_risk_percent,
         boosted_risk_percent_per_trade=cta_boosted_risk_percent,
         first_take_profit_pct=float(cta_payload.get("first_take_profit_pct", 0.02)),

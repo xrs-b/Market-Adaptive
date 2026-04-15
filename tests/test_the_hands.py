@@ -373,8 +373,22 @@ class TheHandsTests(unittest.TestCase):
         robot.run()
 
         self.assertIsNotNone(robot.position)
-        expected_stop = robot.position.entry_price - robot.position.atr_value * self.cta_config.stop_loss_atr
+        signal = robot._build_trend_signal()
+        assert signal is not None
+        expected_multiplier = robot._resolve_dynamic_stop_loss_multiplier(signal)
+        expected_stop = robot.position.entry_price - robot.position.atr_value * expected_multiplier
         self.assertAlmostEqual(robot.position.stop_price, expected_stop)
+
+    def test_cta_robot_dynamic_stop_loss_multiplier_tightens_for_higher_score(self) -> None:
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+        low_score_signal = TrendSignal(direction=1, raw_direction=1, major_direction=1, bullish_score=55.0)
+        high_score_signal = TrendSignal(direction=1, raw_direction=1, major_direction=1, bullish_score=90.0)
+
+        low_multiplier = robot._resolve_dynamic_stop_loss_multiplier(low_score_signal)
+        high_multiplier = robot._resolve_dynamic_stop_loss_multiplier(high_score_signal)
+
+        self.assertLess(high_multiplier, low_multiplier)
+        self.assertLess(high_multiplier, self.cta_config.stop_loss_atr)
 
     def test_cta_robot_enters_bullish_ready_state_before_execution_trigger(self) -> None:
         self._insert_status("trend")

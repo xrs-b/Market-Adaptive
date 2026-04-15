@@ -236,6 +236,17 @@ class CTARobot(BaseStrategyRobot):
             used_value_area_override=used_value_area_override,
         )
 
+    def _resolve_dynamic_stop_loss_multiplier(self, signal: TrendSignal) -> float:
+        base_multiplier = float(self.config.stop_loss_atr)
+        if not bool(getattr(self.config, "dynamic_stop_loss_enabled", True)):
+            return base_multiplier
+        score = float(signal.bullish_score if signal.direction >= 0 else signal.bearish_score)
+        score_ratio = min(1.0, max(0.0, score / 100.0))
+        min_scale = float(getattr(self.config, "dynamic_stop_loss_min_scale", 0.85))
+        max_scale = float(getattr(self.config, "dynamic_stop_loss_max_scale", 1.05))
+        scale = max_scale - ((max_scale - min_scale) * score_ratio)
+        return base_multiplier * scale
+
     def _evaluate_value_area_decision(
         self,
         *,
@@ -795,7 +806,8 @@ class CTARobot(BaseStrategyRobot):
         )
         entry_price = float(entry_price)
         atr_value = self._normalized_atr(entry_price, signal.atr)
-        stop_distance = atr_value * self.config.stop_loss_atr
+        stop_loss_multiplier = self._resolve_dynamic_stop_loss_multiplier(signal)
+        stop_distance = atr_value * stop_loss_multiplier
         if signal.direction > 0:
             stop_price = entry_price - stop_distance
         else:
@@ -1050,7 +1062,7 @@ class CTARobot(BaseStrategyRobot):
             return actions, True
 
         atr_value = self._normalized_atr(signal.price, signal.atr)
-        self.position.update_dynamic_stop(signal.price, atr_value, self.config.stop_loss_atr)
+        self.position.update_dynamic_stop(signal.price, atr_value, self._resolve_dynamic_stop_loss_multiplier(signal))
         if self.position.stop_hit(signal.price):
             self._close_remaining_position(reason="atr_stop")
             self._publish_risk_profile(None)
