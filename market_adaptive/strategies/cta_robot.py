@@ -728,6 +728,18 @@ class CTARobot(BaseStrategyRobot):
         self._near_miss_window_started_at = None
         return samples
 
+    def _expected_reward_risk_ratio(self, signal: TrendSignal, *, reference_price: float, stop_distance: float) -> float | None:
+        volume_profile = signal.volume_profile
+        if volume_profile is None or reference_price <= 0 or stop_distance <= 0:
+            return None
+        if signal.direction > 0:
+            expected_reward = max(0.0, float(volume_profile.high_price) - float(reference_price))
+        else:
+            expected_reward = max(0.0, float(reference_price) - float(volume_profile.low_price))
+        if expected_reward <= 0:
+            return 0.0
+        return float(expected_reward / stop_distance)
+
     def _open_position(self, signal: TrendSignal) -> str:
         side = "buy" if signal.direction > 0 else "sell"
         amount = self._calculate_entry_amount(signal.price)
@@ -773,6 +785,23 @@ class CTARobot(BaseStrategyRobot):
             if not allowed:
                 self._publish_risk_profile(None)
                 return "cta:risk_blocked"
+
+        pre_entry_atr = self._normalized_atr(notional_price, signal.atr)
+        pre_entry_stop_distance = pre_entry_atr * self._resolve_dynamic_stop_loss_multiplier(signal)
+        expected_rr = self._expected_reward_risk_ratio(signal, reference_price=notional_price, stop_distance=pre_entry_stop_distance)
+        minimum_expected_rr = float(getattr(self.config, "minimum_expected_rr", 0.0))
+        if expected_rr is not None and expected_rr < minimum_expected_rr:
+            logger.info(
+                "CTA reward/risk blocked | symbol=%s side=%s expected_rr=%.2f threshold=%.2f price=%.2f stop_distance=%.2f",
+                self.symbol,
+                side,
+                expected_rr,
+                minimum_expected_rr,
+                notional_price,
+                pre_entry_stop_distance,
+            )
+            self._publish_risk_profile(None)
+            return "cta:reward_risk_blocked"
 
         if signal.execution_memory_active and (signal.execution_breakout or signal.weak_bull_bias):
             logger.info(

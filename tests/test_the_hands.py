@@ -589,6 +589,38 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(len(self.client.limit_orders), 0)
         self.assertIsNone(robot.position)
 
+    def test_cta_reward_risk_filter_blocks_thin_profit_setup(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+        signal = robot._build_trend_signal()
+        assert signal is not None
+        assert signal.volume_profile is not None
+        signal.volume_profile.high_price = signal.price + 10.0
+        robot.config.minimum_expected_rr = 5.0
+
+        result = robot._open_position(signal)
+
+        self.assertEqual(result, "cta:reward_risk_blocked")
+        self.assertEqual(len(self.client.market_orders), 0)
+        self.assertIsNone(robot.position)
+
+    def test_cta_reward_risk_filter_allows_when_target_space_is_large(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+        robot.config.order_flow_enabled = False
+        signal = robot._build_trend_signal()
+        assert signal is not None
+        assert signal.volume_profile is not None
+        signal.volume_profile.high_price = signal.price + 600.0
+        robot.config.minimum_expected_rr = 1.2
+
+        result = robot._open_position(signal)
+
+        self.assertTrue(result.startswith("cta:open_long"))
+        self.assertIsNotNone(robot.position)
+
     def test_cta_robot_logs_trade_close_on_full_exit(self) -> None:
         self._insert_status("trend")
         self._load_bullish_signal(lower_last_close=100.0)
