@@ -89,6 +89,10 @@ class SentimentConfig:
     lookback_limit: int = 1
     extreme_bullish_ratio: float = 2.5
     cta_buy_action: str = "block"
+    gradient_reduce_ratio_threshold: float = 3.0
+    gradient_reduce_ratio_multiplier: float = 0.7
+    gradient_heavy_reduce_ratio_threshold: float = 3.5
+    gradient_heavy_reduce_ratio_multiplier: float = 0.4
 
     def resolve_symbol(self, fallback_symbol: str) -> str:
         return self.symbol or fallback_symbol
@@ -96,7 +100,7 @@ class SentimentConfig:
     @property
     def normalized_cta_buy_action(self) -> str:
         action = self.cta_buy_action.strip().lower()
-        return action if action in {"block", "halve"} else "block"
+        return action if action in {"block", "halve", "gradient"} else "block"
 
 
 @dataclass
@@ -557,6 +561,10 @@ def load_config(config_path: str | Path) -> AppConfig:
         lookback_limit=max(1, int(sentiment_payload.get("lookback_limit", 1))),
         extreme_bullish_ratio=float(sentiment_payload.get("extreme_bullish_ratio", 2.5)),
         cta_buy_action=str(sentiment_payload.get("cta_buy_action", "block")),
+        gradient_reduce_ratio_threshold=float(sentiment_payload.get("gradient_reduce_ratio_threshold", 3.0)),
+        gradient_reduce_ratio_multiplier=float(sentiment_payload.get("gradient_reduce_ratio_multiplier", 0.7)),
+        gradient_heavy_reduce_ratio_threshold=float(sentiment_payload.get("gradient_heavy_reduce_ratio_threshold", 3.5)),
+        gradient_heavy_reduce_ratio_multiplier=float(sentiment_payload.get("gradient_heavy_reduce_ratio_multiplier", 0.4)),
     )
     market_oracle = MarketOracleConfig(
         symbol=str(market_oracle_payload.get("symbol", "BTC/USDT")),

@@ -69,7 +69,33 @@ class SentimentAnalyst:
             return CTASentimentDecision(snapshot=snapshot)
 
         reason = f"sentiment_ratio={snapshot.ratio:.2f}>threshold={snapshot.threshold:.2f}"
-        if self.config.normalized_cta_buy_action == "halve":
+        action = self.config.normalized_cta_buy_action
+        if action == "gradient":
+            heavy_threshold = float(getattr(self.config, "gradient_heavy_reduce_ratio_threshold", 3.5))
+            heavy_multiplier = float(getattr(self.config, "gradient_heavy_reduce_ratio_multiplier", 0.4))
+            reduce_threshold = float(getattr(self.config, "gradient_reduce_ratio_threshold", 3.0))
+            reduce_multiplier = float(getattr(self.config, "gradient_reduce_ratio_multiplier", 0.7))
+            if snapshot.ratio >= heavy_threshold:
+                return CTASentimentDecision(
+                    blocked=True,
+                    size_multiplier=0.0,
+                    reason=f"{reason}; gradient=block",
+                    snapshot=snapshot,
+                )
+            if snapshot.ratio >= reduce_threshold:
+                return CTASentimentDecision(
+                    blocked=False,
+                    size_multiplier=heavy_multiplier,
+                    reason=f"{reason}; gradient=heavy_reduce",
+                    snapshot=snapshot,
+                )
+            return CTASentimentDecision(
+                blocked=False,
+                size_multiplier=reduce_multiplier,
+                reason=f"{reason}; gradient=reduce",
+                snapshot=snapshot,
+            )
+        if action == "halve":
             return CTASentimentDecision(
                 blocked=False,
                 size_multiplier=0.5,
