@@ -104,7 +104,7 @@ class DiscordNotifier:
         payload = self._build_embed_payload(title=title, description=message, color=color)
         return self._submit_coroutine(self._post_payload(payload))
 
-    def notify_trade(self, side: str, price: float, size: float, strategy: str, signal: str) -> bool:
+    def notify_trade(self, side: str, price: float, size: float, strategy: str, signal: str, *, symbol: str | None = None) -> bool:
         if not self.enabled:
             return False
 
@@ -123,7 +123,7 @@ class DiscordNotifier:
 
         title = f"{self._display_strategy_title(normalized_strategy)} 成交回报"
         fields = [
-            {"name": "交易对", "value": self._resolve_symbol_from_signal(normalized_signal), "inline": True},
+            {"name": "交易对", "value": str(symbol or self._resolve_symbol_from_signal(normalized_signal)), "inline": True},
             {"name": "方向", "value": trade["side"], "inline": True},
             {"name": "策略", "value": self._display_strategy_name(normalized_strategy), "inline": True},
             {"name": "成交价", "value": f"{trade['price']:.4f}", "inline": True},
@@ -684,8 +684,8 @@ class NullNotifier:
         logger.debug("Strategy cleanup notification skipped: %s %s %s %s %s", strategy, symbol, reason, result, overview)
         return False
 
-    def notify_trade(self, side: str, price: float, size: float, strategy: str, signal: str) -> bool:
-        logger.debug("Trade notification skipped: %s %s %s %s %s", side, price, size, strategy, signal)
+    def notify_trade(self, side: str, price: float, size: float, strategy: str, signal: str, **kwargs) -> bool:
+        logger.debug("Trade notification skipped: %s %s %s %s %s %s", side, price, size, strategy, signal, kwargs)
         return False
 
     def notify_profit(self, pnl: float, roi: float, balance: float, **kwargs) -> bool:

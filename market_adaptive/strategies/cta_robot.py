@@ -303,6 +303,8 @@ class CTARobot(BaseStrategyRobot):
             "skip:inactive",
         }:
             return False
+        if action.startswith("cta:open_"):
+            return False
         return super().should_notify_action(action)
 
     def flatten_and_cancel_all(self, reason: str) -> None:
@@ -808,6 +810,15 @@ class CTARobot(BaseStrategyRobot):
             risk_percent=signal.risk_percent,
         )
         self._publish_risk_profile(signal)
+        if self.notifier is not None and hasattr(self.notifier, "notify_trade"):
+            self.notifier.notify_trade(
+                side=side,
+                price=entry_price,
+                size=filled_amount,
+                strategy=self.strategy_name,
+                signal=f"cta_open_{position_side}",
+                symbol=self.symbol,
+            )
         action = f"cta:open_{position_side}"
         if entry_order.used_limit_order:
             action += "_limit"

@@ -17,7 +17,7 @@ class DummyNotifier:
         self.messages.append((title, message))
         return True
 
-    def notify_trade(self, side: str, price: float, size: float, strategy: str, signal: str) -> bool:
+    def notify_trade(self, side: str, price: float, size: float, strategy: str, signal: str, **kwargs) -> bool:
         self.trade_calls.append(
             {
                 "side": side,
@@ -25,6 +25,7 @@ class DummyNotifier:
                 "size": size,
                 "strategy": strategy,
                 "signal": signal,
+                **kwargs,
             }
         )
         return True

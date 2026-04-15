@@ -177,20 +177,26 @@ class NotificationTests(unittest.TestCase):
             'higher': type('I', (), {
                 'adx_value': 30.0,
                 'adx_rising': True,
+                'adx_previous': 28.0,
                 'adx_trend_label': 'rising',
                 'di_gap': 14.0,
                 'plus_di_value': 32.0,
                 'minus_di_value': 18.0,
                 'bb_width_expanding': True,
+                'bb_width': 0.18,
+                'bb_width_previous': 0.16,
             })(),
             'lower': type('I', (), {
                 'adx_value': 18.0,
                 'adx_rising': False,
+                'adx_previous': 19.0,
                 'adx_trend_label': 'flat',
                 'di_gap': 3.0,
                 'plus_di_value': 21.0,
                 'minus_di_value': 18.0,
                 'bb_width_expanding': False,
+                'bb_width': 0.08,
+                'bb_width_previous': 0.09,
             })(),
         })()
 
@@ -199,7 +205,7 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(len(self.notifier.messages), 1)
         self.assertEqual(self.notifier.messages[0][0], '市场状态已切换')
 
-    def test_cta_robot_suppresses_non_trade_bullish_ready_notification(self) -> None:
+    def test_cta_robot_trade_execution_uses_trade_notifier_without_generic_action_message(self) -> None:
         client = DummyClient()
         notifier = self.notifier
         db = self.database
@@ -209,9 +215,13 @@ class NotificationTests(unittest.TestCase):
         robot = CTARobot(client, db, CTAConfig(), ExecutionConfig(), notifier=notifier)
         result = robot.run()
 
-        self.assertEqual(result.action, 'cta:bullish_ready')
+        self.assertEqual(result.action, 'cta:open_long')
         self.assertFalse(any(title == '策略动作通知' for title, _ in notifier.messages))
-        self.assertEqual(client.market_orders, [])
+        self.assertEqual(len(notifier.trade_calls), 1)
+        self.assertEqual(notifier.trade_calls[0]['strategy'], 'cta')
+        self.assertEqual(notifier.trade_calls[0]['signal'], 'cta_open_long')
+        self.assertEqual(notifier.trade_calls[0]['symbol'], 'BTC/USDT')
+        self.assertEqual(client.market_orders[0]['side'], 'buy')
 
     def test_grid_robot_does_not_notify_on_regular_grid_placement(self) -> None:
         client = DummyClient()

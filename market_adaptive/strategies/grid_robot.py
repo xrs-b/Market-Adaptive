@@ -151,6 +151,8 @@ class GridRobot(BaseStrategyRobot):
             return False
         if action.startswith("grid:flash_crash_cooldown"):
             return False
+        if action.startswith("grid:flash_crash_triggered"):
+            return False
         return super().should_notify_action(action)
 
     def start_background_websocket(self) -> None:
@@ -1171,6 +1173,7 @@ class GridRobot(BaseStrategyRobot):
                     size=counter_amount,
                     strategy=self.strategy_name,
                     signal="grid_fill_websocket",
+                    symbol=self.symbol,
                 )
             self._confirm_ws_hedge_order(response, counter_side=counter_side, counter_price=counter_price, amount=counter_amount)
 
