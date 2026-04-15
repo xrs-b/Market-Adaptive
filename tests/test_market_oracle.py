@@ -9,7 +9,12 @@ from market_adaptive.config import MarketOracleConfig
 from market_adaptive.coordination import StrategyRuntimeContext
 from market_adaptive.db import DatabaseInitializer, MarketStatusRecord
 from market_adaptive.indicators import IndicatorSnapshot
-from market_adaptive.oracles.market_oracle import MarketOracle, MultiTimeframeMarketSnapshot, bb_width_supports_trend
+from market_adaptive.oracles.market_oracle import (
+    MarketOracle,
+    MultiTimeframeMarketSnapshot,
+    bb_width_supports_trend,
+    snapshot_supports_short_regime_thaw,
+)
 
 
 class DummyOKXClient:
@@ -104,6 +109,24 @@ class MarketOracleTests(unittest.TestCase):
             lower=IndicatorSnapshot(18.5, 19.0, 19.5, 18.0, 16.0, 0.03, 0.03, 0.01),
         )
         self.assertEqual(oracle.determine_status(snapshot), "trend_impulse")
+
+    def test_short_regime_thaw_unlocks_early_bearish_distribution_without_full_trend_confirmation(self) -> None:
+        oracle = MarketOracle(client=DummyOKXClient({"1m": self._impulse_payload(False)}), database=self.database, config=self.config)
+        snapshot = self._snapshot(
+            higher=IndicatorSnapshot(16.2, 16.1, 15.8, 20.0, 27.0, 0.081, 0.080, 0.010),
+            lower=IndicatorSnapshot(15.6, 15.4, 15.0, 17.0, 24.0, 0.062, 0.061, 0.009),
+        )
+
+        self.assertTrue(snapshot_supports_short_regime_thaw(snapshot, self.config))
+        self.assertEqual(oracle.determine_status(snapshot), "trend")
+
+    def test_short_regime_thaw_rejects_bullish_counterpressure(self) -> None:
+        snapshot = self._snapshot(
+            higher=IndicatorSnapshot(16.2, 16.1, 15.8, 20.0, 27.0, 0.081, 0.080, 0.010),
+            lower=IndicatorSnapshot(16.0, 15.9, 15.7, 27.0, 19.0, 0.062, 0.061, 0.009),
+        )
+
+        self.assertFalse(snapshot_supports_short_regime_thaw(snapshot, self.config))
 
     def test_determine_status_returns_range_breakout_ready_for_wide_sideways_state(self) -> None:
         oracle = MarketOracle(client=DummyOKXClient({"1m": self._impulse_payload(False)}), database=self.database, config=self.config)

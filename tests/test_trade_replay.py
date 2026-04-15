@@ -29,6 +29,11 @@ class ReplayTriggerClassificationTests(unittest.TestCase):
 
         self.assertIs(analyze_trade_opportunities.classify_waiting_execution_trigger, classify_waiting_execution_trigger)
 
+    def test_replay_imports_same_short_regime_thaw_helper_as_live_oracle(self) -> None:
+        from market_adaptive.oracles.market_oracle import snapshot_supports_short_regime_thaw
+
+        self.assertIs(analyze_trade_opportunities.snapshot_supports_short_regime_thaw, snapshot_supports_short_regime_thaw)
+
 
 class ReplayExecutionCandlePreferenceTests(unittest.TestCase):
     def test_replay_cta_respects_execution_candle_preference(self) -> None:

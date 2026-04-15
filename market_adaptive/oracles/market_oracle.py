@@ -70,6 +70,36 @@ def indicator_confirms_trend(indicator: IndicatorSnapshot, config: MarketOracleC
     return bool(strict_trend or relaxed_trend)
 
 
+def indicator_supports_short_regime_thaw(indicator: IndicatorSnapshot, config: MarketOracleConfig) -> bool:
+    if not bool(getattr(config, "short_regime_thaw_enabled", True)):
+        return False
+    adx_floor = max(float(getattr(config, "sideways_adx_threshold", 15.0)), float(getattr(config, "short_regime_thaw_adx_floor", 15.0)))
+    di_gap_floor = max(0.0, float(getattr(config, "short_regime_thaw_di_gap_floor", 6.0)))
+    volatility_floor = max(0.0, float(getattr(config, "short_regime_thaw_volatility_floor", 0.008)))
+    minus_di_value = float(getattr(indicator, "minus_di_value", 0.0))
+    plus_di_value = float(getattr(indicator, "plus_di_value", 0.0))
+    di_gap = float(getattr(indicator, "di_gap", abs(plus_di_value - minus_di_value)))
+    adx_value = float(getattr(indicator, "adx_value", 0.0))
+    adx_previous = float(getattr(indicator, "adx_previous", adx_value))
+    volatility = float(getattr(indicator, "volatility", 0.0))
+    bearish_pressure = minus_di_value > plus_di_value and di_gap >= di_gap_floor
+    adx_stable_or_building = adx_value >= adx_floor and adx_value >= adx_previous - 0.25
+    bb_width_ok = bool(hasattr(indicator, "bb_width") and hasattr(indicator, "bb_width_previous") and bb_width_supports_trend(indicator, config))
+    expansion_or_motion = bb_width_ok or volatility >= volatility_floor
+    return bool(bearish_pressure and adx_stable_or_building and expansion_or_motion)
+
+
+def snapshot_supports_short_regime_thaw(snapshot: MultiTimeframeMarketSnapshot, config: MarketOracleConfig) -> bool:
+    indicators = (snapshot.higher, snapshot.lower)
+    if not any(indicator_supports_short_regime_thaw(indicator, config) for indicator in indicators):
+        return False
+    return all(
+        float(getattr(indicator, "minus_di_value", 0.0)) >= float(getattr(indicator, "plus_di_value", 0.0))
+        or float(getattr(indicator, "di_gap", abs(float(getattr(indicator, "plus_di_value", 0.0)) - float(getattr(indicator, "minus_di_value", 0.0))))) < float(getattr(config, "trend_di_gap_threshold", 8.0))
+        for indicator in indicators
+    )
+
+
 class MarketOracle:
     """Market sensing bot that classifies BTC/USDT as trend, impulse, or active range breakout."""
 
@@ -167,6 +197,7 @@ class MarketOracle:
     def determine_status(self, snapshot: MultiTimeframeMarketSnapshot) -> str:
         indicators = (snapshot.higher, snapshot.lower)
         trend_detected = any(self._indicator_confirms_trend(indicator) for indicator in indicators)
+        short_regime_thaw = snapshot_supports_short_regime_thaw(snapshot, self.config)
         sideways_detected = all(
             (
                 indicator.adx_value < float(self.config.sideways_adx_threshold)
@@ -179,7 +210,7 @@ class MarketOracle:
             indicator.adx_value < float(self.config.trend_adx_threshold) for indicator in indicators
         ) and any(self._indicator_range_breakout_ready(indicator) for indicator in indicators)
 
-        if trend_detected:
+        if trend_detected or short_regime_thaw:
             return "trend"
         if sideways_detected and self._has_trend_impulse():
             return "trend_impulse"

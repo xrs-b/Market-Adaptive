@@ -47,7 +47,11 @@ from market_adaptive.indicators import (
     compute_volume_profile,
     ohlcv_to_dataframe,
 )
-from market_adaptive.oracles.market_oracle import indicator_confirms_trend
+from market_adaptive.oracles.market_oracle import (
+    MultiTimeframeMarketSnapshot,
+    indicator_confirms_trend,
+    snapshot_supports_short_regime_thaw,
+)
 from market_adaptive.strategies.mtf_engine import (
     classify_waiting_execution_trigger,
     resolve_execution_trigger_proximity_budget_ratio,
@@ -227,7 +231,17 @@ def replay_cta(config_path: Path, hours: int) -> dict:
         high_snapshot = compute_indicator_snapshot(oracle_high_slice.tail(oracle.lookback_limit).values.tolist(), adx_length=oracle.adx_length, bb_length=oracle.bb_length, bb_std=oracle.bb_std)
         low_snapshot = compute_indicator_snapshot(oracle_low_slice.tail(oracle.lookback_limit).values.tolist(), adx_length=oracle.adx_length, bb_length=oracle.bb_length, bb_std=oracle.bb_std)
         trend_detected = any(indicator_confirms_trend(i, oracle) for i in (high_snapshot, low_snapshot))
-        market_regime = "trend" if trend_detected else "sideways"
+        short_regime_thaw = snapshot_supports_short_regime_thaw(
+            MultiTimeframeMarketSnapshot(
+                symbol=str(cta.symbol),
+                higher_timeframe=str(oracle.higher_timeframe),
+                lower_timeframe=str(oracle.lower_timeframe),
+                higher=high_snapshot,
+                lower=low_snapshot,
+            ),
+            oracle,
+        )
+        market_regime = "trend" if (trend_detected or short_regime_thaw) else "sideways"
         passed_market_regime = market_regime in {"trend", "trend_impulse"}
 
         major_frame = major_slice.tail(cta.lookback_limit).copy()

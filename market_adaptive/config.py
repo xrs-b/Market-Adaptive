@@ -123,6 +123,10 @@ class MarketOracleConfig:
     impulse_consecutive_bars: int = 3
     impulse_volume_window: int = 12
     impulse_volume_multiplier: float = 1.2
+    short_regime_thaw_enabled: bool = True
+    short_regime_thaw_adx_floor: float = 15.0
+    short_regime_thaw_di_gap_floor: float = 6.0
+    short_regime_thaw_volatility_floor: float = 0.008
 
 
 @dataclass

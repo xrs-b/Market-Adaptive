@@ -15,7 +15,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from market_adaptive.clients.okx_client import OKXClient
 from market_adaptive.config import load_config
 from market_adaptive.indicators import compute_indicator_snapshot, ohlcv_to_dataframe
-from market_adaptive.oracles.market_oracle import indicator_confirms_trend
+from market_adaptive.oracles.market_oracle import (
+    MultiTimeframeMarketSnapshot,
+    indicator_confirms_trend,
+    snapshot_supports_short_regime_thaw,
+)
 from market_adaptive.strategies.cta_robot import CTARobot
 from market_adaptive.strategies.mtf_engine import MultiTimeframeSignalEngine
 from market_adaptive.timeframe_utils import maybe_use_closed_candles
@@ -155,7 +159,16 @@ def evaluate_timestamp(config_path: Path, target: str) -> dict:
 
     high_snapshot = compute_indicator_snapshot(oracle_high_frame.tail(oracle.lookback_limit).values.tolist(), adx_length=oracle.adx_length, bb_length=oracle.bb_length, bb_std=oracle.bb_std)
     low_snapshot = compute_indicator_snapshot(oracle_low_frame.tail(oracle.lookback_limit).values.tolist(), adx_length=oracle.adx_length, bb_length=oracle.bb_length, bb_std=oracle.bb_std)
-    market_regime_passed = any(indicator_confirms_trend(item, oracle) for item in (high_snapshot, low_snapshot))
+    market_regime_passed = any(indicator_confirms_trend(item, oracle) for item in (high_snapshot, low_snapshot)) or snapshot_supports_short_regime_thaw(
+        MultiTimeframeMarketSnapshot(
+            symbol=str(symbol),
+            higher_timeframe=str(oracle.higher_timeframe),
+            lower_timeframe=str(oracle.lower_timeframe),
+            higher=high_snapshot,
+            lower=low_snapshot,
+        ),
+        oracle,
+    )
 
     robot = CTARobot(client=replay_client, database=None, config=cta, execution_config=cfg.execution, notifier=None, risk_manager=None, sentiment_analyst=None)
     trend_signal = robot._build_trend_signal()
