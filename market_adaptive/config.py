@@ -61,7 +61,11 @@ class RuntimeConfig:
 
 @dataclass
 class RiskControlConfig:
-    daily_loss_cutoff_pct: float = 0.05
+    daily_loss_warning_pct: float = 0.03
+    daily_loss_warning_scale: float = 0.50
+    daily_loss_stop_openings_pct: float = 0.05
+    daily_loss_reduce_exposure_pct: float = 0.07
+    daily_loss_cutoff_pct: float = 0.10
     max_margin_ratio: float = 0.60
     recovery_check_interval_seconds: int = 60
     position_sync_tolerance: float = 1e-6
@@ -548,7 +552,11 @@ def load_config(config_path: str | Path) -> AppConfig:
         account_initial_equity=float(runtime_payload.get("account_initial_equity", 0.0)),
     )
     risk_control = RiskControlConfig(
-        daily_loss_cutoff_pct=float(risk_payload.get("daily_loss_cutoff_pct", 0.05)),
+        daily_loss_warning_pct=float(risk_payload.get("daily_loss_warning_pct", 0.03)),
+        daily_loss_warning_scale=float(risk_payload.get("daily_loss_warning_scale", 0.50)),
+        daily_loss_stop_openings_pct=float(risk_payload.get("daily_loss_stop_openings_pct", 0.05)),
+        daily_loss_reduce_exposure_pct=float(risk_payload.get("daily_loss_reduce_exposure_pct", 0.07)),
+        daily_loss_cutoff_pct=float(risk_payload.get("daily_loss_cutoff_pct", 0.10)),
         max_margin_ratio=float(risk_payload.get("max_margin_ratio", 0.60)),
         recovery_check_interval_seconds=int(risk_payload.get("recovery_check_interval_seconds", 60)),
         position_sync_tolerance=float(risk_payload.get("position_sync_tolerance", 1e-6)),

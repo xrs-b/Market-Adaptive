@@ -178,6 +178,9 @@ class RiskControlManager:
         if self.circuit_breaker_triggered:
             margin_blocked = True
             block_reason = "circuit_breaker"
+        elif daily_drawdown >= float(self.config.daily_loss_stop_openings_pct):
+            margin_blocked = True
+            block_reason = f"daily_drawdown_stop={daily_drawdown:.2%}"
         elif margin_blocked:
             block_reason = f"margin_ratio={margin_ratio:.2%}"
 
@@ -252,7 +255,8 @@ class RiskControlManager:
 
         price = float(last_price) if last_price is not None else float(self.client.fetch_last_price(symbol))
         account_equity = float(self.client.fetch_total_equity())
-        risk_amount = max(0.0, account_equity * float(risk_percent))
+        risk_scale = self._resolve_drawdown_risk_scale(account_equity)
+        risk_amount = max(0.0, account_equity * float(risk_percent) * risk_scale)
         stop_distance = max(0.0, float(atr_value) * float(stop_loss_atr))
         if risk_amount <= 0 or stop_distance <= 0:
             return 0.0
@@ -545,6 +549,8 @@ class RiskControlManager:
                 f"|liq={metrics.nearest_liquidation_price:.2f}"
                 f"|distance={metrics.nearest_liquidation_distance_ratio:.2%}"
             )
+        if snapshot.daily_drawdown >= float(self.config.daily_loss_reduce_exposure_pct):
+            return f"daily_drawdown_reduce={snapshot.daily_drawdown:.2%}"
         if snapshot.margin_ratio >= self.config.max_margin_ratio:
             return f"grid_margin_ratio_critical={snapshot.margin_ratio:.2%}"
         if metrics.total_deviation_ratio >= self.config.grid_deviation_reduce_ratio:
@@ -561,6 +567,17 @@ class RiskControlManager:
             return True
         elapsed = (datetime.now(timezone.utc) - self._grid_last_reduction_at).total_seconds()
         return elapsed >= max(1, int(self.config.grid_reduction_cooldown_seconds))
+
+    def _resolve_drawdown_risk_scale(self, current_equity: float) -> float:
+        baseline = float(self.daily_start_equity or 0.0)
+        if baseline <= 0 or current_equity <= 0:
+            return 1.0
+        drawdown = max(0.0, (baseline - current_equity) / baseline)
+        if drawdown >= float(self.config.daily_loss_stop_openings_pct):
+            return 0.0
+        if drawdown >= float(self.config.daily_loss_warning_pct):
+            return min(1.0, max(0.0, float(self.config.daily_loss_warning_scale)))
+        return 1.0
 
     def _build_live_grid_metrics(self) -> GridLiveRiskMetrics | None:
         profile = self.latest_grid_risk

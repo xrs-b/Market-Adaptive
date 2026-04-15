@@ -129,6 +129,11 @@ class RiskControlManagerTests(unittest.TestCase):
         self.logical_positions = {"BTC/USDT": None}
         self.manager = RiskControlManager(
             config=RiskControlConfig(
+                daily_loss_warning_pct=0.03,
+                daily_loss_warning_scale=0.50,
+                daily_loss_stop_openings_pct=0.05,
+                daily_loss_reduce_exposure_pct=0.07,
+                daily_loss_cutoff_pct=0.10,
                 default_symbol_max_notional=10_000.0,
                 grid_margin_ratio_warning=0.45,
                 grid_deviation_reduce_ratio=0.25,
@@ -207,6 +212,48 @@ class RiskControlManagerTests(unittest.TestCase):
         self.assertEqual(snapshot.block_reason, reason)
         self.assertEqual(self.database.get_system_state("risk_new_openings").state_value, "OFF")
         self.assertEqual(self.grid_reduce_events, [])
+
+    def test_drawdown_warning_scales_cta_position_sizing_down(self) -> None:
+        self.client.equity = 970.0
+        self.manager.daily_start_equity = 1_000.0
+        self.manager.daily_start_date = "2026-04-10"
+
+        size = self.manager.calculate_position_size(
+            "BTC/USDT",
+            risk_percent=0.01,
+            stop_loss_atr=2.0,
+            atr_value=50.0,
+            last_price=20_000.0,
+        )
+
+        self.assertAlmostEqual(size, 4.85)
+
+    def test_drawdown_stop_blocks_new_openings_before_circuit_breaker(self) -> None:
+        self.client.equity = 950.0
+        self.manager.daily_start_equity = 1_000.0
+        self.manager.daily_start_date = "2026-04-10"
+
+        snapshot = self.manager.monitor_once()
+        allowed, reason = self.manager.can_open_new_position("BTC/USDT", requested_notional=50.0)
+
+        self.assertFalse(allowed)
+        self.assertIn("daily_drawdown_stop", reason)
+        self.assertEqual(snapshot.block_reason, reason)
+
+    def test_drawdown_reduce_triggers_grid_step_reduction(self) -> None:
+        self.client.equity = 930.0
+        self.client.last_price = 95.0
+        self.client.positions = [{"contracts": 2.0, "side": "long", "liquidationPrice": 60.0, "notional": 200.0}]
+        self.manager.daily_start_equity = 1_000.0
+        self.manager.daily_start_date = "2026-04-10"
+        self.manager.update_grid_risk(GridRiskProfile(symbol="BTC/USDT", lower_bound=97.0, upper_bound=103.0))
+
+        self.manager.monitor_once()
+
+        self.assertEqual(len(self.grid_reduce_events), 1)
+        reason, step = self.grid_reduce_events[0]
+        self.assertIn("daily_drawdown_reduce", reason)
+        self.assertAlmostEqual(step, 0.25)
 
     def test_monitor_once_reports_positions_only_exposure(self) -> None:
         self.client.position_notional_value = 250.0
@@ -388,7 +435,7 @@ class RiskControlManagerTests(unittest.TestCase):
         self.assertIn("今日起始资金：96000.0000 USDT", message)
 
     def test_daily_loss_circuit_breaker_flattens_and_stops(self) -> None:
-        self.client.equity = 940.0
+        self.client.equity = 890.0
         self.manager.daily_start_equity = 1_000.0
         self.manager.daily_start_date = "2026-04-10"
 
