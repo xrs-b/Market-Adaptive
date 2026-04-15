@@ -287,7 +287,7 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]["embeds"][0]
         self.assertEqual(embed["color"], 0x00FF00)
-        self.assertEqual(embed["title"], "Grid 对冲成交汇总")
+        self.assertEqual(embed["title"], "✅ Grid 对冲成交汇总")
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
         self.assertEqual(field_map["交易对"], "BTC/USDT")
         self.assertEqual(field_map["成交笔数"], "2")
@@ -300,7 +300,7 @@ class NotificationTests(unittest.TestCase):
 
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]["embeds"][0]
-        self.assertEqual(embed["title"], "CTA 开仓成交")
+        self.assertEqual(embed["title"], "✅ CTA 开仓成交")
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
         self.assertEqual(field_map["交易对"], "BTC/USDT")
         self.assertEqual(field_map["策略"], "CTA 策略")
@@ -340,7 +340,7 @@ class NotificationTests(unittest.TestCase):
 
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]["embeds"][0]
-        self.assertEqual(embed["title"], "策略切换清理")
+        self.assertEqual(embed["title"], "✅ 策略切换清理")
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
         self.assertEqual(field_map["状态切换"], "trend → sideways")
         self.assertIn("CTA 策略、网格策略", field_map["清理策略"])
@@ -362,7 +362,7 @@ class NotificationTests(unittest.TestCase):
 
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]["embeds"][0]
-        self.assertEqual(embed["title"], "策略切换清理")
+        self.assertEqual(embed["title"], "✅ 策略切换清理")
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
         self.assertEqual(field_map["清理策略"], "网格策略")
         self.assertIn("grid:regime_cleanup_idle", field_map["清理结果"])
@@ -429,7 +429,7 @@ class NotificationTests(unittest.TestCase):
 
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]["embeds"][0]
-        self.assertEqual(embed["title"], "CTA 已实现盈利")
+        self.assertEqual(embed["title"], "✅ CTA 已实现盈利")
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
         self.assertIn("本次盈亏", field_map)
         self.assertEqual(field_map["策略"], "CTA 策略")
@@ -449,7 +449,7 @@ class NotificationTests(unittest.TestCase):
 
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]['embeds'][0]
-        self.assertEqual(embed['title'], '网格已实现盈利')
+        self.assertEqual(embed['title'], '✅ 网格已实现盈利')
         field_map = {field['name']: field['value'] for field in embed['fields']}
         self.assertEqual(field_map['平仓笔数'], '2')
         self.assertEqual(field_map['统计窗口'], '60秒')
@@ -507,7 +507,7 @@ class NotificationTests(unittest.TestCase):
 
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]['embeds'][0]
-        self.assertEqual(embed['title'], 'CTA 近失报告')
+        self.assertEqual(embed['title'], '⚠️ CTA 近失报告')
         self.assertEqual(embed['color'], 0xFFFF00)
         field_map = {field['name']: field['value'] for field in embed['fields']}
         self.assertEqual(field_map['统计窗口'], '1 小时')
@@ -572,7 +572,7 @@ class NotificationTests(unittest.TestCase):
 
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]['embeds'][0]
-        self.assertEqual(embed['title'], 'CTA 信号漏斗摘要｜主阻塞：OBV（执行过滤层）')
+        self.assertEqual(embed['title'], '⚠️ CTA 信号漏斗摘要｜主阻塞：OBV（执行过滤层）')
         self.assertEqual(embed['color'], 0xFFFF00)
         field_map = {field['name']: field['value'] for field in embed['fields']}
         self.assertEqual(field_map['当前主阻塞层'], 'OBV（执行过滤层）（4 次）')

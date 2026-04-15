@@ -525,7 +525,7 @@ class DiscordNotifier:
         timestamp = datetime.now(timezone.utc)
         formatted_timestamp = self._format_timestamp(timestamp)
         embed = {
-            "title": self._truncate(str(title), 256),
+            "title": self._truncate(self._decorate_title(str(title), int(color)), 256),
             "description": self._truncate(str(description), 4000),
             "color": int(color),
             "fields": fields or [],
@@ -669,6 +669,19 @@ class DiscordNotifier:
             return payload or None, None
         previous, current = payload.split("->", 1)
         return previous or None, current or None
+
+    def _decorate_title(self, title: str, color: int) -> str:
+        normalized = str(title or "").strip()
+        if not normalized:
+            return normalized
+        if normalized[:1] in {"✅", "⚠", "🚨"}:
+            return normalized
+        icon = "⚠️"
+        if int(color) == EMBED_COLOR_GOOD:
+            icon = "✅"
+        elif int(color) == EMBED_COLOR_ERROR:
+            icon = "🚨"
+        return f"{icon} {normalized}"
 
     def _build_market_shift_dedup_key(self, old_state: str | None, new_state: str, reason: str) -> str:
         symbol = self._extract_symbol_from_market_shift_reason(reason)
