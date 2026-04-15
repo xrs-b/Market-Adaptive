@@ -662,11 +662,11 @@ class RiskControlManager:
             total_pnl = float(current_equity) - initial_equity
             total_pnl_pct = (total_pnl / initial_equity * 100.0) if initial_equity > 0 else 0.0
             self.notifier.send(
-                "每日资金快照",
+                "账号资金快照",
                 (
                     f"日期：{self.daily_start_date}\n"
-                    f"初始资金：{initial_equity:.4f} USDT\n"
                     f"当前权益：{float(current_equity):.4f} USDT\n"
+                    f"初始资金：{initial_equity:.4f} USDT\n"
                     f"总盈亏：{total_pnl:+.4f} USDT\n"
                     f"总盈亏率：{total_pnl_pct:+.2f}%\n"
                     f"今日起始资金：{self.daily_start_equity:.4f} USDT\n"

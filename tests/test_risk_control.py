@@ -380,8 +380,9 @@ class RiskControlManagerTests(unittest.TestCase):
 
         self.manager._sync_daily_baseline(current_equity=96000.0, now=datetime(2026, 4, 15, 0, 1, tzinfo=timezone.utc))
 
-        self.assertTrue(any(title == "每日资金快照" for title, _ in self.manager.notifier.messages))
-        message = next(body for title, body in self.manager.notifier.messages if title == "每日资金快照")
+        self.assertTrue(any(title == "账号资金快照" for title, _ in self.manager.notifier.messages))
+        message = next(body for title, body in self.manager.notifier.messages if title == "账号资金快照")
+        self.assertIn("当前权益：96000.0000 USDT", message)
         self.assertIn("初始资金：95400.0000 USDT", message)
         self.assertIn("总盈亏：+600.0000 USDT", message)
         self.assertIn("今日起始资金：96000.0000 USDT", message)
