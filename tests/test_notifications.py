@@ -276,20 +276,34 @@ class NotificationTests(unittest.TestCase):
     def test_discord_notifier_builds_embed_and_aggregates_grid_fills(self) -> None:
         notifier = CapturingDiscordNotifier()
 
-        notifier.notify_trade("buy", 100.0, 0.2, "grid", "grid_fill_websocket")
-        notifier.notify_trade("buy", 102.0, 0.1, "grid", "grid_fill_websocket")
+        notifier.notify_trade("buy", 100.0, 0.2, "grid", "grid_fill_websocket", symbol="BTC/USDT")
+        notifier.notify_trade("buy", 102.0, 0.1, "grid", "grid_fill_websocket", symbol="BTC/USDT")
 
         self.assertEqual(len(notifier.payloads), 0)
-        bucket_key = "grid::grid_fill_websocket::BUY"
+        bucket_key = "grid::grid_fill_websocket::BUY::BTC/USDT"
         notifier.submit_and_wait(notifier._flush_grid_trade_bucket_after_delay(bucket_key, 0.0))
 
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]["embeds"][0]
         self.assertEqual(embed["color"], 0x00FF00)
-        self.assertEqual(embed["title"], "Grid 成交汇总")
+        self.assertEqual(embed["title"], "Grid 对冲成交汇总")
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
+        self.assertEqual(field_map["交易对"], "BTC/USDT")
         self.assertEqual(field_map["成交笔数"], "2")
         self.assertEqual(field_map["累计成交额"], "30.2000 USDT")
+
+    def test_discord_notifier_builds_cta_open_trade_payload(self) -> None:
+        notifier = CapturingDiscordNotifier()
+
+        notifier.notify_trade("buy", 100.0, 0.2, "cta", "cta_open_long", symbol="BTC/USDT")
+
+        self.assertEqual(len(notifier.payloads), 1)
+        embed = notifier.payloads[0]["embeds"][0]
+        self.assertEqual(embed["title"], "CTA 开仓成交")
+        field_map = {field["name"]: field["value"] for field in embed["fields"]}
+        self.assertEqual(field_map["交易对"], "BTC/USDT")
+        self.assertEqual(field_map["策略"], "CTA 策略")
+        self.assertEqual(field_map["触发信号"], "cta_open_long")
 
     def test_discord_notifier_merges_strategy_cleanup_for_same_status_switch(self) -> None:
         notifier = CapturingDiscordNotifier()
@@ -318,6 +332,7 @@ class NotificationTests(unittest.TestCase):
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
         self.assertEqual(field_map["状态切换"], "trend → sideways")
         self.assertIn("CTA 策略、网格策略", field_map["清理策略"])
+        self.assertEqual(field_map["触发说明"], "市场状态由 trend 切换到 sideways")
         self.assertIn("CTA 策略：cta:flatten_all", field_map["清理结果"])
         self.assertIn("网格策略：grid:regime_cleanup", field_map["清理结果"])
 

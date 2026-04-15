@@ -30,6 +30,7 @@ class TradeAggregationBucket:
     side: str
     strategy: str
     signal: str
+    symbol: str
     started_at: datetime
     flush_at: datetime
     trades: list[dict[str, Any]]
@@ -119,9 +120,9 @@ class DiscordNotifier:
         }
 
         if normalized_strategy.lower() == "grid" and "fill" in normalized_signal.lower():
-            return self._queue_aggregated_grid_trade(normalized_strategy, normalized_signal, trade)
+            return self._queue_aggregated_grid_trade(normalized_strategy, normalized_signal, trade, symbol=str(symbol or "未知"))
 
-        title = f"{self._display_strategy_title(normalized_strategy)} 成交回报"
+        title = self._resolve_trade_title(normalized_strategy, normalized_signal)
         fields = [
             {"name": "交易对", "value": str(symbol or self._resolve_symbol_from_signal(normalized_signal)), "inline": True},
             {"name": "方向", "value": trade["side"], "inline": True},
@@ -217,13 +218,13 @@ class DiscordNotifier:
         if not self.enabled:
             return False
         payload = self._build_embed_payload(
-            title="市场状态切换",
+            title="市场状态已切换",
             description="检测到市场节奏变化，策略模式已同步更新。",
             color=EMBED_COLOR_WARN,
             fields=[
                 {"name": "原状态", "value": str(old_state or "无"), "inline": True},
                 {"name": "新状态", "value": str(new_state), "inline": True},
-                {"name": "触发原因", "value": str(reason), "inline": False},
+                {"name": "触发说明", "value": str(reason), "inline": False},
             ],
         )
         return self._submit_coroutine(self._post_payload(payload))
@@ -316,15 +317,16 @@ class DiscordNotifier:
         payload = self._build_strategy_cleanup_payload(symbol=bucket.symbol, reason=bucket.reason, entries=ordered_entries)
         return await self._post_payload(payload)
 
-    def _queue_aggregated_grid_trade(self, strategy: str, signal: str, trade: dict[str, Any]) -> bool:
+    def _queue_aggregated_grid_trade(self, strategy: str, signal: str, trade: dict[str, Any], *, symbol: str) -> bool:
         now = datetime.now(timezone.utc)
-        bucket_key = f"{strategy.lower()}::{signal.lower()}::{trade['side']}"
+        bucket_key = f"{strategy.lower()}::{signal.lower()}::{trade['side']}::{symbol}"
         bucket = self._trade_buckets.get(bucket_key)
         if bucket is None or now >= bucket.flush_at:
             bucket = TradeAggregationBucket(
                 side=trade["side"],
                 strategy=strategy,
                 signal=signal,
+                symbol=symbol,
                 started_at=now,
                 flush_at=now + timedelta(minutes=1),
                 trades=[],
@@ -345,6 +347,7 @@ class DiscordNotifier:
         avg_price = total_notional / total_size if total_size > 0 else 0.0
         latest_trade = bucket.trades[-1]
         fields = [
+            {"name": "交易对", "value": bucket.symbol, "inline": True},
             {"name": "方向", "value": bucket.side, "inline": True},
             {"name": "成交笔数", "value": str(len(bucket.trades)), "inline": True},
             {"name": "统计窗口", "value": "60秒", "inline": True},
@@ -356,7 +359,7 @@ class DiscordNotifier:
             {"name": "最近成交时间", "value": self._format_timestamp(latest_trade["captured_at"]), "inline": True},
         ]
         payload = self._build_embed_payload(
-            title=f"{self._display_strategy_title(bucket.strategy)} 成交汇总",
+            title=self._resolve_trade_title(bucket.strategy, bucket.signal, aggregated=True),
             description="过去 60 秒网格成交已合并展示，方便快速查看执行情况。",
             color=EMBED_COLOR_GOOD,
             fields=fields,
@@ -611,15 +614,41 @@ class DiscordNotifier:
             description = entries[0].overview or "检测到市场状态切换，相关策略已完成本轮切换清理。"
             strategy_value = strategy_names[0]
         result_lines = [f"{self._display_strategy_name(entry.strategy)}：{entry.result}" for entry in entries]
+        transition_summary = (
+            f"市场状态由 {previous_status or '未知'} 切换到 {new_status or '未知'}"
+            if previous_status is not None or new_status is not None
+            else str(reason)
+        )
         fields = [
             {"name": "交易对", "value": str(symbol), "inline": True},
             {"name": "清理策略", "value": strategy_value, "inline": True},
-            {"name": "切换原因", "value": str(reason), "inline": False},
+            {"name": "触发说明", "value": transition_summary, "inline": False},
             {"name": "清理结果", "value": self._truncate("\n".join(result_lines), 1000), "inline": False},
         ]
         if previous_status is not None or new_status is not None:
             fields.insert(1, {"name": "状态切换", "value": f"{previous_status or '未知'} → {new_status or '未知'}", "inline": True})
         return self._build_embed_payload(title="策略切换清理", description=description, color=EMBED_COLOR_GOOD, fields=fields)
+
+    def _resolve_trade_title(self, strategy: str, signal: str, *, aggregated: bool = False) -> str:
+        normalized_strategy = str(strategy or "").strip().lower()
+        normalized_signal = str(signal or "").strip().lower()
+        strategy_title = self._display_strategy_title(normalized_strategy)
+
+        if normalized_strategy == "cta":
+            if normalized_signal.startswith("cta_open_"):
+                return f"{strategy_title} 开仓成交"
+            if normalized_signal.startswith("cta_close_") or "exit" in normalized_signal:
+                return f"{strategy_title} 平仓成交"
+            return f"{strategy_title} 成交回报"
+
+        if normalized_strategy == "grid":
+            if aggregated and "websocket" in normalized_signal:
+                return f"{strategy_title} 对冲成交汇总"
+            if "websocket" in normalized_signal:
+                return f"{strategy_title} 对冲成交"
+            return f"{strategy_title} 成交汇总" if aggregated else f"{strategy_title} 成交回报"
+
+        return f"{strategy_title} 成交汇总" if aggregated else f"{strategy_title} 成交回报"
 
     def _parse_status_switch_reason(self, reason: str) -> tuple[str | None, str | None]:
         normalized = str(reason)

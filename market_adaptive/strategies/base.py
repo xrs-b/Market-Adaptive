@@ -104,12 +104,12 @@ class BaseStrategyRobot:
     def _notify_action(self, action: str, status: str) -> None:
         if self.notifier is None:
             return
+        strategy_label = self.strategy_name.upper() if self.strategy_name.lower() == "cta" else self.strategy_name.capitalize()
         self.notifier.send(
-            "策略动作通知",
+            f"{strategy_label} 执行动作",
             (
-                "策略执行了新的动作。\n"
-                f"策略：{self.strategy_name}\n"
                 f"交易对：{self.symbol}\n"
+                f"策略：{strategy_label}\n"
                 f"市场状态：{status}\n"
                 f"执行结果：{action}"
             ),
