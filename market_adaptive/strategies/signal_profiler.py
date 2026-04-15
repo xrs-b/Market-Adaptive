@@ -91,6 +91,7 @@ class FunnelWindowSummary:
 @dataclass
 class SignalProfiler:
     summary_interval: int = 10
+    min_blocking_count: int = 1
     notifier: Any | None = None
     symbol: str = "BTC/USDT"
     counters: FunnelCounters = field(default_factory=FunnelCounters)
@@ -279,6 +280,8 @@ class SignalProfiler:
         if self.notifier is None or not hasattr(self.notifier, "notify_signal_profiler_summary"):
             return
         if str(summary.dominant_blocking_layer or "").upper() == "PASSED":
+            return
+        if int(summary.dominant_blocking_count or 0) < max(1, int(self.min_blocking_count)):
             return
         try:
             self.notifier.notify_signal_profiler_summary(

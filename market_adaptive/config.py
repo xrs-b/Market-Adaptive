@@ -215,8 +215,11 @@ class CTAConfig:
     order_flow_limit_buffer_bps: float = 3.0
     order_flow_max_slippage_bps: float = 12.0
     heartbeat_interval_seconds: float = 300.0
-    near_miss_report_interval_seconds: float = 3600.0
+    near_miss_report_interval_seconds: float = 7200.0
     near_miss_report_max_samples: int = 5
+    near_miss_report_min_samples: int = 2
+    signal_profiler_summary_interval: int = 20
+    signal_profiler_min_blocking_count: int = 2
     early_bullish_starter_fraction: float = 0.30
     early_bullish_lower_band_slope_atr_threshold: float = 0.05
     starter_frontrun_enabled: bool = True
@@ -303,6 +306,9 @@ class CTAConfig:
         self.order_flow_max_slippage_bps = max(0.0, float(self.order_flow_max_slippage_bps))
         self.near_miss_report_interval_seconds = max(0.0, float(self.near_miss_report_interval_seconds))
         self.near_miss_report_max_samples = max(1, int(self.near_miss_report_max_samples))
+        self.near_miss_report_min_samples = max(1, int(self.near_miss_report_min_samples))
+        self.signal_profiler_summary_interval = max(1, int(self.signal_profiler_summary_interval))
+        self.signal_profiler_min_blocking_count = max(1, int(self.signal_profiler_min_blocking_count))
         self.cta_assist_trim_ratio = min(1.0, max(0.0, float(self.cta_assist_trim_ratio)))
 
     @property
@@ -654,8 +660,11 @@ def load_config(config_path: str | Path) -> AppConfig:
         order_flow_limit_buffer_bps=float(cta_payload.get("order_flow_limit_buffer_bps", 3.0)),
         order_flow_max_slippage_bps=float(cta_payload.get("order_flow_max_slippage_bps", 12.0)),
         heartbeat_interval_seconds=float(cta_payload.get("heartbeat_interval_seconds", 300.0)),
-        near_miss_report_interval_seconds=float(cta_payload.get("near_miss_report_interval_seconds", 3600.0)),
+        near_miss_report_interval_seconds=float(cta_payload.get("near_miss_report_interval_seconds", 7200.0)),
         near_miss_report_max_samples=int(cta_payload.get("near_miss_report_max_samples", 5)),
+        near_miss_report_min_samples=int(cta_payload.get("near_miss_report_min_samples", 2)),
+        signal_profiler_summary_interval=int(cta_payload.get("signal_profiler_summary_interval", 20)),
+        signal_profiler_min_blocking_count=int(cta_payload.get("signal_profiler_min_blocking_count", 2)),
         early_bullish_starter_fraction=float(cta_payload.get("early_bullish_starter_fraction", 0.30)),
         early_bullish_lower_band_slope_atr_threshold=float(
             cta_payload.get("early_bullish_lower_band_slope_atr_threshold", 0.05)

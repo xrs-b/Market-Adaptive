@@ -222,6 +222,59 @@ class SignalProfilerTests(unittest.TestCase):
         self.assertEqual(summary.dominant_blocking_count, 1)
         self.assertEqual(summary.blocking_layer_counts, {"REGIME": 1, "TRIGGER": 1})
 
+    def test_profiler_respects_min_blocking_count_before_notifying(self) -> None:
+        notifier = DummyNotifier()
+        profiler = SignalProfiler(summary_interval=2, min_blocking_count=2, notifier=notifier, symbol="BTC/USDT")
+
+        class PassingSignal:
+            server_time_iso = "2026-04-13T00:00:00+00:00"
+            local_time_iso = "2026-04-13T00:00:01+00:00"
+            server_local_skew_ms = 1000
+            major_direction = 1
+            weak_bull_bias = False
+            early_bullish = False
+            swing_rsi = 55.0
+            execution_obv_zscore = 1.3
+            execution_obv_threshold = 1.0
+            current_price = 100.0
+            execution_atr = 2.0
+            atr_price_ratio_pct = 2.0
+            major_timestamp_ms = 100
+            swing_timestamp_ms = 110
+            execution_timestamp_ms = 120
+            data_alignment_valid = True
+            data_mismatch_ms = 20
+            blocker_reason = "PASSED"
+            bullish_ready = True
+            fully_aligned = True
+
+        class SingleBlockedSignal:
+            server_time_iso = "2026-04-13T00:05:00+00:00"
+            local_time_iso = "2026-04-13T00:05:01+00:00"
+            server_local_skew_ms = 1000
+            major_direction = 1
+            weak_bull_bias = False
+            early_bullish = False
+            swing_rsi = 48.0
+            execution_obv_zscore = 0.7
+            execution_obv_threshold = 1.0
+            current_price = 98.0
+            execution_atr = 2.1
+            atr_price_ratio_pct = 2.1
+            major_timestamp_ms = 200
+            swing_timestamp_ms = 210
+            execution_timestamp_ms = 220
+            data_alignment_valid = True
+            data_mismatch_ms = 30
+            blocker_reason = "Blocked_By_OBV_STRENGTH_NOT_CONFIRMED"
+            bullish_ready = False
+            fully_aligned = False
+
+        profiler.record(PassingSignal(), grid_center_price=99.0)
+        profiler.record(SingleBlockedSignal(), grid_center_price=101.0)
+
+        self.assertEqual(len(notifier.signal_profiler_summary_calls), 0)
+
     def test_profiler_marks_passed_window_when_no_blocker_exists(self) -> None:
         profiler = SignalProfiler(summary_interval=10)
 

@@ -143,8 +143,11 @@ cta:
   order_flow_limit_buffer_bps: 3.0
   order_flow_max_slippage_bps: 12.0
   heartbeat_interval_seconds: 300.0
-  near_miss_report_interval_seconds: 3600.0
+  near_miss_report_interval_seconds: 7200.0
   near_miss_report_max_samples: 5
+  near_miss_report_min_samples: 2
+  signal_profiler_summary_interval: 20
+  signal_profiler_min_blocking_count: 2
   starter_frontrun_enabled: true
   starter_frontrun_fraction: 0.20
   starter_frontrun_breakout_buffer_ratio: 0.002
