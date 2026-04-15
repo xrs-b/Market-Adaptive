@@ -14,7 +14,7 @@ from typing import Callable
 from market_adaptive.clients.okx_ws_client import CCXTProUnavailableError, build_okx_websocket_client
 from market_adaptive.config import ExecutionConfig, GridConfig
 from market_adaptive.coordination import StrategyRuntimeContext
-from market_adaptive.indicators import compute_atr, compute_bollinger_bands, ohlcv_to_dataframe
+from market_adaptive.indicators import compute_atr, compute_bollinger_bands, compute_supertrend, ohlcv_to_dataframe
 from market_adaptive.risk import GridRiskProfile
 from market_adaptive.strategies.base import BaseStrategyRobot, StrategyRunResult
 
@@ -327,6 +327,11 @@ class GridRobot(BaseStrategyRobot):
         if flash_crash_action is not None:
             self._publish_grid_risk(None)
             return flash_crash_action
+
+        trend_defense_action = self._apply_trend_defense_guard(context, current_price)
+        if trend_defense_action is not None:
+            self._publish_grid_risk(None)
+            return trend_defense_action
 
         self._publish_grid_risk(context)
         allow_new_openings = True
@@ -1013,12 +1018,87 @@ class GridRobot(BaseStrategyRobot):
         return missing, unexpected
 
     def _oracle_allows_dynamic_grid(self) -> bool:
+        adx_guard_allows = True
         if self.market_oracle is not None and hasattr(self.market_oracle, "current_higher_adx_trend"):
             try:
-                return self.market_oracle.current_higher_adx_trend() in {"flat", "falling"}
+                adx_guard_allows = self.market_oracle.current_higher_adx_trend() in {"flat", "falling"}
             except Exception:
-                return True
-        return True
+                adx_guard_allows = True
+        if not adx_guard_allows:
+            return False
+        return self._higher_timeframe_trend_guard_allows_grid()
+
+    def _higher_timeframe_trend_guard_allows_grid(self) -> bool:
+        if not bool(getattr(self.config, "higher_timeframe_trend_guard_enabled", True)):
+            return True
+        state = self._higher_timeframe_trend_state()
+        if state is None:
+            return True
+        _, distance_atr_ratio = state
+        threshold = float(getattr(self.config, "higher_timeframe_trend_distance_atr_threshold", 0.8))
+        return distance_atr_ratio <= threshold
+
+    def _higher_timeframe_trend_state(self) -> tuple[int, float] | None:
+        timeframe = str(getattr(self.config, "higher_timeframe_trend_timeframe", "4h") or "4h")
+        ohlcv = self.client.fetch_ohlcv(symbol=self.symbol, timeframe=timeframe, limit=max(60, int(getattr(self.config, "lookback_limit", 120))))
+        if not ohlcv or len(ohlcv) < 20:
+            return None
+        frame = ohlcv_to_dataframe(ohlcv)
+        supertrend = compute_supertrend(
+            frame,
+            length=int(getattr(self.config, "higher_timeframe_trend_supertrend_period", 10)),
+            multiplier=float(getattr(self.config, "higher_timeframe_trend_supertrend_multiplier", 3.0)),
+        )
+        if supertrend.empty:
+            return None
+        direction = int(supertrend["direction"].iloc[-1])
+        supertrend_price = float(supertrend["supertrend"].iloc[-1])
+        atr_value = float(supertrend["atr"].iloc[-1]) if "atr" in supertrend else 0.0
+        close_price = float(frame["close"].iloc[-1])
+        if atr_value <= 0 or supertrend_price <= 0 or close_price <= 0:
+            return None
+        distance_atr_ratio = abs(close_price - supertrend_price) / atr_value
+        return direction, float(distance_atr_ratio)
+
+    def _apply_trend_defense_guard(self, context: GridContext, current_price: float) -> str | None:
+        if not bool(getattr(self.config, "trend_defense_enabled", True)):
+            return None
+        reference_context = self._cached_context or context
+        if reference_context.atr_value <= 0:
+            return None
+        trend_state = self._higher_timeframe_trend_state()
+        if trend_state is None:
+            return None
+        direction, _distance_atr_ratio = trend_state
+        breakout_atr_ratio = float(getattr(self.config, "trend_defense_breakout_atr_ratio", 1.0))
+        threshold_distance = float(reference_context.atr_value) * breakout_atr_ratio
+        bullish_breakout = direction > 0 and current_price >= reference_context.upper_bound + threshold_distance
+        bearish_breakout = direction < 0 and current_price <= reference_context.lower_bound - threshold_distance
+        if not (bullish_breakout or bearish_breakout):
+            return None
+        reduction_ratio = float(getattr(self.config, "trend_defense_reduction_ratio", 0.50))
+        result = self.reduce_exposure_step(
+            reason=("grid_trend_defense_bullish_breakout" if bullish_breakout else "grid_trend_defense_bearish_breakout"),
+            reduction_step_pct=reduction_ratio,
+        )
+        if self.notifier is not None:
+            self.notifier.send(
+                "Grid 风险预警",
+                (
+                    f"交易对：{self.symbol}\n"
+                    "异常类型：trend_defense_triggered\n"
+                    f"高周期方向：{'bullish' if direction > 0 else 'bearish'}\n"
+                    f"当前价格：{current_price:.2f}\n"
+                    f"网格边界：{reference_context.lower_bound:.2f}-{reference_context.upper_bound:.2f}\n"
+                    f"ATR：{reference_context.atr_value:.2f}\n"
+                    f"减仓比例：{reduction_ratio:.0%}"
+                ),
+            )
+        return (
+            f"grid:trend_defense_triggered|direction={'bullish' if direction > 0 else 'bearish'}"
+            f"|price={current_price:.2f}|atr={reference_context.atr_value:.2f}|bounds={reference_context.lower_bound:.2f}-{reference_context.upper_bound:.2f}"
+            f"|reduction={reduction_ratio:.2f}|result={result}"
+        )
 
     def _hard_stop_triggered(self, current_price: float, context: GridContext) -> bool:
         buffer_ratio = float(getattr(self.config, "hard_stop_buffer_ratio", 0.01))

@@ -1892,6 +1892,44 @@ class TheHandsTests(unittest.TestCase):
             })
         self.assertTrue(any("hedge_order_rejected" in message for message in rejection_logs.output))
 
+    def test_grid_robot_higher_timeframe_trend_guard_blocks_new_grid(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+        major_closes = [160.0 + 2.0 * index for index in range(60)]
+        self._set_ohlcv("4h", major_closes, 14_400_000)
+        self.grid_config.higher_timeframe_trend_distance_atr_threshold = 0.5
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, market_oracle=None, use_dynamic_range=False)
+
+        result = robot.run()
+
+        self.assertEqual(result.action, "grid:adx_trend_not_ready")
+        self.assertEqual(len(self.client.limit_orders), 0)
+
+    def test_grid_robot_trend_defense_reduces_exposure_on_confirmed_breakout(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0, width=1.0)
+        major_closes = [160.0 + 2.0 * index for index in range(60)]
+        self._set_ohlcv("4h", major_closes, 14_400_000)
+        self.grid_config.higher_timeframe_trend_guard_enabled = False
+        self.grid_config.flash_crash_enabled = False
+        self.grid_config.trend_defense_breakout_atr_ratio = 0.5
+        self.grid_config.trend_defense_reduction_ratio = 0.5
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, market_oracle=None, use_dynamic_range=False)
+
+        self.client.last_price = 100.0
+        first = robot.run()
+        self.assertTrue(first.action.startswith("grid:placed_"))
+
+        self.client.positions = [{"contracts": 0.1, "side": "long", "entryPrice": 100.0, "info": {"posSide": "long"}}]
+        self.client.last_price = 111.0
+        result = robot.run()
+
+        self.assertEqual(result.action.split("|")[0], "grid:trend_defense_triggered")
+        self.assertEqual(self.client.cancel_all_calls, ["BTC/USDT"])
+        self.assertEqual(len(self.client.market_orders), 1)
+        self.assertEqual(self.client.market_orders[0]["side"], "sell")
+        self.assertAlmostEqual(self.client.market_orders[0]["amount"], 0.05)
+
     def test_grid_robot_regime_cleanup_uses_limit_for_profitable_positions(self) -> None:
         self.client.last_price = 105.0
         self.client.positions = [{"contracts": 0.1, "side": "long", "entryPrice": 100.0, "info": {"posSide": "long"}}]

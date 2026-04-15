@@ -378,6 +378,14 @@ class GridConfig:
     min_spacing_ratio: float = 0.007
     atr_spacing_floor_multiplier: float = 0.5
     fee_rate: float = 0.001
+    higher_timeframe_trend_guard_enabled: bool = True
+    higher_timeframe_trend_timeframe: str = "4h"
+    higher_timeframe_trend_supertrend_period: int = 10
+    higher_timeframe_trend_supertrend_multiplier: float = 3.0
+    higher_timeframe_trend_distance_atr_threshold: float = 0.8
+    trend_defense_enabled: bool = True
+    trend_defense_breakout_atr_ratio: float = 1.0
+    trend_defense_reduction_ratio: float = 0.50
     directional_skew_enabled: bool = True
     directional_bias_threshold: float = 0.20
     sideways_neutral_bias_threshold: float = 0.12
@@ -436,6 +444,12 @@ class GridConfig:
         self.bearish_buy_spacing_ratio = max(0.0, float(self.bearish_buy_spacing_ratio))
         self.bearish_sell_spacing_ratio = max(0.0, float(self.bearish_sell_spacing_ratio))
         self.bearish_center_shift_atr_ratio = max(0.0, float(self.bearish_center_shift_atr_ratio))
+        self.higher_timeframe_trend_timeframe = str(self.higher_timeframe_trend_timeframe or "4h")
+        self.higher_timeframe_trend_supertrend_period = max(2, int(self.higher_timeframe_trend_supertrend_period))
+        self.higher_timeframe_trend_supertrend_multiplier = max(0.1, float(self.higher_timeframe_trend_supertrend_multiplier))
+        self.higher_timeframe_trend_distance_atr_threshold = max(0.0, float(self.higher_timeframe_trend_distance_atr_threshold))
+        self.trend_defense_breakout_atr_ratio = max(0.0, float(self.trend_defense_breakout_atr_ratio))
+        self.trend_defense_reduction_ratio = min(1.0, max(0.0, float(self.trend_defense_reduction_ratio)))
         self.heavy_inventory_threshold = min(1.0, max(0.0, float(self.heavy_inventory_threshold)))
         self.active_hedge_min_inventory_ratio = min(1.0, max(0.0, float(self.active_hedge_min_inventory_ratio)))
 
@@ -708,6 +722,14 @@ def load_config(config_path: str | Path) -> AppConfig:
         atr_multiplier=float(grid_payload.get("atr_multiplier", 2.5)),
         min_spacing_ratio=float(grid_payload.get("min_spacing_ratio", 0.007)),
         fee_rate=float(grid_payload.get("fee_rate", 0.001)),
+        higher_timeframe_trend_guard_enabled=bool(grid_payload.get("higher_timeframe_trend_guard_enabled", True)),
+        higher_timeframe_trend_timeframe=str(grid_payload.get("higher_timeframe_trend_timeframe", "4h")),
+        higher_timeframe_trend_supertrend_period=int(grid_payload.get("higher_timeframe_trend_supertrend_period", 10)),
+        higher_timeframe_trend_supertrend_multiplier=float(grid_payload.get("higher_timeframe_trend_supertrend_multiplier", 3.0)),
+        higher_timeframe_trend_distance_atr_threshold=float(grid_payload.get("higher_timeframe_trend_distance_atr_threshold", 0.8)),
+        trend_defense_enabled=bool(grid_payload.get("trend_defense_enabled", True)),
+        trend_defense_breakout_atr_ratio=float(grid_payload.get("trend_defense_breakout_atr_ratio", 1.0)),
+        trend_defense_reduction_ratio=float(grid_payload.get("trend_defense_reduction_ratio", 0.50)),
         directional_skew_enabled=bool(grid_payload.get("directional_skew_enabled", True)),
         directional_bias_threshold=float(grid_payload.get("directional_bias_threshold", 0.20)),
         sideways_neutral_bias_threshold=float(grid_payload.get("sideways_neutral_bias_threshold", 0.12)),
