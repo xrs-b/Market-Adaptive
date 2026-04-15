@@ -88,6 +88,8 @@ class DiscordNotifier:
         self._trade_buckets: dict[str, TradeAggregationBucket] = {}
         self._profit_buckets: dict[str, ProfitAggregationBucket] = {}
         self._cleanup_buckets: dict[str, StrategyCleanupBucket] = {}
+        self._last_market_shift_sent_at: dict[str, datetime] = {}
+        self._now_provider = lambda: datetime.now(timezone.utc)
 
     @property
     def enabled(self) -> bool:
@@ -217,6 +219,13 @@ class DiscordNotifier:
     def notify_market_shift(self, old_state: str | None, new_state: str, reason: str) -> bool:
         if not self.enabled:
             return False
+        shift_key = self._build_market_shift_dedup_key(old_state, new_state, reason)
+        now = self._now_provider()
+        last_sent_at = self._last_market_shift_sent_at.get(shift_key)
+        cooldown_seconds = 900
+        if last_sent_at is not None and (now - last_sent_at).total_seconds() < cooldown_seconds:
+            return False
+        self._last_market_shift_sent_at[shift_key] = now
         payload = self._build_embed_payload(
             title="市场状态已切换",
             description="检测到市场节奏变化，策略模式已同步更新。",
@@ -660,6 +669,18 @@ class DiscordNotifier:
             return payload or None, None
         previous, current = payload.split("->", 1)
         return previous or None, current or None
+
+    def _build_market_shift_dedup_key(self, old_state: str | None, new_state: str, reason: str) -> str:
+        symbol = self._extract_symbol_from_market_shift_reason(reason)
+        return f"{symbol}::{str(old_state or 'none')}->{str(new_state)}"
+
+    def _extract_symbol_from_market_shift_reason(self, reason: str) -> str:
+        normalized = str(reason or "")
+        prefix = "symbol="
+        if prefix not in normalized:
+            return "unknown"
+        fragment = normalized.split(prefix, 1)[1]
+        return fragment.split(";", 1)[0].strip() or "unknown"
 
     def _resolve_symbol_from_signal(self, signal: str) -> str:
         del signal

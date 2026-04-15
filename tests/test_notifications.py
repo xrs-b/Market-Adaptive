@@ -306,6 +306,17 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(field_map["策略"], "CTA 策略")
         self.assertEqual(field_map["触发信号"], "cta_open_long")
 
+    def test_discord_notifier_throttles_duplicate_market_shift_notifications(self) -> None:
+        notifier = CapturingDiscordNotifier()
+        notifier._now_provider = lambda: __import__('datetime').datetime(2026, 4, 15, 1, 0, 0, tzinfo=__import__('datetime').timezone.utc)
+
+        first = notifier.notify_market_shift('trend', 'sideways', 'symbol=BTC/USDT; adx=30.0; atr/volatility=0.02')
+        second = notifier.notify_market_shift('trend', 'sideways', 'symbol=BTC/USDT; adx=31.0; atr/volatility=0.03')
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(len(notifier.payloads), 1)
+
     def test_discord_notifier_merges_strategy_cleanup_for_same_status_switch(self) -> None:
         notifier = CapturingDiscordNotifier()
 
