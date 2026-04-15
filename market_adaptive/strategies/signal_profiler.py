@@ -278,6 +278,8 @@ class SignalProfiler:
     def _notify_summary(self, summary: FunnelWindowSummary) -> None:
         if self.notifier is None or not hasattr(self.notifier, "notify_signal_profiler_summary"):
             return
+        if str(summary.dominant_blocking_layer or "").upper() == "PASSED":
+            return
         try:
             self.notifier.notify_signal_profiler_summary(
                 symbol=self.symbol,

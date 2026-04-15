@@ -95,11 +95,8 @@ class BaseStrategyRobot:
         raise NotImplementedError
 
     def should_notify_action(self, action: str) -> bool:
-        if action == "skip:inactive":
-            return False
-        if action.startswith("grid:placed_0"):
-            return False
-        return True
+        del action
+        return False
 
     def _notify_action(self, action: str, status: str) -> None:
         if self.notifier is None:

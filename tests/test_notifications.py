@@ -11,6 +11,7 @@ from market_adaptive.notifiers.discord_notifier import DiscordNotifier
 from market_adaptive.oracles.market_oracle import MarketOracle
 from market_adaptive.strategies import CTARobot, GridRobot
 from market_adaptive.strategies.cta_robot import CTANearMissSample, ManagedPosition
+from market_adaptive.strategies.signal_profiler import FunnelWindowSummary, SignalProfiler
 from market_adaptive.testsupport import DummyNotifier
 
 
@@ -444,6 +445,32 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(field_map['累计已实现盈亏'], '+2.0000 USDT')
 
 
+    def test_cta_near_miss_report_requires_multiple_samples(self) -> None:
+        client = DummyClient()
+        notifier = DummyNotifier()
+        robot = CTARobot(client, self.database, CTAConfig(), ExecutionConfig(), notifier=notifier)
+        robot._near_miss_samples = [
+            CTANearMissSample(
+                symbol='BTC/USDT',
+                captured_at=1_700_000_000.0,
+                execution_trigger_reason='single_sample',
+                execution_memory_active=False,
+                execution_memory_bars_ago=None,
+                execution_breakout=False,
+                execution_golden_cross=False,
+                obv_zscore=0.8,
+                obv_threshold=1.0,
+                obv_gap=0.2,
+                price=70000.0,
+            )
+        ]
+        robot._near_miss_window_started_at = 1_700_000_000.0
+        robot._time_provider = lambda: 1_700_003_700.0
+
+        robot._maybe_flush_near_miss_report()
+
+        self.assertEqual(len(notifier.near_miss_calls), 0)
+
     def test_discord_notifier_builds_cta_near_miss_report_payload(self) -> None:
         notifier = CapturingDiscordNotifier()
 
@@ -475,6 +502,35 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(field_map['统计窗口'], '1 小时')
         self.assertIn('OBV Z-Score 0.85 / 阈值 1.00 / 差距 0.15', field_map['最接近样本'])
         self.assertIn('Triggered via Memory Window', field_map['样本详情'])
+
+    def test_signal_profiler_skips_summary_when_window_is_fully_passed(self) -> None:
+        notifier = DummyNotifier()
+        profiler = SignalProfiler(summary_interval=10, notifier=notifier, symbol='BTC/USDT')
+
+        profiler._notify_summary(
+            FunnelWindowSummary(
+                window_cycles=10,
+                total_cycles=10,
+                passed_regime=10,
+                passed_swing=10,
+                passed_trigger=10,
+                regime_pass_rate_pct=100.0,
+                swing_pass_rate_pct=100.0,
+                trigger_pass_rate_pct=100.0,
+                top_blockers=[('PASSED', 10)],
+                dominant_blocking_layer='PASSED',
+                dominant_blocking_label='已通过',
+                dominant_blocking_count=10,
+                blocking_layer_counts={'PASSED': 10},
+                latest_blocker_reason='PASSED',
+                latest_execution_obv_zscore=1.2,
+                latest_execution_obv_threshold=1.0,
+                latest_execution_price=70250.5,
+                latest_grid_center_gap=0.0,
+            )
+        )
+
+        self.assertEqual(len(notifier.signal_profiler_summary_calls), 0)
 
     def test_discord_notifier_builds_signal_profiler_summary_payload(self) -> None:
         notifier = CapturingDiscordNotifier()

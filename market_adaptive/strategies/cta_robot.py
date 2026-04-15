@@ -684,6 +684,9 @@ class CTARobot(BaseStrategyRobot):
         samples = self._consume_near_miss_samples()
         if not samples:
             return
+        min_samples = max(1, int(getattr(self.config, "near_miss_report_min_samples", 2) or 2))
+        if len(samples) < min_samples:
+            return
         self._last_near_miss_report_at = now
         if self.notifier is not None and hasattr(self.notifier, "notify_cta_near_miss_report"):
             self.notifier.notify_cta_near_miss_report(symbol=self.symbol, samples=samples, window_seconds=interval)
