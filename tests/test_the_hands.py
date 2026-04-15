@@ -589,6 +589,20 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(len(self.client.limit_orders), 0)
         self.assertIsNone(robot.position)
 
+    def test_cta_robot_logs_trade_close_on_full_exit(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+        robot.run()
+        self.assertIsNotNone(robot.position)
+        self.client.last_price = float(robot.position.entry_price) + 2.0
+
+        with self.assertLogs("market_adaptive.strategies.cta_robot", level="INFO") as captured:
+            robot._close_remaining_position("manual_test_exit")
+
+        self.assertTrue(any("[TRADE_CLOSE]" in message for message in captured.output))
+        self.assertTrue(any("manual_test_exit" in message for message in captured.output))
+
     def test_cta_robot_uses_aggressive_ioc_limit_for_high_conviction_entry(self) -> None:
         self._insert_status("trend")
         self._load_bullish_signal(lower_last_close=100.0)

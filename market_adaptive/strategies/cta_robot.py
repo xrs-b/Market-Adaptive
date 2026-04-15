@@ -582,10 +582,14 @@ class CTARobot(BaseStrategyRobot):
             "symbol": self.symbol,
             "bullish_ready": bool(signal.bullish_ready),
             "bullish_score": float(signal.bullish_score),
+            "bearish_score": float(signal.bearish_score),
             "bullish_threshold": float(signal.bullish_threshold),
+            "bearish_threshold": float(signal.bearish_threshold),
             "major_bias_score": float(signal.major_bias_score),
             "weak_bull_bias": bool(signal.weak_bull_bias),
+            "weak_bear_bias": bool(signal.weak_bear_bias),
             "early_bullish": bool(signal.early_bullish),
+            "early_bearish": bool(signal.early_bearish),
             "entry_size_multiplier": float(signal.entry_size_multiplier),
             "swing_rsi": float(signal.swing_rsi),
             "swing_rsi_slope": float(signal.swing_rsi_slope),
@@ -608,10 +612,15 @@ class CTARobot(BaseStrategyRobot):
             "obv_zscore_threshold": float(threshold),
             "obv_zscore_gap": float(obv.zscore - float(threshold)),
             "obv_confirmation_passed": bool(signal.obv_confirmation_passed),
+            "volume_filter_passed": bool(signal.volume_filter_passed),
+            "mtf_aligned": bool(signal.mtf_aligned),
+            "risk_percent": float(signal.risk_percent),
             "long_setup_reason": str(signal.long_setup_reason),
             "price": float(signal.price),
             "atr": float(signal.atr),
             "blocker_reason": str(signal.blocker_reason),
+            "relaxed_entry": bool(signal.relaxed_entry),
+            "relaxed_reasons": list(signal.relaxed_reasons),
             "data_alignment_valid": bool(signal.data_alignment_valid),
             "data_mismatch_ms": int(signal.data_mismatch_ms),
         }
@@ -1087,7 +1096,7 @@ class CTARobot(BaseStrategyRobot):
             amount,
             reduce_only=True,
         )
-        self._notify_realized_profit(position=position, amount=amount, exit_order=exit_order)
+        self._notify_realized_profit(position=position, amount=amount, exit_order=exit_order, reason="partial_take_profit")
         position.remaining_size = self._round_size(position.remaining_size - amount)
         if position.remaining_size <= 0:
             self.position = None
@@ -1110,7 +1119,7 @@ class CTARobot(BaseStrategyRobot):
                 reduce_only=True,
                 params={"reason": reason},
             )
-            self._notify_realized_profit(position=position, amount=amount, exit_order=exit_order)
+            self._notify_realized_profit(position=position, amount=amount, exit_order=exit_order, reason=reason)
         self.position = None
 
     def _apply_runtime_coordination(self, signal: TrendSignal) -> str | None:
@@ -1274,10 +1283,7 @@ class CTARobot(BaseStrategyRobot):
                 return float(value)
         return float(fallback)
 
-    def _notify_realized_profit(self, *, position: ManagedPosition, amount: float, exit_order: dict | None) -> None:
-        if self.notifier is None or not hasattr(self.notifier, "notify_profit"):
-            return
-
+    def _notify_realized_profit(self, *, position: ManagedPosition, amount: float, exit_order: dict | None, reason: str | None = None) -> None:
         exit_amount = self._round_size(amount)
         if exit_amount <= 0:
             return
@@ -1315,6 +1321,22 @@ class CTARobot(BaseStrategyRobot):
                 balance = float(self.client.fetch_total_equity("USDT"))
             except Exception:
                 balance = 0.0
+
+        logger.info(
+            "[TRADE_CLOSE] side=%s reason=%s entry=%.4f exit=%.4f size=%.8f pnl=%.4f roi=%.4f%% stop=%.4f best=%.4f",
+            position.side,
+            reason or "unspecified",
+            float(position.entry_price),
+            float(exit_price),
+            float(exit_amount),
+            float(pnl),
+            float(roi),
+            float(position.stop_price),
+            float(position.best_price),
+        )
+
+        if self.notifier is None or not hasattr(self.notifier, "notify_profit"):
+            return
 
         self.notifier.notify_profit(
             pnl=pnl,
