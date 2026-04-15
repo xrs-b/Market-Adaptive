@@ -220,6 +220,9 @@ class CTAConfig:
     order_flow_depth_levels: int = 20
     order_flow_confirmation_ratio: float = 1.5
     order_flow_high_conviction_ratio: float = 2.0
+    order_flow_history_window: int = 20
+    order_flow_decay_lookback: int = 3
+    order_flow_health_sigma_multiplier: float = 1.0
     order_flow_limit_buffer_bps: float = 3.0
     order_flow_max_slippage_bps: float = 12.0
     heartbeat_interval_seconds: float = 300.0
@@ -312,6 +315,9 @@ class CTAConfig:
             self.order_flow_confirmation_ratio,
             float(self.order_flow_high_conviction_ratio),
         )
+        self.order_flow_history_window = max(1, int(self.order_flow_history_window))
+        self.order_flow_decay_lookback = max(1, int(self.order_flow_decay_lookback))
+        self.order_flow_health_sigma_multiplier = max(0.0, float(self.order_flow_health_sigma_multiplier))
         self.order_flow_limit_buffer_bps = max(0.0, float(self.order_flow_limit_buffer_bps))
         self.order_flow_max_slippage_bps = max(0.0, float(self.order_flow_max_slippage_bps))
         self.near_miss_report_interval_seconds = max(0.0, float(self.near_miss_report_interval_seconds))
@@ -689,6 +695,9 @@ def load_config(config_path: str | Path) -> AppConfig:
         order_flow_depth_levels=int(cta_payload.get("order_flow_depth_levels", 20)),
         order_flow_confirmation_ratio=float(cta_payload.get("order_flow_confirmation_ratio", 1.5)),
         order_flow_high_conviction_ratio=float(cta_payload.get("order_flow_high_conviction_ratio", 2.0)),
+        order_flow_history_window=int(cta_payload.get("order_flow_history_window", 20)),
+        order_flow_decay_lookback=int(cta_payload.get("order_flow_decay_lookback", 3)),
+        order_flow_health_sigma_multiplier=float(cta_payload.get("order_flow_health_sigma_multiplier", 1.0)),
         order_flow_limit_buffer_bps=float(cta_payload.get("order_flow_limit_buffer_bps", 3.0)),
         order_flow_max_slippage_bps=float(cta_payload.get("order_flow_max_slippage_bps", 12.0)),
         heartbeat_interval_seconds=float(cta_payload.get("heartbeat_interval_seconds", 300.0)),

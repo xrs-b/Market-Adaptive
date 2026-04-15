@@ -35,6 +35,34 @@ class OrderFlowSentinelTests(unittest.TestCase):
         self.assertTrue(assessment.confirmation_passed)
         self.assertTrue(assessment.high_conviction)
 
+    def test_history_health_floor_can_block_borderline_confirmation(self) -> None:
+        order_book = {
+            "bids": [[100.0 - index * 0.1, 1.0] for index in range(20)],
+            "asks": [[100.1 + index * 0.1, 1.0] for index in range(20)],
+        }
+        config = CTAConfig(order_flow_confirmation_ratio=1.5, order_flow_health_sigma_multiplier=0.0)
+        sentinel = OrderFlowSentinel(DummyClient(order_book), config)
+        sentinel._imbalance_history.extend([2.0, 2.1, 2.2])
+
+        assessment = sentinel.assess_entry("BTC/USDT", "buy", amount=0.02)
+
+        self.assertFalse(assessment.confirmation_passed)
+        self.assertEqual(assessment.reason, "imbalance_below_2.10")
+
+    def test_decay_detection_blocks_even_when_current_ratio_is_above_threshold(self) -> None:
+        order_book = {
+            "bids": [[100.0 - index * 0.1, 1.8] for index in range(20)],
+            "asks": [[100.1 + index * 0.1, 1.0] for index in range(20)],
+        }
+        config = CTAConfig(order_flow_confirmation_ratio=1.5, order_flow_decay_lookback=3)
+        sentinel = OrderFlowSentinel(DummyClient(order_book), config)
+        sentinel._imbalance_history.extend([2.2, 2.0, 1.9])
+
+        assessment = sentinel.assess_entry("BTC/USDT", "buy", amount=0.02)
+
+        self.assertFalse(assessment.confirmation_passed)
+        self.assertEqual(assessment.reason, "imbalance_decay_detected")
+
     def test_high_conviction_limit_price_tracks_depth_but_respects_slippage_cap(self) -> None:
         config = CTAConfig(
             order_flow_confirmation_ratio=1.5,

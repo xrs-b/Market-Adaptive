@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
+from statistics import pstdev
 from typing import Any
 
 from market_adaptive.config import CTAConfig
@@ -42,6 +44,7 @@ class OrderFlowSentinel:
     def __init__(self, client: Any, config: CTAConfig) -> None:
         self.client = client
         self.config = config
+        self._imbalance_history: deque[float] = deque(maxlen=max(1, int(getattr(config, "order_flow_history_window", 20))))
 
     def assess_entry(self, symbol: str, side: str, amount: float) -> OrderFlowAssessment:
         depth_levels = max(1, int(self.config.order_flow_depth_levels))
@@ -80,8 +83,12 @@ class OrderFlowSentinel:
             ask_sum=ask_sum,
             side=normalized_side,
         )
-        confirmation_threshold = max(0.0, float(self.config.order_flow_confirmation_ratio))
-        confirmation_passed = imbalance_ratio >= confirmation_threshold
+        history_mean = self._history_mean()
+        history_sigma = self._history_sigma()
+        health_floor = history_mean + (history_sigma * max(0.0, float(getattr(self.config, "order_flow_health_sigma_multiplier", 1.0))))
+        decay_detected = self._is_decay_detected(imbalance_ratio)
+        confirmation_threshold = max(0.0, float(self.config.order_flow_confirmation_ratio), health_floor)
+        confirmation_passed = imbalance_ratio >= confirmation_threshold and not decay_detected
         high_conviction_threshold = max(
             confirmation_threshold,
             float(self.config.order_flow_high_conviction_ratio),
@@ -105,12 +112,16 @@ class OrderFlowSentinel:
             )
 
         reason = "confirmed"
-        if not confirmation_passed:
+        if decay_detected:
+            reason = "imbalance_decay_detected"
+        elif not confirmation_passed:
             reason = f"imbalance_below_{confirmation_threshold:.2f}"
         elif high_conviction and recommended_limit_price is None:
             reason = "missing_depth_price"
         elif high_conviction:
             reason = "confirmed_high_conviction"
+
+        self._record_imbalance(imbalance_ratio)
 
         return OrderFlowAssessment(
             symbol=symbol,
@@ -152,6 +163,30 @@ class OrderFlowSentinel:
         if bid_sum <= epsilon:
             return float("inf") if ask_sum > epsilon else 0.0
         return ask_sum / bid_sum
+
+    def _record_imbalance(self, imbalance_ratio: float) -> None:
+        if imbalance_ratio >= 0:
+            self._imbalance_history.append(float(imbalance_ratio))
+
+    def _history_mean(self) -> float:
+        if not self._imbalance_history:
+            return 0.0
+        return sum(self._imbalance_history) / len(self._imbalance_history)
+
+    def _history_sigma(self) -> float:
+        if len(self._imbalance_history) < 2:
+            return 0.0
+        return float(pstdev(self._imbalance_history))
+
+    def _is_decay_detected(self, current_ratio: float) -> bool:
+        lookback = max(1, int(getattr(self.config, "order_flow_decay_lookback", 3)))
+        if len(self._imbalance_history) < lookback:
+            return False
+        recent = list(self._imbalance_history)[-lookback:]
+        if not recent:
+            return False
+        trend = recent + [float(current_ratio)]
+        return all(left > right for left, right in zip(trend, trend[1:]))
 
     @staticmethod
     def _estimate_depth_price(
