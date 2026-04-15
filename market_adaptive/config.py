@@ -245,6 +245,7 @@ class CTAConfig:
     starter_frontrun_impulse_bars: int = 3
     starter_frontrun_volume_window: int = 12
     starter_frontrun_volume_multiplier: float = 1.15
+    signal_flip_reduce_ratio: float = 0.50
     fast_ema: int = 7  # legacy compatibility
     slow_ema: int = 21  # legacy compatibility
     polling_interval_seconds: int = 60
@@ -331,6 +332,7 @@ class CTAConfig:
         self.signal_profiler_summary_interval = max(1, int(self.signal_profiler_summary_interval))
         self.signal_profiler_min_blocking_count = max(1, int(self.signal_profiler_min_blocking_count))
         self.minimum_expected_rr = max(0.0, float(self.minimum_expected_rr))
+        self.signal_flip_reduce_ratio = min(1.0, max(0.0, float(self.signal_flip_reduce_ratio)))
         self.cta_assist_trim_ratio = min(1.0, max(0.0, float(self.cta_assist_trim_ratio)))
 
     @property
@@ -728,6 +730,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         starter_frontrun_impulse_bars=int(cta_payload.get("starter_frontrun_impulse_bars", 3)),
         starter_frontrun_volume_window=int(cta_payload.get("starter_frontrun_volume_window", 12)),
         starter_frontrun_volume_multiplier=float(cta_payload.get("starter_frontrun_volume_multiplier", 1.15)),
+        signal_flip_reduce_ratio=float(cta_payload.get("signal_flip_reduce_ratio", 0.50)),
         fast_ema=int(cta_payload.get("fast_ema", 7)),
         slow_ema=int(cta_payload.get("slow_ema", 21)),
         polling_interval_seconds=int(cta_payload.get("polling_interval_seconds", 60)),

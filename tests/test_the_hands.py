@@ -828,6 +828,26 @@ class TheHandsTests(unittest.TestCase):
         self.assertAlmostEqual(self.client.market_orders[3]["amount"], 71.25)
         self.assertIsNone(robot.position)
 
+    def test_cta_robot_signal_flip_reduces_first_then_exits_on_second_flip(self) -> None:
+        self._insert_status("trend")
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+
+        self._load_bullish_signal(lower_last_close=100.0)
+        first_result = robot.run()
+        self.assertEqual(first_result.action, "cta:open_long")
+        self.assertIsNotNone(robot.position)
+
+        robot._manage_position(TrendSignal(direction=-1, raw_direction=-1, major_direction=-1, price=99.0, atr=2.0))
+        self.assertAlmostEqual(self.client.market_orders[1]["amount"], 71.25)
+        self.assertTrue(robot._signal_flip_pending)
+        self.assertIsNotNone(robot.position)
+
+        actions, closed = robot._manage_position(TrendSignal(direction=-1, raw_direction=-1, major_direction=-1, price=98.0, atr=2.0))
+        self.assertTrue(closed)
+        self.assertIn("cta:signal_flip_exit", actions)
+        self.assertAlmostEqual(self.client.market_orders[2]["amount"], 71.25)
+        self.assertIsNone(robot.position)
+
     def test_grid_robot_uses_neutral_price_band_and_dynamic_per_level_sizing(self) -> None:
         self._insert_status("sideways")
         self._load_sideways_grid_data(center=100.0)

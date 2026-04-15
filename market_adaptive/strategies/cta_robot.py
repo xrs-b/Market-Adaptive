@@ -212,6 +212,7 @@ class CTARobot(BaseStrategyRobot):
         self._near_miss_window_started_at: float | None = None
         self._last_near_miss_report_at = 0.0
         self._time_provider = time.time
+        self._signal_flip_pending = False
 
     def _resolve_obv_gate(self, signal: MTFSignal):
         return resolve_dynamic_obv_gate_for_signal(
@@ -867,6 +868,7 @@ class CTARobot(BaseStrategyRobot):
             stop_distance=stop_distance,
             risk_percent=signal.risk_percent,
         )
+        self._signal_flip_pending = False
         self._publish_risk_profile(signal)
         if self.notifier is not None and hasattr(self.notifier, "notify_trade"):
             self.notifier.notify_trade(
@@ -1081,10 +1083,19 @@ class CTARobot(BaseStrategyRobot):
         actions: list[str] = []
 
         if signal.direction != 0 and signal.direction != self.position.direction:
+            if not self._signal_flip_pending:
+                reduction_ratio = float(getattr(self.config, "signal_flip_reduce_ratio", 0.50))
+                reduction_size = self.position.remaining_size * reduction_ratio
+                if reduction_size > 0 and self._reduce_position(reduction_size):
+                    self._signal_flip_pending = True
+                    self._publish_risk_profile(None if self.position is None else signal)
+                    actions.append("cta:signal_flip_reduce")
+                    return actions, self.position is None
             self._close_remaining_position(reason="signal_flip")
             self._publish_risk_profile(None)
             actions.append("cta:signal_flip_exit")
             return actions, True
+        self._signal_flip_pending = False
 
         profit_ratio = self.position.profit_ratio(signal.price)
         first_exit_size = self.position.initial_size * self.config.first_take_profit_size
