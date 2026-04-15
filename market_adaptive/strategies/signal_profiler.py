@@ -170,7 +170,7 @@ class SignalProfiler:
                 return value
         return None
 
-    def record(self, signal: "MTFSignal", *, grid_center_price: float | None = None, blocker_reason: str = "") -> CycleAuditRecord:
+    def record(self, signal: "MTFSignal", *, grid_center_price: float | None = None, blocker_reason: str = "", execution_obv_threshold: float | None = None) -> CycleAuditRecord:
         self.counters.total_cycles += 1
         passed_regime = bool(abs(int(signal.major_direction)) > 0 or getattr(signal, "weak_bull_bias", False) or getattr(signal, "early_bullish", False) or getattr(signal, "weak_bear_bias", False) or getattr(signal, "early_bearish", False))
         passed_swing = bool(signal.bullish_ready or getattr(signal, "bearish_ready", False))
@@ -196,7 +196,7 @@ class SignalProfiler:
             major_supertrend_direction=signal.major_direction,
             swing_rsi=float(signal.swing_rsi),
             execution_obv_zscore=float(signal.execution_obv_zscore),
-            execution_obv_threshold=float(signal.execution_obv_threshold),
+            execution_obv_threshold=float(signal.execution_obv_threshold if execution_obv_threshold is None else execution_obv_threshold),
             execution_price=execution_price,
             grid_center_price=grid_center_price,
             grid_center_gap=gap,

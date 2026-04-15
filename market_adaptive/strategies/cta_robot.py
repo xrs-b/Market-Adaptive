@@ -507,7 +507,7 @@ class CTARobot(BaseStrategyRobot):
             if not volume_filter_passed:
                 final_direction = 0
                 long_setup_blocked = True
-                long_setup_reason = "obv_strength_not_confirmed"
+                long_setup_reason = "obv_above_sma" if bool(obv_confirmation.above_sma) else "obv_strength_not_confirmed"
             elif volume_profile is None:
                 final_direction = 0
                 long_setup_blocked = True
@@ -522,7 +522,12 @@ class CTARobot(BaseStrategyRobot):
             blocker_reason = f"Blocked_By_{str(long_setup_reason).upper()}"
         if self.signal_profiler is not None:
             grid_center = self.grid_center_provider() if callable(self.grid_center_provider) else None
-            self.signal_profiler.record(mtf_signal, grid_center_price=grid_center, blocker_reason=blocker_reason)
+            self.signal_profiler.record(
+                mtf_signal,
+                grid_center_price=grid_center,
+                blocker_reason=blocker_reason,
+                execution_obv_threshold=float(obv_threshold),
+            )
 
         return TrendSignal(
             direction=final_direction,

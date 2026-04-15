@@ -39,6 +39,37 @@ class SignalProfilerTests(unittest.TestCase):
         self.assertEqual(profiler.counters.passed_swing, 1)
         self.assertEqual(profiler.counters.passed_trigger, 1)
 
+    def test_profiler_can_use_dynamic_obv_threshold_override(self) -> None:
+        profiler = SignalProfiler(summary_interval=10)
+
+        class DummySignal:
+            server_time_iso = "2026-04-13T00:00:00+00:00"
+            local_time_iso = "2026-04-13T00:00:01+00:00"
+            server_local_skew_ms = 1000
+            major_direction = -1
+            weak_bull_bias = False
+            early_bullish = False
+            swing_rsi = 45.0
+            execution_obv_zscore = 0.1
+            execution_obv_threshold = 1.0
+            current_price = 100.0
+            execution_atr = 2.0
+            atr_price_ratio_pct = 2.0
+            major_timestamp_ms = 100
+            swing_timestamp_ms = 110
+            execution_timestamp_ms = 120
+            data_alignment_valid = True
+            data_mismatch_ms = 20
+            blocker_reason = "Blocked_By_OBV_ABOVE_SMA"
+            bullish_ready = True
+            fully_aligned = False
+            weak_bear_bias = True
+            early_bearish = True
+
+        record = profiler.record(DummySignal(), grid_center_price=99.0, execution_obv_threshold=0.0)
+
+        self.assertEqual(record.execution_obv_threshold, 0.0)
+
     def test_profiler_notifies_summary_on_interval_boundary(self) -> None:
         notifier = DummyNotifier()
         profiler = SignalProfiler(summary_interval=2, notifier=notifier, symbol="BTC/USDT")
