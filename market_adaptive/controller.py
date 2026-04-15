@@ -196,14 +196,14 @@ class MainController:
         result = self.cta_robot.force_risk_exit(reason)
         if self.notifier is not None:
             self.notifier.send(
-                "风控执行动作",
+                "CTA 风控离场",
                 (
-                    "CTA 仓位已执行风控离场。\n"
-                    f"策略：cta\n"
                     f"交易对：{self.cta_robot.symbol}\n"
+                    "策略：CTA\n"
                     "动作：全部平仓\n"
-                    f"原因：{reason}\n"
-                    f"结果：{result}"
+                    f"触发原因：{reason}\n"
+                    f"执行结果：{result}\n\n"
+                    "说明：CTA 仓位已执行风险离场，请检查触发条件是否合理。"
                 ),
             )
 
@@ -211,15 +211,14 @@ class MainController:
         result = self.grid_robot.reduce_exposure_step(reason, reduction_step_pct)
         if self.notifier is not None:
             self.notifier.send(
-                "风控执行动作",
+                "Grid 风险收缩",
                 (
-                    "网格仓位已执行风险收缩。\n"
-                    f"策略：grid\n"
                     f"交易对：{self.grid_robot.symbol}\n"
+                    "策略：Grid\n"
                     "动作：逐步减仓\n"
                     f"减仓步长：{reduction_step_pct:.0%}\n"
-                    f"原因：{reason}\n"
-                    f"结果：{result}"
+                    f"触发原因：{reason}\n"
+                    f"执行结果：{result}"
                 ),
             )
 

@@ -396,13 +396,20 @@ class RiskControlManager:
 
         if self.notifier is not None:
             self.notifier.send(
-                "风控已触发",
+                "硬风控已触发",
                 (
-                    "账户触发熔断保护，系统已停止新开仓并执行清仓。\n"
-                    f"当日回撤：{snapshot.daily_drawdown * 100:.2f}%\n"
+                    "账户已触发熔断保护。\n\n"
+                    "触发原因：日内回撤超限\n"
+                    f"当前回撤：{snapshot.daily_drawdown * 100:.2f}%\n"
+                    f"阈值：{self.config.daily_loss_cutoff_pct * 100:.2f}%\n"
                     f"当前权益：{snapshot.equity:.4f} USDT\n"
                     f"日初权益：{snapshot.daily_start_equity:.4f} USDT\n"
-                    f"保证金比率：{snapshot.margin_ratio * 100:.2f}%"
+                    f"保证金比率：{snapshot.margin_ratio * 100:.2f}%\n\n"
+                    "已执行动作：\n"
+                    "- 停止新开仓\n"
+                    "- 撤销所有挂单\n"
+                    "- 执行清仓\n"
+                    "- 系统状态切换为 OFF"
                 ),
             )
 

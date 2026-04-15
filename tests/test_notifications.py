@@ -260,7 +260,7 @@ class NotificationTests(unittest.TestCase):
         result = robot.run()
 
         self.assertEqual(result.action.split('|')[0], 'grid:flash_crash_triggered')
-        self.assertTrue(any(title == '网格风险预警' for title, _ in notifier.messages))
+        self.assertTrue(any(title == 'Grid 风险预警' for title, _ in notifier.messages))
         self.assertTrue(any('flash_crash_triggered' in body for _, body in notifier.messages))
 
     def test_discord_notifier_builds_embed_and_aggregates_grid_fills(self) -> None:
@@ -276,7 +276,7 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]["embeds"][0]
         self.assertEqual(embed["color"], 0x00FF00)
-        self.assertEqual(embed["title"], "网格策略成交汇总")
+        self.assertEqual(embed["title"], "Grid 成交汇总")
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
         self.assertEqual(field_map["成交笔数"], "2")
         self.assertEqual(field_map["累计成交额"], "30.2000 USDT")
@@ -392,9 +392,11 @@ class NotificationTests(unittest.TestCase):
 
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]["embeds"][0]
-        self.assertEqual(embed["title"], "已实现盈亏")
+        self.assertEqual(embed["title"], "CTA 已实现盈利")
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
         self.assertIn("本次盈亏", field_map)
+        self.assertEqual(field_map["策略"], "CTA 策略")
+        self.assertEqual(field_map["交易对"], "未知")
         self.assertNotIn("timestamp", embed)
         footer_lines = embed["footer"]["text"].splitlines()
         self.assertRegex(footer_lines[0], r"^通知时间：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
@@ -410,9 +412,10 @@ class NotificationTests(unittest.TestCase):
 
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]['embeds'][0]
-        self.assertEqual(embed['title'], '网格已实现盈亏汇总')
+        self.assertEqual(embed['title'], '网格已实现盈利')
         field_map = {field['name']: field['value'] for field in embed['fields']}
         self.assertEqual(field_map['平仓笔数'], '2')
+        self.assertEqual(field_map['统计窗口'], '60秒')
         self.assertEqual(field_map['累计已实现盈亏'], '+2.0000 USDT')
 
 
@@ -545,6 +548,9 @@ class NotificationTests(unittest.TestCase):
         self.assertAlmostEqual(notifier.profit_calls[0]['pnl'], 1.0)
         self.assertAlmostEqual(notifier.profit_calls[0]['roi'], 2.0)
         self.assertAlmostEqual(notifier.profit_calls[0]['balance'], 1234.5)
+        self.assertEqual(notifier.profit_calls[0]['strategy'], 'cta')
+        self.assertEqual(notifier.profit_calls[0]['symbol'], 'BTC/USDT')
+        self.assertEqual(notifier.profit_calls[0]['side'], 'LONG')
 
     def test_cta_full_close_notifies_realized_loss_for_short(self) -> None:
         client = DummyClient()
@@ -570,6 +576,9 @@ class NotificationTests(unittest.TestCase):
         self.assertAlmostEqual(notifier.profit_calls[0]['pnl'], -3.0)
         self.assertAlmostEqual(notifier.profit_calls[0]['roi'], -2.0)
         self.assertAlmostEqual(notifier.profit_calls[0]['balance'], 987.6)
+        self.assertEqual(notifier.profit_calls[0]['strategy'], 'cta')
+        self.assertEqual(notifier.profit_calls[0]['symbol'], 'BTC/USDT')
+        self.assertEqual(notifier.profit_calls[0]['side'], 'SHORT')
 
 
 if __name__ == '__main__':

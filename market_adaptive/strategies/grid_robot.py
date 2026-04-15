@@ -538,11 +538,16 @@ class GridRobot(BaseStrategyRobot):
         )
         if self.notifier is not None:
             self.notifier.send(
-                "网格风险预警",
+                "Grid 风险预警",
                 (
-                    f"symbol={self.symbol} | action=flash_crash_triggered | range_1m={one_minute_range:.2f} | "
-                    f"atr={context.atr_value:.2f} | threshold={threshold:.2f} | cooldown={cooldown_seconds}s | "
-                    f"center={context.center_price:.2f} | bounds={context.lower_bound:.2f}-{context.upper_bound:.2f}"
+                    f"交易对：{self.symbol}\n"
+                    "异常类型：flash_crash_triggered\n"
+                    f"1分钟波动：{one_minute_range:.2f}\n"
+                    f"ATR：{context.atr_value:.2f}\n"
+                    f"触发阈值：{threshold:.2f}\n"
+                    f"保护冷却：{cooldown_seconds}秒\n"
+                    f"网格中心：{context.center_price:.2f}\n"
+                    f"价格边界：{context.lower_bound:.2f}-{context.upper_bound:.2f}"
                 ),
             )
         return action

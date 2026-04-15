@@ -1290,7 +1290,16 @@ class CTARobot(BaseStrategyRobot):
             except Exception:
                 balance = 0.0
 
-        self.notifier.notify_profit(pnl=pnl, roi=roi, balance=balance)
+        self.notifier.notify_profit(
+            pnl=pnl,
+            roi=roi,
+            balance=balance,
+            strategy=self.strategy_name,
+            symbol=self.symbol,
+            side=position.side.upper(),
+            exit_price=exit_price,
+            size=exit_amount,
+        )
 
     def _normalize_order_amount(self, amount: float) -> float:
         normalized = max(0.0, float(amount))

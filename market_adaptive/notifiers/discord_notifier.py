@@ -121,16 +121,17 @@ class DiscordNotifier:
         if normalized_strategy.lower() == "grid" and "fill" in normalized_signal.lower():
             return self._queue_aggregated_grid_trade(normalized_strategy, normalized_signal, trade)
 
-        title = f"{self._display_strategy_name(normalized_strategy)}成交回报"
+        title = f"{self._display_strategy_title(normalized_strategy)} 成交回报"
         fields = [
+            {"name": "交易对", "value": self._resolve_symbol_from_signal(normalized_signal), "inline": True},
             {"name": "方向", "value": trade["side"], "inline": True},
+            {"name": "策略", "value": self._display_strategy_name(normalized_strategy), "inline": True},
             {"name": "成交价", "value": f"{trade['price']:.4f}", "inline": True},
             {"name": "成交量", "value": f"{trade['size']:.8f}", "inline": True},
             {"name": "成交额", "value": f"{trade['notional']:.4f} USDT", "inline": True},
-            {"name": "策略", "value": self._display_strategy_name(normalized_strategy), "inline": True},
-            {"name": "触发信号", "value": normalized_signal, "inline": True},
+            {"name": "触发信号", "value": normalized_signal, "inline": False},
         ]
-        payload = self._build_embed_payload(title=title, description="订单已成交，请留意仓位与后续挂单。", color=EMBED_COLOR_GOOD, fields=fields)
+        payload = self._build_embed_payload(title=title, description="订单已成交，请留意仓位变化与后续管理动作。", color=EMBED_COLOR_GOOD, fields=fields)
         return self._submit_coroutine(self._post_payload(payload))
 
     def notify_profit(
@@ -159,13 +160,21 @@ class DiscordNotifier:
                 exit_price=exit_price,
                 size=size,
             )
-        title = "已实现盈亏"
+        strategy_label = self._display_strategy_name(normalized_strategy)
+        title = f"{self._display_strategy_title(normalized_strategy)} 已实现{'盈利' if float(pnl) >= 0 else '亏损'}"
         fields = [
+            {"name": "交易对", "value": str(symbol or "未知"), "inline": True},
+            {"name": "策略", "value": strategy_label, "inline": True},
+            {"name": "方向", "value": str(side or "-").upper() or "-", "inline": True},
             {"name": "本次盈亏", "value": f"{float(pnl):+.4f} USDT", "inline": True},
             {"name": "收益率", "value": f"{float(roi):+.2f}%", "inline": True},
             {"name": "账户权益", "value": f"{float(balance):.4f} USDT", "inline": True},
         ]
-        payload = self._build_embed_payload(title=title, description="仓位已部分或全部平仓，以下为最新已实现盈亏。", color=EMBED_COLOR_GOOD, fields=fields)
+        if exit_price not in (None, ""):
+            fields.append({"name": "平仓价", "value": f"{float(exit_price):.4f}", "inline": True})
+        if size not in (None, ""):
+            fields.append({"name": "平仓量", "value": f"{abs(float(size)):.8f}", "inline": True})
+        payload = self._build_embed_payload(title=title, description="仓位已部分或全部平仓，以下为最新已实现盈亏。", color=EMBED_COLOR_GOOD if float(pnl) >= 0 else EMBED_COLOR_ERROR, fields=fields)
         return self._submit_coroutine(self._post_payload(payload))
 
     def notify_strategy_cleanup(
@@ -347,7 +356,7 @@ class DiscordNotifier:
             {"name": "最近成交时间", "value": self._format_timestamp(latest_trade["captured_at"]), "inline": True},
         ]
         payload = self._build_embed_payload(
-            title=f"{self._display_strategy_name(bucket.strategy)}成交汇总",
+            title=f"{self._display_strategy_title(bucket.strategy)} 成交汇总",
             description="过去 60 秒网格成交已合并展示，方便快速查看执行情况。",
             color=EMBED_COLOR_GOOD,
             fields=fields,
@@ -403,13 +412,14 @@ class DiscordNotifier:
         last_balance = float(bucket.profits[-1]["balance"])
         avg_roi = sum(float(item["roi"]) for item in bucket.profits) / len(bucket.profits)
         latest = bucket.profits[-1]
-        title = "网格已实现盈亏汇总"
+        title = f"网格已实现{'盈利' if total_pnl >= 0 else '亏损'}"
         fields = [
             {"name": "策略", "value": self._display_strategy_name(bucket.strategy), "inline": True},
             {"name": "交易对", "value": bucket.symbol, "inline": True},
+            {"name": "统计窗口", "value": "60秒", "inline": True},
             {"name": "平仓笔数", "value": str(len(bucket.profits)), "inline": True},
             {"name": "累计已实现盈亏", "value": f"{total_pnl:+.4f} USDT", "inline": True},
-            {"name": "平均收益率", "value": f"{avg_roi:+.2f}%", "inline": True},
+            {"name": "参考收益率", "value": f"{avg_roi:+.2f}%", "inline": True},
             {"name": "累计平仓量", "value": f"{total_size:.8f}", "inline": True},
             {"name": "最近平仓方向", "value": latest.get("side") or "-", "inline": True},
             {"name": "最近平仓价", "value": f"{float(latest['exit_price']):.4f}" if latest.get("exit_price") not in (None, "") else "-", "inline": True},
@@ -418,7 +428,7 @@ class DiscordNotifier:
         payload = self._build_embed_payload(
             title=title,
             description="过去 60 秒网格止盈/减仓结果已汇总，方便评估整体兑现表现。",
-            color=EMBED_COLOR_GOOD,
+            color=EMBED_COLOR_GOOD if total_pnl >= 0 else EMBED_COLOR_ERROR,
             fields=fields,
         )
         await self._post_payload(payload)
@@ -622,6 +632,18 @@ class DiscordNotifier:
         previous, current = payload.split("->", 1)
         return previous or None, current or None
 
+    def _resolve_symbol_from_signal(self, signal: str) -> str:
+        del signal
+        return "未知"
+
+    def _display_strategy_title(self, strategy: str | None) -> str:
+        normalized = str(strategy or "").strip().lower()
+        if normalized == "grid":
+            return "Grid"
+        if normalized == "cta":
+            return "CTA"
+        return str(strategy or "未知策略")
+
     def _display_strategy_name(self, strategy: str | None) -> str:
         normalized = str(strategy or "").strip().lower()
         if normalized == "grid":
@@ -666,8 +688,8 @@ class NullNotifier:
         logger.debug("Trade notification skipped: %s %s %s %s %s", side, price, size, strategy, signal)
         return False
 
-    def notify_profit(self, pnl: float, roi: float, balance: float) -> bool:
-        logger.debug("Profit notification skipped: %s %s %s", pnl, roi, balance)
+    def notify_profit(self, pnl: float, roi: float, balance: float, **kwargs) -> bool:
+        logger.debug("Profit notification skipped: %s %s %s %s", pnl, roi, balance, kwargs)
         return False
 
     def notify_market_shift(self, old_state: str | None, new_state: str, reason: str) -> bool:
