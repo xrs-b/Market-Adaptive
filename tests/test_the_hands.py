@@ -209,7 +209,7 @@ class TheHandsTests(unittest.TestCase):
             higher_timeframe="1h",
             atr_trailing_multiplier=1.0,
             stop_loss_atr=2.0,
-            first_take_profit_size=0.5,
+            first_take_profit_size=0.25,
             second_take_profit_size=0.25,
         )
         self.grid_config = GridConfig(
@@ -458,7 +458,7 @@ class TheHandsTests(unittest.TestCase):
             higher_timeframe="1h",
             atr_trailing_multiplier=1.0,
             stop_loss_atr=2.0,
-            first_take_profit_size=0.5,
+            first_take_profit_size=0.25,
             second_take_profit_size=0.25,
             obv_zscore_threshold=999.0,
         )
@@ -813,7 +813,7 @@ class TheHandsTests(unittest.TestCase):
         self.assertEqual(second_result.action, "cta:take_profit_2pct")
         self.assertEqual(self.client.market_orders[1]["side"], "sell")
         self.assertTrue(self.client.market_orders[1]["reduce_only"])
-        self.assertAlmostEqual(self.client.market_orders[1]["amount"], 71.25)
+        self.assertAlmostEqual(self.client.market_orders[1]["amount"], 35.625)
 
         self._load_bullish_signal(lower_last_close=106.0)
         third_result = robot.run()
@@ -825,7 +825,7 @@ class TheHandsTests(unittest.TestCase):
         self._load_pullback_after_rally(latest_close=103.0)
         fourth_result = robot.run()
         self.assertEqual(fourth_result.action, "cta:atr_stop_all_out")
-        self.assertAlmostEqual(self.client.market_orders[3]["amount"], 35.625)
+        self.assertAlmostEqual(self.client.market_orders[3]["amount"], 71.25)
         self.assertIsNone(robot.position)
 
     def test_grid_robot_uses_neutral_price_band_and_dynamic_per_level_sizing(self) -> None:

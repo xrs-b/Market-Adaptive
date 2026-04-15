@@ -214,7 +214,7 @@ class CTAConfig:
     risk_percent_per_trade: float = 0.02
     boosted_risk_percent_per_trade: float = 0.03
     first_take_profit_pct: float = 0.02
-    first_take_profit_size: float = 0.50
+    first_take_profit_size: float = 0.25
     second_take_profit_pct: float = 0.05
     second_take_profit_size: float = 0.25
     minimum_expected_rr: float = 0.0
@@ -695,7 +695,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         risk_percent_per_trade=cta_base_risk_percent,
         boosted_risk_percent_per_trade=cta_boosted_risk_percent,
         first_take_profit_pct=float(cta_payload.get("first_take_profit_pct", 0.02)),
-        first_take_profit_size=float(cta_payload.get("first_take_profit_size", 0.50)),
+        first_take_profit_size=float(cta_payload.get("first_take_profit_size", 0.25)),
         second_take_profit_pct=float(cta_payload.get("second_take_profit_pct", 0.05)),
         second_take_profit_size=float(cta_payload.get("second_take_profit_size", 0.25)),
         minimum_expected_rr=float(cta_payload.get("minimum_expected_rr", 0.0)),
