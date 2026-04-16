@@ -741,6 +741,15 @@ class CTARobot(BaseStrategyRobot):
             return 0.0
         return float(expected_reward / stop_distance)
 
+    def _resolve_minimum_expected_rr(self, signal: TrendSignal) -> float:
+        minimum_expected_rr = float(getattr(self.config, "minimum_expected_rr", 0.0))
+        entry_mode = str(signal.execution_entry_mode or "").lower()
+        if signal.relaxed_entry:
+            minimum_expected_rr = max(minimum_expected_rr, float(getattr(self.config, "relaxed_entry_minimum_expected_rr", minimum_expected_rr)))
+        if any(marker in entry_mode for marker in ("starter", "frontrun", "scale_in", "early_")):
+            minimum_expected_rr = max(minimum_expected_rr, float(getattr(self.config, "starter_entry_minimum_expected_rr", minimum_expected_rr)))
+        return minimum_expected_rr
+
     def _open_position(self, signal: TrendSignal) -> str:
         side = "buy" if signal.direction > 0 else "sell"
         amount = self._calculate_entry_amount(signal.price)
@@ -790,7 +799,7 @@ class CTARobot(BaseStrategyRobot):
         pre_entry_atr = self._normalized_atr(notional_price, signal.atr)
         pre_entry_stop_distance = pre_entry_atr * self._resolve_dynamic_stop_loss_multiplier(signal)
         expected_rr = self._expected_reward_risk_ratio(signal, reference_price=notional_price, stop_distance=pre_entry_stop_distance)
-        minimum_expected_rr = float(getattr(self.config, "minimum_expected_rr", 0.0))
+        minimum_expected_rr = self._resolve_minimum_expected_rr(signal)
         if expected_rr is not None and expected_rr < minimum_expected_rr:
             logger.info(
                 "CTA reward/risk blocked | symbol=%s side=%s expected_rr=%.2f threshold=%.2f price=%.2f stop_distance=%.2f",

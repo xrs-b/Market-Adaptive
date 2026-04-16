@@ -621,6 +621,41 @@ class TheHandsTests(unittest.TestCase):
         self.assertTrue(result.startswith("cta:open_long"))
         self.assertIsNotNone(robot.position)
 
+    def test_cta_relaxed_entry_uses_higher_reward_risk_floor(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+        robot.config.order_flow_enabled = False
+        signal = robot._build_trend_signal()
+        assert signal is not None
+        assert signal.volume_profile is not None
+        signal.relaxed_entry = True
+        signal.volume_profile.high_price = signal.price + 0.5
+        robot.config.minimum_expected_rr = 0.0
+        robot.config.relaxed_entry_minimum_expected_rr = 2.0
+
+        result = robot._open_position(signal)
+
+        self.assertEqual(result, "cta:reward_risk_blocked")
+
+    def test_cta_starter_entry_uses_stricter_reward_risk_floor(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+        robot.config.order_flow_enabled = False
+        signal = robot._build_trend_signal()
+        assert signal is not None
+        assert signal.volume_profile is not None
+        signal.execution_entry_mode = "starter_frontrun_limit"
+        signal.volume_profile.high_price = signal.price + 0.5
+        robot.config.minimum_expected_rr = 0.0
+        robot.config.relaxed_entry_minimum_expected_rr = 1.0
+        robot.config.starter_entry_minimum_expected_rr = 2.0
+
+        result = robot._open_position(signal)
+
+        self.assertEqual(result, "cta:reward_risk_blocked")
+
     def test_cta_robot_logs_trade_close_on_full_exit(self) -> None:
         self._insert_status("trend")
         self._load_bullish_signal(lower_last_close=100.0)
