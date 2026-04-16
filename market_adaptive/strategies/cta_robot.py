@@ -54,6 +54,7 @@ class TrendSignal:
     execution_frontrun_near_breakout: bool = False
     execution_memory_bars_ago: int | None = None
     execution_trigger_family: str = "waiting"
+    execution_trigger_group: str = "waiting"
     execution_trigger_reason: str = ""
     mtf_aligned: bool = False
     obv_bias: int = 0
@@ -94,6 +95,8 @@ class TrendSignal:
 class CTANearMissSample:
     symbol: str
     captured_at: float
+    execution_trigger_family: str
+    execution_trigger_group: str
     execution_trigger_reason: str
     execution_memory_active: bool
     execution_memory_bars_ago: int | None

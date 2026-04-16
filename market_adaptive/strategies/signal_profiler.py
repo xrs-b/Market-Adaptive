@@ -25,6 +25,8 @@ class CycleAuditRecord:
     local_time_iso: str
     server_local_skew_ms: int | None
     major_supertrend_direction: int
+    trigger_family: str
+    trigger_group: str
     swing_rsi: float
     execution_obv_zscore: float
     execution_obv_threshold: float
@@ -194,6 +196,8 @@ class SignalProfiler:
             local_time_iso=signal.local_time_iso,
             server_local_skew_ms=signal.server_local_skew_ms,
             major_supertrend_direction=signal.major_direction,
+            trigger_family=str(getattr(signal.execution_trigger, "family", "waiting")),
+            trigger_group=str(getattr(signal.execution_trigger, "group", "waiting")),
             swing_rsi=float(signal.swing_rsi),
             execution_obv_zscore=float(signal.execution_obv_zscore),
             execution_obv_threshold=float(signal.execution_obv_threshold if execution_obv_threshold is None else execution_obv_threshold),
