@@ -53,6 +53,7 @@ class TrendSignal:
     execution_latch_price: float | None = None
     execution_frontrun_near_breakout: bool = False
     execution_memory_bars_ago: int | None = None
+    execution_trigger_family: str = "waiting"
     execution_trigger_reason: str = ""
     mtf_aligned: bool = False
     obv_bias: int = 0
@@ -558,6 +559,7 @@ class CTARobot(BaseStrategyRobot):
             execution_latch_price=mtf_signal.execution_trigger.latch_low_price,
             execution_frontrun_near_breakout=mtf_signal.execution_trigger.frontrun_near_breakout,
             execution_memory_bars_ago=mtf_signal.execution_trigger.bullish_cross_bars_ago,
+            execution_trigger_family=str(getattr(mtf_signal.execution_trigger, "family", "waiting")),
             execution_trigger_reason=mtf_signal.execution_trigger.reason,
             mtf_aligned=mtf_signal.fully_aligned,
             obv_bias=obv_bias,

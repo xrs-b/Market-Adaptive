@@ -126,6 +126,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.execution_trigger.kdj_golden_cross)
         self.assertFalse(signal.execution_trigger.prior_high_break)
         self.assertFalse(signal.fully_aligned)
+        self.assertEqual(signal.execution_trigger.family, "waiting_execution_trigger_drift")
         self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger_drift")
 
     def test_engine_confirms_entry_when_execution_breaks_prior_high(self) -> None:
@@ -1049,6 +1050,7 @@ class MTFEngineTests(unittest.TestCase):
             starter_frontrun_impulse_bars=3,
             starter_frontrun_volume_window=12,
             starter_frontrun_volume_multiplier=1.1,
+            starter_frontrun_minimum_score=70.0,
             prefer_closed_execution_timeframe_candles=False,
         )
         engine = MultiTimeframeSignalEngine(self.client, config)
@@ -1067,6 +1069,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertTrue(signal.execution_trigger.frontrun_impulse_confirmed)
         self.assertTrue(signal.execution_trigger.frontrun_obv_confirmed)
         self.assertTrue(signal.execution_trigger.frontrun_ready)
+        self.assertEqual(signal.execution_trigger.family, "starter_frontrun")
         self.assertTrue(signal.fully_aligned)
         self.assertEqual(signal.execution_entry_mode, "starter_frontrun_limit")
         self.assertAlmostEqual(signal.entry_size_multiplier, 0.2)

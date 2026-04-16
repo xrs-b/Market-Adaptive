@@ -86,6 +86,7 @@ class ExecutionTriggerSnapshot:
     frontrun_obv_confirmed: bool = False
     frontrun_ready: bool = False
     state_label: str = "WAITING_SETUP"
+    family: str = "waiting"
     reason: str = ""
 
 
@@ -848,25 +849,39 @@ class MultiTimeframeSignalEngine:
             entry_size_multiplier = max(0.0, min(1.0, float(self.config.early_bullish_starter_fraction)))
 
         state_label = "WAITING_SETUP"
+        trigger_family = "waiting"
         if early_bearish:
+            trigger_family = "early_bearish"
             reason = "early_bearish: 1h supertrend bearish + price below 4h upper band + 4h upper band flattening"
         elif bearish_memory_active and prior_low_break and major_direction < 0 and bearish_ready:
+            trigger_family = "bearish_memory_breakdown"
             reason = f"Triggered via Bearish Memory Window: KDJ crossed {bearish_cross_bars_ago} bars ago + Price Breakdown NOW"
         elif bearish_retest_ready:
+            trigger_family = "bearish_retest"
             reason = f"major_bear_retest_ready: gap={short_frontrun_gap_ratio * 100:.3f}% + KDJ memory {bearish_cross_bars_ago} bars ago"
         elif early_bullish:
+            trigger_family = "early_bullish"
             reason = "early_bullish: 1h supertrend bullish + price above 4h lower band + 4h lower band slope flattening"
         elif bullish_memory_active and prior_high_break:
+            trigger_family = "bullish_memory_breakout"
             reason = f"Triggered via Memory Window: KDJ crossed {bullish_cross_bars_ago} bars ago + Price Breakout NOW"
+        elif starter_short_frontrun_ready:
+            trigger_family = "starter_short_frontrun"
+            reason = f"starter_short_frontrun: gap={short_frontrun_gap_ratio * 100:.3f}% + 1m {int(getattr(self.config, 'starter_frontrun_impulse_bars', 3))} bearish bars + OBV confirmed"
         elif starter_frontrun_ready:
+            trigger_family = "starter_frontrun"
             reason = f"starter_frontrun: gap={frontrun_gap_ratio * 100:.3f}% + 1m {int(getattr(self.config, 'starter_frontrun_impulse_bars', 3))} bullish bars + OBV confirmed"
         elif trend_continuation_near_breakout_ready:
+            trigger_family = "trend_continuation_near_breakout"
             reason = f"trend_continuation_near_breakout_ready: bullish_score={bullish_score:.0f} + gap={frontrun_gap_ratio * 100:.3f}% + obv_support={'confirmed' if execution_obv_ready else 'positive_zscore'}"
         elif high_confidence_price_override:
+            trigger_family = "price_led_override"
             reason = f"price_led_override: bullish_score={bullish_score:.0f} + near_breakout_gap={frontrun_gap_ratio * 100:.3f}%"
         elif medium_confidence_latch_breakout_ready:
+            trigger_family = "soft_latch_breakout"
             reason = f"soft_latch_breakout: bullish_score={bullish_score:.0f} + latch_low={latch_low_price:.4f} + breakout confirmed"
         elif major_bull_retest_ready:
+            trigger_family = "major_bull_retest"
             if bullish_urgency_active and not bullish_memory_active:
                 if prior_high_break:
                     reason = f"major_bull_retest_ready: decaying urgency window step={bullish_urgency_decay_step}/{max(1, int(getattr(self.config, 'kdj_urgency_decay_bars', 0)))} + breakout reclaim after KDJ memory expiry ({bullish_cross_bars_ago} bars ago)"
@@ -875,15 +890,19 @@ class MultiTimeframeSignalEngine:
             else:
                 reason = f"major_bull_retest_ready: gap={frontrun_gap_ratio * 100:.3f}% + KDJ memory {bullish_cross_bars_ago} bars ago"
         elif major_bull_impulse_reclaim_ready:
+            trigger_family = "major_bull_impulse_reclaim"
             if prior_high_break:
                 reason = "major_bull_impulse_reclaim_ready: breakout reclaimed with 15m impulse despite expired KDJ memory"
             else:
                 reason = f"major_bull_impulse_reclaim_ready: gap={frontrun_gap_ratio * 100:.3f}% + 15m impulse + OBV confirmed"
         elif rail_momentum_ready:
+            trigger_family = "rail_momentum"
             reason = "rail_momentum_ready: near major rail + 15m momentum confirmation"
         elif weak_bull_bias and bullish_memory_active:
+            trigger_family = "weak_bull_scale_in"
             reason = f"Weak bull bias active: KDJ crossed {bullish_cross_bars_ago} bars ago + scale-in allowed before breakout"
         elif bullish_magnetism_ready:
+            trigger_family = "magnetism"
             reason = f"磁吸力预判：距离轨道 {magnetism_distance_pct:.3f}%，OBV 已确认"
         else:
             if bullish_ready and (high_confidence_price_override or bullish_latch_active or kdj_golden_cross or frontrun_near_breakout):
@@ -901,6 +920,7 @@ class MultiTimeframeSignalEngine:
                 frontrun_gap_ratio=frontrun_gap_ratio,
                 execution_trigger_proximity_budget_ratio=execution_trigger_proximity_budget_ratio,
             )
+            trigger_family = reason
 
         execution_trigger = ExecutionTriggerSnapshot(
             kdj_golden_cross=kdj_golden_cross,
@@ -925,6 +945,7 @@ class MultiTimeframeSignalEngine:
             frontrun_obv_confirmed=execution_obv_ready,
             frontrun_ready=bool(starter_frontrun_ready or starter_short_frontrun_ready),
             state_label=state_label,
+            family=trigger_family,
             reason=reason,
         )
         bullish_fully_aligned = early_bullish or starter_frontrun_ready or high_confidence_price_override or medium_confidence_latch_breakout_ready or trend_continuation_near_breakout_ready or major_bull_retest_ready or major_bull_impulse_reclaim_ready or (
