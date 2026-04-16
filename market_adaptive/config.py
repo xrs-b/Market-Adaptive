@@ -218,6 +218,8 @@ class CTAConfig:
     second_take_profit_pct: float = 0.05
     second_take_profit_size: float = 0.25
     minimum_expected_rr: float = 0.0
+    relaxed_entry_minimum_expected_rr: float = 0.0
+    starter_entry_minimum_expected_rr: float = 0.0
     volume_profile_lookback_hours: int = 24
     volume_profile_bin_count: int = 24
     volume_profile_value_area_pct: float = 0.70
@@ -332,6 +334,8 @@ class CTAConfig:
         self.signal_profiler_summary_interval = max(1, int(self.signal_profiler_summary_interval))
         self.signal_profiler_min_blocking_count = max(1, int(self.signal_profiler_min_blocking_count))
         self.minimum_expected_rr = max(0.0, float(self.minimum_expected_rr))
+        self.relaxed_entry_minimum_expected_rr = max(self.minimum_expected_rr, float(self.relaxed_entry_minimum_expected_rr))
+        self.starter_entry_minimum_expected_rr = max(self.relaxed_entry_minimum_expected_rr, float(self.starter_entry_minimum_expected_rr))
         self.signal_flip_reduce_ratio = min(1.0, max(0.0, float(self.signal_flip_reduce_ratio)))
         self.cta_assist_trim_ratio = min(1.0, max(0.0, float(self.cta_assist_trim_ratio)))
 
@@ -701,6 +705,8 @@ def load_config(config_path: str | Path) -> AppConfig:
         second_take_profit_pct=float(cta_payload.get("second_take_profit_pct", 0.05)),
         second_take_profit_size=float(cta_payload.get("second_take_profit_size", 0.25)),
         minimum_expected_rr=float(cta_payload.get("minimum_expected_rr", 0.0)),
+        relaxed_entry_minimum_expected_rr=float(cta_payload.get("relaxed_entry_minimum_expected_rr", 0.0)),
+        starter_entry_minimum_expected_rr=float(cta_payload.get("starter_entry_minimum_expected_rr", 0.0)),
         volume_profile_lookback_hours=int(cta_payload.get("volume_profile_lookback_hours", 24)),
         volume_profile_bin_count=int(cta_payload.get("volume_profile_bin_count", 24)),
         volume_profile_value_area_pct=float(cta_payload.get("volume_profile_value_area_pct", 0.70)),
