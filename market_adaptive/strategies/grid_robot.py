@@ -288,8 +288,9 @@ class GridRobot(BaseStrategyRobot):
 
         if self._halted:
             return "grid:halted"
-        if not self._oracle_allows_dynamic_grid():
-            return "grid:adx_trend_not_ready"
+        dynamic_grid_block_reason = self._resolve_dynamic_grid_block_reason()
+        if dynamic_grid_block_reason is not None:
+            return dynamic_grid_block_reason
         if self._flash_crash_active(now):
             self.client.cancel_all_orders(self.symbol)
             self._publish_grid_risk(None)
@@ -1018,25 +1019,40 @@ class GridRobot(BaseStrategyRobot):
         return missing, unexpected
 
     def _oracle_allows_dynamic_grid(self) -> bool:
+        return self._resolve_dynamic_grid_block_reason() is None
+
+    def _resolve_dynamic_grid_block_reason(self) -> str | None:
         adx_guard_allows = True
+        higher_adx_trend = None
         if self.market_oracle is not None and hasattr(self.market_oracle, "current_higher_adx_trend"):
             try:
-                adx_guard_allows = self.market_oracle.current_higher_adx_trend() in {"flat", "falling"}
+                higher_adx_trend = str(self.market_oracle.current_higher_adx_trend())
+                adx_guard_allows = higher_adx_trend in {"flat", "falling"}
             except Exception:
                 adx_guard_allows = True
         if not adx_guard_allows:
-            return False
-        return self._higher_timeframe_trend_guard_allows_grid()
+            return f"grid:oracle_adx_trend_blocked|higher_adx_trend={higher_adx_trend}"
+        return self._higher_timeframe_trend_guard_block_reason()
 
     def _higher_timeframe_trend_guard_allows_grid(self) -> bool:
+        return self._higher_timeframe_trend_guard_block_reason() is None
+
+    def _higher_timeframe_trend_guard_block_reason(self) -> str | None:
         if not bool(getattr(self.config, "higher_timeframe_trend_guard_enabled", True)):
-            return True
+            return None
         state = self._higher_timeframe_trend_state()
         if state is None:
-            return True
-        _, distance_atr_ratio = state
+            return None
+        direction, distance_atr_ratio = state
         threshold = float(getattr(self.config, "higher_timeframe_trend_distance_atr_threshold", 0.8))
-        return distance_atr_ratio <= threshold
+        if distance_atr_ratio <= threshold:
+            return None
+        return (
+            "grid:higher_timeframe_trend_guard_blocked"
+            f"|direction={direction}"
+            f"|distance_atr_ratio={distance_atr_ratio:.4f}"
+            f"|threshold={threshold:.4f}"
+        )
 
     def _higher_timeframe_trend_state(self) -> tuple[int, float] | None:
         timeframe = str(getattr(self.config, "higher_timeframe_trend_timeframe", "4h") or "4h")

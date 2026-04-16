@@ -2132,7 +2132,22 @@ class TheHandsTests(unittest.TestCase):
 
         result = robot.run()
 
-        self.assertEqual(result.action, "grid:adx_trend_not_ready")
+        self.assertTrue(result.action.startswith("grid:higher_timeframe_trend_guard_blocked"))
+        self.assertEqual(len(self.client.limit_orders), 0)
+
+    def test_grid_robot_oracle_adx_label_block_returns_specific_reason(self) -> None:
+        self._insert_status("sideways")
+        self._load_sideways_grid_data(center=100.0)
+
+        class OracleStub:
+            def current_higher_adx_trend(self):
+                return "rising"
+
+        robot = GridRobot(self.client, self.database, self.grid_config, self.execution, market_oracle=OracleStub(), use_dynamic_range=False)
+
+        result = robot.run()
+
+        self.assertTrue(result.action.startswith("grid:oracle_adx_trend_blocked|higher_adx_trend=rising"))
         self.assertEqual(len(self.client.limit_orders), 0)
 
     def test_grid_robot_trend_defense_reduces_exposure_on_confirmed_breakout(self) -> None:
