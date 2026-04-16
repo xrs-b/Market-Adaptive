@@ -47,6 +47,7 @@ class TrendSignal:
     execution_entry_mode: str = "breakout_confirmed"
     execution_golden_cross: bool = False
     execution_breakout: bool = False
+    execution_breakdown: bool = False
     execution_memory_active: bool = False
     execution_latch_active: bool = False
     execution_latch_price: float | None = None
@@ -551,6 +552,7 @@ class CTARobot(BaseStrategyRobot):
             execution_entry_mode=mtf_signal.execution_entry_mode,
             execution_golden_cross=mtf_signal.execution_trigger.kdj_golden_cross,
             execution_breakout=mtf_signal.execution_trigger.prior_high_break,
+            execution_breakdown=mtf_signal.execution_trigger.prior_low_break,
             execution_memory_active=mtf_signal.execution_trigger.bullish_memory_active,
             execution_latch_active=mtf_signal.execution_trigger.bullish_latch_active,
             execution_latch_price=mtf_signal.execution_trigger.latch_low_price,
@@ -750,6 +752,16 @@ class CTARobot(BaseStrategyRobot):
             minimum_expected_rr = max(minimum_expected_rr, float(getattr(self.config, "starter_entry_minimum_expected_rr", minimum_expected_rr)))
         return minimum_expected_rr
 
+    def _resolve_entry_location_block_reason(self, signal: TrendSignal) -> str | None:
+        entry_mode = str(signal.execution_entry_mode or "").lower()
+        structure_confirmed = bool(signal.execution_breakout) if signal.direction > 0 else bool(signal.execution_breakdown)
+        near_breakout = bool(structure_confirmed or signal.execution_frontrun_near_breakout)
+        if signal.relaxed_entry and bool(getattr(self.config, "relaxed_entry_require_near_breakout", True)) and not near_breakout:
+            return "relaxed_entry_chasing"
+        if any(marker in entry_mode for marker in ("starter", "frontrun", "scale_in", "early_")) and bool(getattr(self.config, "starter_entry_require_near_breakout", True)) and not near_breakout:
+            return "starter_entry_chasing"
+        return None
+
     def _open_position(self, signal: TrendSignal) -> str:
         side = "buy" if signal.direction > 0 else "sell"
         amount = self._calculate_entry_amount(signal.price)
@@ -795,6 +807,21 @@ class CTARobot(BaseStrategyRobot):
             if not allowed:
                 self._publish_risk_profile(None)
                 return "cta:risk_blocked"
+
+        entry_location_block_reason = self._resolve_entry_location_block_reason(signal)
+        if entry_location_block_reason is not None:
+            logger.info(
+                "CTA entry location blocked | symbol=%s side=%s mode=%s reason=%s breakout=%s breakdown=%s near_breakout=%s",
+                self.symbol,
+                side,
+                signal.execution_entry_mode,
+                entry_location_block_reason,
+                signal.execution_breakout,
+                signal.execution_breakdown,
+                signal.execution_frontrun_near_breakout,
+            )
+            self._publish_risk_profile(None)
+            return "cta:entry_location_blocked"
 
         pre_entry_atr = self._normalized_atr(notional_price, signal.atr)
         pre_entry_stop_distance = pre_entry_atr * self._resolve_dynamic_stop_loss_multiplier(signal)

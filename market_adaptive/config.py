@@ -220,6 +220,8 @@ class CTAConfig:
     minimum_expected_rr: float = 0.0
     relaxed_entry_minimum_expected_rr: float = 0.0
     starter_entry_minimum_expected_rr: float = 0.0
+    relaxed_entry_require_near_breakout: bool = True
+    starter_entry_require_near_breakout: bool = True
     early_entry_direction_confirmation_bars: int = 2
     volume_profile_lookback_hours: int = 24
     volume_profile_bin_count: int = 24
@@ -709,6 +711,8 @@ def load_config(config_path: str | Path) -> AppConfig:
         minimum_expected_rr=float(cta_payload.get("minimum_expected_rr", 0.0)),
         relaxed_entry_minimum_expected_rr=float(cta_payload.get("relaxed_entry_minimum_expected_rr", 0.0)),
         starter_entry_minimum_expected_rr=float(cta_payload.get("starter_entry_minimum_expected_rr", 0.0)),
+        relaxed_entry_require_near_breakout=bool(cta_payload.get("relaxed_entry_require_near_breakout", True)),
+        starter_entry_require_near_breakout=bool(cta_payload.get("starter_entry_require_near_breakout", True)),
         early_entry_direction_confirmation_bars=int(cta_payload.get("early_entry_direction_confirmation_bars", 2)),
         volume_profile_lookback_hours=int(cta_payload.get("volume_profile_lookback_hours", 24)),
         volume_profile_bin_count=int(cta_payload.get("volume_profile_bin_count", 24)),

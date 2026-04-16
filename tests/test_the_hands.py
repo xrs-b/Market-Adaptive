@@ -693,6 +693,36 @@ class TheHandsTests(unittest.TestCase):
 
         self.assertEqual(result, "cta:reward_risk_blocked")
 
+    def test_cta_relaxed_entry_blocks_when_not_near_breakout(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+        robot.config.order_flow_enabled = False
+        signal = robot._build_trend_signal()
+        assert signal is not None
+        signal.relaxed_entry = True
+        signal.execution_breakout = False
+        signal.execution_frontrun_near_breakout = False
+
+        result = robot._open_position(signal)
+
+        self.assertEqual(result, "cta:entry_location_blocked")
+
+    def test_cta_starter_entry_blocks_when_not_near_breakout(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+        robot.config.order_flow_enabled = False
+        signal = robot._build_trend_signal()
+        assert signal is not None
+        signal.execution_entry_mode = "starter_frontrun_limit"
+        signal.execution_breakout = False
+        signal.execution_frontrun_near_breakout = False
+
+        result = robot._open_position(signal)
+
+        self.assertEqual(result, "cta:entry_location_blocked")
+
     def test_cta_robot_logs_trade_close_on_full_exit(self) -> None:
         self._insert_status("trend")
         self._load_bullish_signal(lower_last_close=100.0)
