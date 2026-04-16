@@ -381,7 +381,14 @@ class MultiTimeframeSignalEngine:
             return bonus
         return 0.0
 
-    def _resolve_early_bearish(self, *, major_direction: int, swing_direction: int, swing_frame: pd.DataFrame, major_supertrend: pd.DataFrame, swing_rsi: pd.Series, weak_bear_bias: bool, bearish_memory_active: bool, kdj_dead_cross: bool) -> bool:
+    def _has_direction_confirmation(self, direction_series: pd.Series, expected_direction: int) -> bool:
+        confirmation_bars = max(1, int(getattr(self.config, "early_entry_direction_confirmation_bars", 2)))
+        if len(direction_series) < confirmation_bars:
+            return False
+        recent_directions = direction_series.tail(confirmation_bars)
+        return bool((recent_directions == expected_direction).all())
+
+    def _resolve_early_bearish(self, *, major_direction: int, swing_direction: int, swing_frame: pd.DataFrame, major_supertrend: pd.DataFrame, swing_rsi: pd.Series, weak_bear_bias: bool, bearish_memory_active: bool, kdj_dead_cross: bool, swing_supertrend: pd.DataFrame) -> bool:
         if major_direction < 0 or len(swing_frame) < 1 or len(major_supertrend) < 2 or len(swing_rsi) < 2:
             return False
         current_price = float(swing_frame["close"].iloc[-1])
@@ -397,9 +404,16 @@ class MultiTimeframeSignalEngine:
         rsi_slope = current_rsi - previous_rsi
         rsi_buffer = max(0.0, 0.5 * abs(rsi_slope))
         bearish_rsi_structure = current_rsi <= (current_rsi_sma + rsi_buffer) and rsi_slope < 0.0
+        swing_direction_confirmed = self._has_direction_confirmation(swing_supertrend["direction"], -1)
         swing_rollover_ready = swing_direction < 0 or bearish_rsi_structure
         bearish_trigger_support = bearish_memory_active or kdj_dead_cross or weak_bear_bias
-        return current_price < current_upper_band and upper_band_slope <= maximum_slope and swing_rollover_ready and bearish_trigger_support
+        return (
+            current_price < current_upper_band
+            and upper_band_slope <= maximum_slope
+            and swing_rollover_ready
+            and swing_direction_confirmed
+            and bearish_trigger_support
+        )
 
     def _resolve_early_bearish_score_bonus(self, *, early_bearish: bool, swing_rsi: pd.Series) -> float:
         if not early_bearish:
@@ -443,7 +457,7 @@ class MultiTimeframeSignalEngine:
             multiplier=self.config.supertrend_multiplier,
         )
         swing_direction = int(swing_supertrend["direction"].iloc[-1])
-        if swing_direction <= 0:
+        if swing_direction <= 0 or not self._has_direction_confirmation(swing_supertrend["direction"], 1):
             return False
 
         current_price = float(swing_frame["close"].iloc[-1])
@@ -569,6 +583,7 @@ class MultiTimeframeSignalEngine:
             weak_bear_bias=weak_bear_bias,
             bearish_memory_active=bearish_memory_active,
             kdj_dead_cross=kdj_dead_cross,
+            swing_supertrend=swing_supertrend,
         )
         bullish_latch_active, latch_low_price, bullish_latch_bars_ago = self._resolve_directional_latch(
             cross_mask=bullish_cross_mask,
@@ -719,6 +734,7 @@ class MultiTimeframeSignalEngine:
             and execution_obv_ready
             and frontrun_near_breakout
             and frontrun_impulse_confirmed
+            and self._has_direction_confirmation(swing_supertrend["direction"], 1)
             and (bullish_memory_active or kdj_golden_cross)
         )
         high_confidence_price_override = bool(bullish_score >= 75.0 and frontrun_near_breakout and not kdj_dead_cross)
