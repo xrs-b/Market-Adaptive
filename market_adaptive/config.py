@@ -504,12 +504,32 @@ class AppConfig:
     config_path: Path
 
 
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_unique_mapping(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode, deep: bool = False):
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise ValueError(f"Duplicate config key detected: {key}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
 def _read_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
 
     with path.open("r", encoding="utf-8") as handle:
-        payload = yaml.safe_load(handle) or {}
+        payload = yaml.load(handle, Loader=_UniqueKeySafeLoader) or {}
 
     if not isinstance(payload, dict):
         raise ValueError("Root config payload must be a mapping")

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from market_adaptive.config import load_config
+from market_adaptive.config import _read_yaml, load_config
 from market_adaptive.db import DatabaseInitializer
 
 
@@ -87,6 +87,17 @@ class MarketAdaptiveBootstrapTests(unittest.TestCase):
         self.assertEqual(config.risk_control.grid_deviation_reduce_ratio, 0.25)
         self.assertEqual(config.risk_control.grid_liquidation_warning_ratio, 0.10)
         self.assertEqual(config.risk_control.grid_reduction_step_pct, 0.25)
+
+    def test_read_yaml_rejects_duplicate_top_level_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "duplicate.yaml"
+            config_path.write_text(
+                "cta:\n  margin_fraction_per_trade: 0.04\ncta:\n  margin_fraction_per_trade: 0.05\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "Duplicate config key detected: cta"):
+                _read_yaml(config_path)
 
     def test_database_initializer_creates_market_status_table(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
