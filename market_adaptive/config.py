@@ -220,6 +220,8 @@ class CTAConfig:
     minimum_expected_rr: float = 0.0
     relaxed_entry_minimum_expected_rr: float = 0.0
     starter_entry_minimum_expected_rr: float = 0.0
+    early_entry_minimum_score: float = 70.0
+    starter_frontrun_minimum_score: float = 80.0
     relaxed_entry_require_near_breakout: bool = True
     starter_entry_require_near_breakout: bool = True
     early_entry_direction_confirmation_bars: int = 2
@@ -339,6 +341,8 @@ class CTAConfig:
         self.minimum_expected_rr = max(0.0, float(self.minimum_expected_rr))
         self.relaxed_entry_minimum_expected_rr = max(self.minimum_expected_rr, float(self.relaxed_entry_minimum_expected_rr))
         self.starter_entry_minimum_expected_rr = max(self.relaxed_entry_minimum_expected_rr, float(self.starter_entry_minimum_expected_rr))
+        self.early_entry_minimum_score = max(0.0, float(self.early_entry_minimum_score))
+        self.starter_frontrun_minimum_score = max(self.early_entry_minimum_score, float(self.starter_frontrun_minimum_score))
         self.early_entry_direction_confirmation_bars = max(1, int(self.early_entry_direction_confirmation_bars))
         self.signal_flip_reduce_ratio = min(1.0, max(0.0, float(self.signal_flip_reduce_ratio)))
         self.cta_assist_trim_ratio = min(1.0, max(0.0, float(self.cta_assist_trim_ratio)))
@@ -711,6 +715,8 @@ def load_config(config_path: str | Path) -> AppConfig:
         minimum_expected_rr=float(cta_payload.get("minimum_expected_rr", 0.0)),
         relaxed_entry_minimum_expected_rr=float(cta_payload.get("relaxed_entry_minimum_expected_rr", 0.0)),
         starter_entry_minimum_expected_rr=float(cta_payload.get("starter_entry_minimum_expected_rr", 0.0)),
+        early_entry_minimum_score=float(cta_payload.get("early_entry_minimum_score", 70.0)),
+        starter_frontrun_minimum_score=float(cta_payload.get("starter_frontrun_minimum_score", 80.0)),
         relaxed_entry_require_near_breakout=bool(cta_payload.get("relaxed_entry_require_near_breakout", True)),
         starter_entry_require_near_breakout=bool(cta_payload.get("starter_entry_require_near_breakout", True)),
         early_entry_direction_confirmation_bars=int(cta_payload.get("early_entry_direction_confirmation_bars", 2)),

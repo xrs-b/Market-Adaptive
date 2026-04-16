@@ -530,6 +530,7 @@ class TheHandsTests(unittest.TestCase):
         self._set_ohlcv("1h", swing_closes, 3_600_000)
         self._set_ohlcv("15m", execution_closes, 900_000)
         robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+        self.cta_config.early_entry_minimum_score = 0.0
         mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=10)
 
         import pandas as pd
@@ -604,6 +605,52 @@ class TheHandsTests(unittest.TestCase):
             patch(
                 "market_adaptive.strategies.mtf_engine.compute_supertrend",
                 side_effect=[major_supertrend, unstable_swing_supertrend, unstable_swing_supertrend],
+            ),
+        ):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertFalse(signal.early_bullish)
+        self.assertNotEqual(signal.execution_entry_mode, "early_bullish_starter_limit")
+
+    def test_cta_robot_blocks_early_bullish_when_score_is_below_floor(self) -> None:
+        self._insert_status("trend")
+        self.cta_config.early_entry_minimum_score = 90.0
+        major_closes = [200 - 0.5 * index for index in range(60)]
+        swing_closes = [100.0 + 0.2 * index for index in range(60)]
+        execution_closes = [100.0] * 59 + [106.0]
+        self._set_ohlcv("4h", major_closes, 14_400_000)
+        self._set_ohlcv("1h", swing_closes, 3_600_000)
+        self._set_ohlcv("15m", execution_closes, 900_000)
+        engine = MultiTimeframeSignalEngine(self.client, self.cta_config)
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=10)
+
+        import pandas as pd
+        major_supertrend = pd.DataFrame(
+            {
+                "direction": [-1] * 60,
+                "lower_band": [100.0] * 58 + [104.0, 104.3],
+                "upper_band": [110.0] * 60,
+                "supertrend": [110.0] * 60,
+                "atr": [2.0] * 60,
+            }
+        )
+        swing_supertrend = pd.DataFrame(
+            {
+                "direction": [-1] * 58 + [1, 1],
+                "lower_band": [99.0] * 60,
+                "upper_band": [109.0] * 60,
+                "supertrend": [99.0] * 60,
+                "atr": [1.0] * 60,
+            }
+        )
+
+        with (
+            patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj),
+            patch(
+                "market_adaptive.strategies.mtf_engine.compute_supertrend",
+                side_effect=[major_supertrend, swing_supertrend, swing_supertrend],
             ),
         ):
             signal = engine.build_signal()
@@ -2215,9 +2262,32 @@ class TheHandsTests(unittest.TestCase):
         self.assertFalse(signal.execution_trigger.frontrun_ready)
         self.assertNotEqual(signal.execution_entry_mode, "starter_frontrun_limit")
 
+    def test_cta_robot_blocks_starter_frontrun_when_score_is_below_floor(self) -> None:
+        self.cta_config.starter_frontrun_minimum_score = 90.0
+        self._set_bullish_higher_timeframes()
+        execution_closes = [90 + index * 0.25 for index in range(54)] + [103.8, 104.3, 104.9, 105.4, 105.8, 105.99]
+        base = 1_700_000_000_000
+        payload = []
+        volumes = [100.0 + index for index in range(54)] + [160.0, 170.0, 180.0, 220.0, 235.0, 250.0]
+        for index, close in enumerate(execution_closes):
+            open_price = close - 0.35 if index >= len(execution_closes) - 3 else close - 0.2
+            payload.append([base + index * 900_000, open_price, close + 0.4, open_price - 0.3, close, volumes[index]])
+        self.client.ohlcv_by_timeframe["15m"] = payload
+        engine = MultiTimeframeSignalEngine(self.client, self.cta_config)
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=2)
+
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertFalse(signal.execution_trigger.frontrun_ready)
+        self.assertNotEqual(signal.execution_entry_mode, "starter_frontrun_limit")
+
     def test_cta_robot_uses_limit_entry_for_starter_frontrun_path_with_starter_size(self) -> None:
         self._insert_status("trend")
         self.cta_config.starter_frontrun_fraction = 0.2
+        self.cta_config.starter_frontrun_minimum_score = 70.0
         self._set_bullish_higher_timeframes()
         execution_closes = [90 + index * 0.25 for index in range(54)] + [103.8, 104.3, 104.9, 105.4, 105.8, 105.99]
         base = 1_700_000_000_000

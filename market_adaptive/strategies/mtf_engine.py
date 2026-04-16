@@ -723,6 +723,10 @@ class MultiTimeframeSignalEngine:
         )
         bullish_ready = bullish_score >= bullish_threshold
         bearish_ready = bearish_score >= bearish_threshold
+        early_entry_minimum_score = float(getattr(self.config, "early_entry_minimum_score", 70.0))
+        starter_frontrun_minimum_score = float(getattr(self.config, "starter_frontrun_minimum_score", early_entry_minimum_score))
+        early_bullish = bool(early_bullish and bullish_score >= early_entry_minimum_score)
+        early_bearish = bool(early_bearish and bearish_score >= early_entry_minimum_score)
 
         execution_obv_ready = execution_obv_confirmation.buy_confirmed(
             zscore_threshold=float(self.config.obv_zscore_threshold),
@@ -731,6 +735,7 @@ class MultiTimeframeSignalEngine:
         starter_frontrun_ready = bool(
             getattr(self.config, "starter_frontrun_enabled", True)
             and bullish_ready
+            and bullish_score >= starter_frontrun_minimum_score
             and execution_obv_ready
             and frontrun_near_breakout
             and frontrun_impulse_confirmed
