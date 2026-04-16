@@ -1070,6 +1070,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertTrue(signal.execution_trigger.frontrun_obv_confirmed)
         self.assertTrue(signal.execution_trigger.frontrun_ready)
         self.assertEqual(signal.execution_trigger.family, "starter_frontrun")
+        self.assertEqual(signal.execution_trigger.group, "momentum")
         self.assertTrue(signal.fully_aligned)
         self.assertEqual(signal.execution_entry_mode, "starter_frontrun_limit")
         self.assertAlmostEqual(signal.entry_size_multiplier, 0.2)

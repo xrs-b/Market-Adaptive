@@ -21,6 +21,27 @@ from market_adaptive.timeframe_utils import maybe_use_closed_candles
 logger = logging.getLogger(__name__)
 
 
+def classify_trigger_group(family: str) -> str:
+    family_value = str(family or "waiting")
+    if family_value.startswith("waiting_") or family_value == "waiting":
+        return "waiting"
+    if family_value.startswith("early_"):
+        return "early"
+    if family_value in {"bullish_memory_breakout", "bearish_memory_breakdown"}:
+        return "confirmed"
+    if family_value in {"bearish_retest", "major_bull_retest"}:
+        return "retest"
+    if family_value in {"trend_continuation_near_breakout", "major_bull_impulse_reclaim"}:
+        return "continuation"
+    if family_value in {"price_led_override", "soft_latch_breakout"}:
+        return "override"
+    if family_value in {"weak_bull_scale_in", "weak_bear_scale_in"}:
+        return "scale_in"
+    if family_value in {"starter_frontrun", "starter_short_frontrun", "rail_momentum", "magnetism"}:
+        return "momentum"
+    return "other"
+
+
 def resolve_execution_trigger_proximity_budget_ratio(*, starter_frontrun_breakout_buffer_ratio: float, bullish_memory_retest_breakout_buffer_ratio: float) -> float:
     return max(
         float(starter_frontrun_breakout_buffer_ratio),
@@ -87,6 +108,7 @@ class ExecutionTriggerSnapshot:
     frontrun_ready: bool = False
     state_label: str = "WAITING_SETUP"
     family: str = "waiting"
+    group: str = "waiting"
     reason: str = ""
 
 
@@ -946,6 +968,7 @@ class MultiTimeframeSignalEngine:
             frontrun_ready=bool(starter_frontrun_ready or starter_short_frontrun_ready),
             state_label=state_label,
             family=trigger_family,
+            group=classify_trigger_group(trigger_family),
             reason=reason,
         )
         bullish_fully_aligned = early_bullish or starter_frontrun_ready or high_confidence_price_override or medium_confidence_latch_breakout_ready or trend_continuation_near_breakout_ready or major_bull_retest_ready or major_bull_impulse_reclaim_ready or (
