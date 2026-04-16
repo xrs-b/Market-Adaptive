@@ -134,6 +134,10 @@ cta:
   first_take_profit_size: 0.50
   second_take_profit_pct: 0.05
   second_take_profit_size: 0.25
+  minimum_expected_rr: 0.0
+  relaxed_entry_minimum_expected_rr: 0.0
+  starter_entry_minimum_expected_rr: 0.0
+  early_entry_direction_confirmation_bars: 2
   volume_profile_lookback_hours: 24
   volume_profile_bin_count: 24
   volume_profile_value_area_pct: 0.70
