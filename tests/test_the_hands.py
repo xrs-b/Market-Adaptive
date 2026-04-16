@@ -11,6 +11,7 @@ import pandas as pd
 from market_adaptive.config import CTAConfig, ExecutionConfig, GridConfig, SentimentConfig
 from market_adaptive.coordination import StrategyRuntimeContext
 from market_adaptive.db import DatabaseInitializer, MarketStatusRecord
+from market_adaptive.indicators import OBVConfirmationSnapshot
 from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies import CTARobot, GridRobot, HandsCoordinator
 from market_adaptive.strategies.cta_robot import ManagedPosition, TrendSignal
@@ -2311,6 +2312,119 @@ class TheHandsTests(unittest.TestCase):
             self.client.limit_orders[0]["amount"],
             round(expected_normal_amount * self.cta_config.starter_frontrun_fraction, 8),
         )
+
+    def test_mtf_engine_allows_starter_short_frontrun_for_strong_bearish_impulse(self) -> None:
+        major_closes = [220 - 1.0 * index for index in range(60)]
+        swing_closes = [160 - 0.8 * index for index in range(60)]
+        execution_closes = [120 - index * 0.2 for index in range(54)] + [109.5, 109.1, 108.8, 108.4, 108.0, 107.7]
+        self._set_ohlcv("4h", major_closes, 14_400_000)
+        self._set_ohlcv("1h", swing_closes, 3_600_000)
+        base = 1_700_000_000_000
+        payload = []
+        volumes = [100.0 + index for index in range(54)] + [160.0, 170.0, 180.0, 220.0, 235.0, 250.0]
+        for index, close in enumerate(execution_closes):
+            open_price = close + 0.35 if index >= len(execution_closes) - 3 else close + 0.2
+            payload.append([base + index * 900_000, open_price, open_price + 0.3, close - 0.4, close, volumes[index]])
+        self.client.ohlcv_by_timeframe["15m"] = payload
+        self.cta_config.starter_frontrun_minimum_score = 70.0
+        engine = MultiTimeframeSignalEngine(self.client, self.cta_config)
+
+        import pandas as pd
+        bearish_kdj = pd.DataFrame({
+            "k": [60.0] * 58 + [45.0, 40.0],
+            "d": [50.0] * 58 + [50.0, 45.0],
+        })
+        major_supertrend = pd.DataFrame(
+            {
+                "direction": [-1] * 60,
+                "lower_band": [100.0] * 60,
+                "upper_band": [130.0 - 0.2 * index for index in range(60)],
+                "supertrend": [130.0 - 0.2 * index for index in range(60)],
+                "atr": [2.0] * 60,
+            }
+        )
+        swing_supertrend = pd.DataFrame(
+            {
+                "direction": [-1] * 60,
+                "lower_band": [100.0] * 60,
+                "upper_band": [120.0] * 60,
+                "supertrend": [120.0] * 60,
+                "atr": [1.0] * 60,
+            }
+        )
+        bearish_obv = OBVConfirmationSnapshot(-100.0, 0.0, -10.0, 0.0, 1.0, -2.0)
+
+        with (
+            patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=bearish_kdj),
+            patch(
+                "market_adaptive.strategies.mtf_engine.compute_supertrend",
+                side_effect=[major_supertrend, swing_supertrend, swing_supertrend],
+            ),
+            patch("market_adaptive.strategies.mtf_engine.compute_obv_confirmation_snapshot", return_value=bearish_obv),
+        ):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.execution_entry_mode, "starter_short_frontrun_limit")
+        self.assertTrue(signal.execution_trigger.frontrun_ready)
+        self.assertTrue(signal.bearish_ready)
+
+    def test_mtf_engine_blocks_starter_short_frontrun_when_score_is_below_floor(self) -> None:
+        major_closes = [220 - 1.0 * index for index in range(60)]
+        swing_closes = [160 - 0.8 * index for index in range(60)]
+        execution_closes = [120 - index * 0.2 for index in range(54)] + [109.5, 109.1, 108.8, 108.4, 108.0, 107.7]
+        self._set_ohlcv("4h", major_closes, 14_400_000)
+        self._set_ohlcv("1h", swing_closes, 3_600_000)
+        base = 1_700_000_000_000
+        payload = []
+        volumes = [100.0 + index for index in range(54)] + [160.0, 170.0, 180.0, 220.0, 235.0, 250.0]
+        for index, close in enumerate(execution_closes):
+            open_price = close + 0.35 if index >= len(execution_closes) - 3 else close + 0.2
+            payload.append([base + index * 900_000, open_price, open_price + 0.3, close - 0.4, close, volumes[index]])
+        self.client.ohlcv_by_timeframe["15m"] = payload
+        self.cta_config.starter_frontrun_minimum_score = 95.0
+        engine = MultiTimeframeSignalEngine(self.client, self.cta_config)
+
+        import pandas as pd
+        bearish_kdj = pd.DataFrame({
+            "k": [60.0] * 58 + [45.0, 40.0],
+            "d": [50.0] * 58 + [50.0, 45.0],
+        })
+        major_supertrend = pd.DataFrame(
+            {
+                "direction": [-1] * 60,
+                "lower_band": [100.0] * 60,
+                "upper_band": [130.0 - 0.2 * index for index in range(60)],
+                "supertrend": [130.0 - 0.2 * index for index in range(60)],
+                "atr": [2.0] * 60,
+            }
+        )
+        swing_supertrend = pd.DataFrame(
+            {
+                "direction": [-1] * 60,
+                "lower_band": [100.0] * 60,
+                "upper_band": [120.0] * 60,
+                "supertrend": [120.0] * 60,
+                "atr": [1.0] * 60,
+            }
+        )
+        bearish_obv = OBVConfirmationSnapshot(-100.0, 0.0, -10.0, 0.0, 1.0, -2.0)
+
+        with (
+            patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=bearish_kdj),
+            patch(
+                "market_adaptive.strategies.mtf_engine.compute_supertrend",
+                side_effect=[major_supertrend, swing_supertrend, swing_supertrend],
+            ),
+            patch("market_adaptive.strategies.mtf_engine.compute_obv_confirmation_snapshot", return_value=bearish_obv),
+        ):
+            signal = engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertNotEqual(signal.execution_entry_mode, "starter_short_frontrun_limit")
+        self.assertFalse(signal.execution_trigger.frontrun_ready)
 
     def test_grid_robot_restores_balanced_levels_when_bearish_bias_is_not_strong_enough(self) -> None:
         robot = GridRobot(self.client, self.database, self.grid_config, self.execution, market_oracle=None, use_dynamic_range=False)
