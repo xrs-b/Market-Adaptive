@@ -1,228 +1,319 @@
 # Market-Adaptive
 
-Market-Adaptive 是一个面向 OKX 模拟盘的模块化量化交易系统骨架。
+Market-Adaptive 是一个面向 **OKX 模拟盘 / 永续合约** 的模块化量化交易系统。
 
-## 当前已完成
-- YAML 全局配置加载
-- OKX 模拟盘连接配置（含 `x-simulated-id` 与 `x-simulated-trading` 请求头）
-- SQLite 初始化模块
-- `market_status` / `strategy_runtime_state` / `system_state` 表
-- 可复用的 `OKXClient`
-- `Market-Oracle` 行情感知机器人
-- `CTARobot` / `GridRobot` 双核心策略机器人
-- `SentimentAnalyst` 情绪模块（接入 OKX `long_short_accounts_ratio`）
-- `SuperTrend` / `ATR` / `OBV` / 24h Volume Profile 指标管线与可测试策略状态机
-- `MainController` 总控与 `RiskControlManager` 风控模块
-- Discord 通知模块
+当前项目不是“策略骨架”阶段，而是已经进入 **持续运行 + 迭代优化 + 复盘驱动** 阶段：
+- `MarketOracle` 负责市场状态判定（trend / sideways / trend_impulse / range_breakout_ready）
+- `CTARobot` 负责趋势型 CTA 机会
+- `GridRobot` 负责横盘网格
+- `RiskControlManager` 负责账户级风控、方向敞口约束、分层减仓
+- `MainController` 负责统一调度、启动、状态切换与恢复
+
+---
+
+## 当前状态概览
+
+当前仓库已具备以下能力：
+
+### 核心系统
+- YAML 配置加载与应用启动引导
+- SQLite 状态 / 运行时数据库
+- OKX REST 客户端
+- 总控 `MainController`
+- Discord 通知
+- 风控、恢复、日志、状态持久化
+
+### CTA（趋势策略）
+- 4H / 1H / 15m 多周期信号链路
+- `SuperTrend + RSI + KDJ + OBV + Volume Profile + Order Flow + Sentiment`
+- 动态 ATR 止损
+- 分级止盈 / 分级退出
+- 最低预期 RR 过滤
+- `relaxed / starter / early` 入口收紧
+- short-side 对称 starter frontrun 路径
+- trigger family / group 标签化，方便后续复盘与统计
+
+### Grid（横盘策略）
+- 动态网格上下边界
+- 高周期趋势守门
+- directional skew
+- 风险减仓 / observe / cleanup
+- 可拆分 Grid 拦截原因（例如 oracle ADX vs 高周期趋势守门）
+
+### 运维 / 复盘
+- CTA signal heartbeat
+- SignalProfiler 漏斗审计
+- near miss 报告
+- 主控日志重启前自动归档，避免复盘样本被覆盖
+
+---
+
+## 最近一轮关键增强
+
+以下是最近几轮已经落地的、对当前系统最重要的增强：
+
+### 利润质量改造（CTA）
+- 最低预期 RR 过滤（`minimum_expected_rr`）
+- 减少过早止盈：首次 TP 从 50% 降到 25%
+- `signal_flip` 改成分级退出：先减仓，再二次确认全退
+
+### 入口质量收紧
+- `relaxed_entry` 使用更高 RR 门槛
+- `starter / frontrun / scale_in / early_*` 使用更严 RR 门槛
+- `early / starter` 增加方向稳定性确认
+- `relaxed / starter` 增加 near-breakout 位置质量过滤
+- `early / starter` 增加 score floor，减少垃圾 starter 单
+
+### 多空信号对称性补强
+- 增加 `starter_short_frontrun`
+- 增加 short-side impulse 确认
+- short-side 执行路径与 long-side 更对称
+
+### 解释层与复盘能力增强
+- `execution_trigger.family`
+- `execution_trigger.group`
+- family / group 已接入 heartbeat / profiler / near-miss 相关链路
+
+### 运维增强
+- `scripts/restart_main_controller.sh` 会在重启前自动归档旧 `main_controller.log`
+- 配置加载增加重复 YAML key 检测，防止 `cta:` / `grid:` 重复段静默覆盖
+
+---
 
 ## 目录结构
 
 ```text
-Market-Adaptive/
+.
 ├── config/
 │   └── config.yaml.example
+├── docs/
+│   └── market-adaptive-7day-validation.md
 ├── market_adaptive/
 │   ├── clients/
-│   │   └── okx_client.py
 │   ├── notifiers/
-│   │   └── discord_notifier.py
 │   ├── oracles/
-│   │   └── market_oracle.py
 │   ├── strategies/
 │   │   ├── cta_robot.py
 │   │   ├── grid_robot.py
-│   │   └── coordinator.py
+│   │   ├── mtf_engine.py
+│   │   ├── signal_profiler.py
+│   │   ├── order_flow_sentinel.py
+│   │   └── obv_gate.py
 │   ├── bootstrap.py
 │   ├── config.py
 │   ├── controller.py
 │   ├── db.py
 │   ├── indicators.py
 │   ├── logging_utils.py
-│   └── sentiment.py
+│   ├── risk.py
+│   ├── sentiment.py
+│   └── ws_runtime.py
 ├── scripts/
 │   ├── init_app.py
+│   ├── restart_main_controller.sh
 │   ├── run_main_controller.py
 │   ├── run_market_oracle.py
 │   └── run_the_hands.py
-└── requirements.txt
+├── tests/
+└── README.md
 ```
+
+---
 
 ## 快速开始
 
-> macOS（尤其 Apple Silicon / M4）建议使用官网安装的 Python 3.11+，不要依赖系统自带 Python。
+> 建议使用 Python 3.13 对应的虚拟环境；本项目当前主要在 macOS + venv 环境下运行。
+
+### 1. 创建虚拟环境并安装依赖
 
 ```bash
-cd Market-Adaptive
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+### 2. 复制配置模板
+
+```bash
 cp config/config.yaml.example config/config.yaml
-python3 scripts/init_app.py --config config/config.yaml
-python3 scripts/run_market_oracle.py --config config/config.yaml --once
 ```
 
-持续运行行情感知机器人：
+### 3. 初始化数据库
 
 ```bash
-python3 scripts/run_market_oracle.py --config config/config.yaml
+python scripts/init_app.py --config config/config.yaml
 ```
 
-运行双核心策略机器人：
+### 4. 单次运行 / 常用入口
 
+#### 只跑 Market Oracle 一次
 ```bash
-python3 scripts/run_the_hands.py --config config/config.yaml
+python scripts/run_market_oracle.py --config config/config.yaml --once
 ```
 
-运行主程序总控模块：
-
+#### 跑 CTA + Grid 协调器
 ```bash
-python3 scripts/run_main_controller.py --config config/config.yaml
+python scripts/run_the_hands.py --config config/config.yaml
 ```
 
-## CTA 策略关键配置
-
-```yaml
-risk_control:
-  daily_loss_cutoff_pct: 0.05
-  max_margin_ratio: 0.60
-  recovery_check_interval_seconds: 60
-  default_symbol_max_notional: 0
-  symbol_notional_limits:
-    BTC/USDT: 1500
-  cta_single_trade_equity_multiple: 1.5
-  max_directional_leverage: 8.0
-  grid_margin_ratio_warning: 0.45
-  grid_deviation_reduce_ratio: 0.25
-  grid_liquidation_warning_ratio: 0.10
-  grid_reduction_step_pct: 0.25
-  grid_reduction_cooldown_seconds: 300
-
-sentiment:
-  enabled: true
-  symbol: "BTC/USDT"
-  timeframe: "5m"
-  lookback_limit: 1
-  extreme_bullish_ratio: 2.5
-  cta_buy_action: "block"  # 或 "halve"
-
-cta:
-  symbol: "BTC/USDT"
-  major_timeframe: "4h"
-  swing_timeframe: "1h"
-  execution_timeframe: "15m"
-  # 兼容旧配置：execution_timeframe = lower_timeframe，swing_timeframe = higher_timeframe
-  lower_timeframe: "15m"
-  higher_timeframe: "1h"
-  lookback_limit: 200
-  supertrend_period: 10
-  supertrend_multiplier: 3.0
-  swing_rsi_period: 14
-  swing_rsi_ready_threshold: 50.0
-  kdj_length: 9
-  kdj_k_smoothing: 3
-  kdj_d_smoothing: 3
-  execution_breakout_lookback: 3
-  obv_signal_period: 8
-  obv_signal_window: 8
-  obv_signal_threshold_degrees: 30.0
-  obv_slope_window: 8
-  obv_slope_threshold_degrees: 30.0
-  atr_period: 14
-  atr_trailing_multiplier: 2.5
-  stop_loss_atr: 2.0
-  risk_percent_per_trade: 0.02
-  boosted_risk_percent_per_trade: 0.03
-  first_take_profit_pct: 0.02
-  first_take_profit_size: 0.50
-  second_take_profit_pct: 0.05
-  second_take_profit_size: 0.25
-  volume_profile_lookback_hours: 24
-  volume_profile_bin_count: 24
-  volume_profile_value_area_pct: 0.70
-
-grid:
-  symbol: "BTC/USDT"
-  bollinger_timeframe: "1h"
-  lookback_limit: 120
-  bollinger_length: 20
-  bollinger_std: 2.0
-  levels: 10
-  leverage: 3  # 可选: 3 / 5
-  martingale_factor: 1.25
-  layer_trigger_window_seconds: 300
-  layer_trigger_limit: 3
-  layer_cooldown_seconds: 300
-  rebalance_exposure_threshold: 2.0
-  max_rebalance_orders: 2
-  price_band_ratio: 0.03
-  liquidation_protection_ratio: 0.05
+#### 跑主控
+```bash
+python scripts/run_main_controller.py --config config/config.yaml
 ```
 
-> Grid 保证金模式沿用 `execution.td_mode`，可配置为 `isolated` 或 `cross`。
-
-> 兼容旧配置中的 `timeframe` / `lower_timeframe` / `higher_timeframe` / `fast_ema` / `slow_ema` 字段；新版本 CTA 已升级为 `4h SuperTrend + 1h RSI + 15m KDJ/Breakout` 的 MTF Engine，并继续串接 `OBV + ATR + Volume Profile + Sentiment + Hybrid Shield`。
-
-## Discord 通知配置
-
-沿用旧项目配置键名：`notification.discord.channel_id / webhook_url / bot_token`
-
-```yaml
-notification:
-  discord:
-    enabled: true
-    channel_id: "your_channel_id"
-    webhook_url: ""
-    bot_token: "your_bot_token"
-    username: "Market-Adaptive"
+#### 重启主控（推荐）
+```bash
+scripts/restart_main_controller.sh config/config.yaml
 ```
 
-- 若配置 `webhook_url`，优先走 webhook
-- 否则走 `bot_token + channel_id`
-- 默认通知 4 类事件：
-  - 系统启动 / 停止
-  - 行情状态切换
-  - CTA / Grid 开仓、清场
-  - 风控触发
+> `restart_main_controller.sh` 现会在重启前自动归档旧日志到 `logs/archive/`。
 
-## 规则摘要
+---
 
-### 行情判定
-- 任一周期 `ADX > 25` 且布林带带宽较上一根 K 线放大 => `trend`
-- 两个周期 `ADX < 20` => `sideways`
-- 中间模糊区间则沿用上一条数据库状态；若无历史，则默认 `sideways`
+## 关键配置（当前推荐关注）
 
-### 策略规则
-- `CTARobot` 只在 `trend` 激活，并改为走三周期 `MTF Engine`：`4h` 用 `SuperTrend` 识别 major trend，`1h` 用 `RSI` 判定 swing readiness，`15m` 只负责 execution trigger（`KDJ` 金叉或突破最近 `execution_breakout_lookback` 根 K 线前高）
-- 当 `4h SuperTrend` 看多且 `1h RSI > swing_rsi_ready_threshold`（默认 `50`）时，CTA 进入 `bullish ready`；只有 `15m` 执行触发成立后，才允许进入后续多头过滤链路
-- 即使 MTF 已 ready / trigger，多头仍必须继续通过现有 CTA stack：`OBV` 信号线偏多、`OBV` z-score 强度高于 `obv_zscore_threshold`（默认 `1.0`，兼容保留 `obv_slope_*` 旧字段名与属性，但 CTA 入场核心已切到 z-score 语义），以及基于最近约 24 小时 intraday OHLCV 构造的 `Volume Profile` breakout 条件（突破 `POC` 并站上 `Value Area High`）；若价格仍在 value area 内或低于 POC，则直接跳过开仓
-- 当 `bullish ready` + execution trigger 已 ready / near-ready，但最终只差 `OBV` 强度确认时，CTA 会在策略侧收集 `near miss` 样本，并按 `near_miss_report_interval_seconds`（默认每小时）聚合最接近阈值的案例，通过 Discord `CTA 近失报告` 输出当前 `z-score / threshold / gap`，帮助评估 `OBV` 门槛是否过严
-- 当 `4h`、`1h` 与 `15m` 三层信号 fully aligned 时，CTA 会把单笔风险从基线 `risk_percent_per_trade`（默认 `2%`）提升到 `boosted_risk_percent_per_trade`（默认 `3%`），再交给 `RiskControlManager` / Hybrid Shield 做最终仓位约束
-- CTA 多头开仓前会额外读取 OKX 公共 `long_short_accounts_ratio`；当零售多头情绪比值大于 `2.5` 时，默认阻止买入信号（也可配置为把多头仓位减半）
-- Sentiment 通过后，CTA 还会触发 `Order Flow Sentinel` 做最后一跳秒级盘口确认：调用 OKX `fetchOrderBook` 读取前 `20` 档深度，计算 `bid_sum / ask_sum`；当该比值低于 `1.5` 时，直接拒绝本次多头开仓
-- 当盘口失衡达到高确信度阈值（默认 `>= 2.0`）时，CTA 不再直接追市价，而是按盘口深度估算可成交边界，并生成带滑点上限的 `IOC` 限价单，尽量在保持成交概率的同时压低高确信度入场的冲击成本
-- CTA 持仓使用 `ATR` 动态止损距离作为主风控参数：开仓与后续上移/下移止损均以 `stop_loss_atr` 为准；默认在 `+2%` 先止盈 `50%`，`+5%` 再止盈 `25%`；`RiskControlManager` 还会通过快速风控 worker 高频盯防 ATR 硬止损，一旦击穿立即对剩余仓位执行 all-out 全部退出
-- CTA 单笔开仓 notional 可用 `cta_single_trade_equity_multiple` 约束为账户权益倍数上限，避免趋势单笔过重
-- `GridRobot` 只在 `sideways` 激活，先显式向 OKX 同步保证金模式（`execution.td_mode`）与 3x / 5x 杠杆，然后按当前价上下各 3% 的中性区间重建双边网格限价单；在同一方向持仓过重时会补充 reduce-only 再平衡单
-- Grid 由 `RiskControlManager` 接管分层风险治理：当价格跌破下沿或突破上沿时会进入 observe 模式并暂停新增网格开仓，直到价格回到原带宽或市场状态切换；当账户风险率、边界偏离度或最近强平价安全缓冲（默认 10%）触发阈值时，会优先修剪最危险 / 最远离现价的网格敞口，再按 `grid_reduction_step_pct` 逐步减仓
-- 若数据库状态发生切换，`RiskControlManager` 会协调旧策略清理；Grid 会先撤销挂单，再对盈利持仓优先挂 reduce-only limit，其他仓位直接市价退出，为下一只机器人腾出保证金
+### CTA
+重点字段：
+- `minimum_expected_rr`
+- `relaxed_entry_minimum_expected_rr`
+- `starter_entry_minimum_expected_rr`
+- `early_entry_minimum_score`
+- `starter_frontrun_minimum_score`
+- `early_entry_direction_confirmation_bars`
+- `relaxed_entry_require_near_breakout`
+- `starter_entry_require_near_breakout`
+- `margin_fraction_per_trade`
+- `nominal_leverage`
+- `early_bullish_starter_fraction`
+- `starter_frontrun_fraction`
+- `signal_flip_reduce_ratio`
 
-### 总控与风控
-- `MainController` 使用 `threading` 并发启动 `MarketOracle`、`CTARobot`、`GridRobot`，以及可配置的 CTA 快速风控 worker（`runtime.fast_risk_check_interval_seconds`）
-- `RiskControlManager` 每分钟检查一次账户日内起始权益、总浮盈亏、维护保证金 / 风险率，并执行仓位恢复检查；CTA 硬止损则走高频 fast-check，避免只靠分钟级轮询
-- CTA 开仓使用 `calculate_position_size(symbol, risk_percent, stop_loss_atr)`，基于账户权益、ATR 动态止损距离、单笔权益倍数上限与 OKX 合约面值动态换算下单张数
-- `RiskControlManager` 会汇总 CTA + Grid 的净多 / 净空 notional；若同方向投影杠杆超过 `max_directional_leverage`（默认 8x），会拒绝继续加同向仓
-- 当日内回撤超过 `5%` 时，会立即撤单、强平、写入数据库 `system_status=OFF`、停止机器人并触发通知
-- Grid 风控会先用 observe 模式阻止新增挂单；当账户风险率达到 `max_margin_ratio`、价格偏离网格边界超过 `grid_deviation_reduce_ratio`，或当前价距离最近强平价小于 `grid_liquidation_warning_ratio` 时，会按 `grid_reduction_step_pct` 逐步减仓并通过通知回报
-- 日志支持颜色区分、CPU 占用率输出、Ctrl/Cmd+C 优雅退出与 shutdown checkpoint 落库
+### Grid
+重点字段：
+- `equity_allocation_ratio`
+- `higher_timeframe_trend_guard_enabled`
+- `higher_timeframe_trend_distance_atr_threshold`
+- `directional_skew_enabled`
+- `bullish_buy_levels / bullish_sell_levels`
+- `bearish_buy_levels / bearish_sell_levels`
+- `flash_crash_*`
 
-## 可复用入口
-- `market_adaptive.config.load_config`
-- `market_adaptive.db.DatabaseInitializer`
-- `market_adaptive.clients.OKXClient`
-- `market_adaptive.notifiers.DiscordNotifier`
-- `market_adaptive.oracles.MarketOracle`
-- `market_adaptive.sentiment.SentimentAnalyst`
-- `market_adaptive.strategies.CTARobot`
-- `market_adaptive.strategies.GridRobot`
-- `market_adaptive.strategies.HandsCoordinator`
-- `market_adaptive.bootstrap.MarketAdaptiveBootstrap`
+### Risk
+重点字段：
+- `daily_loss_cutoff_pct`
+- `max_margin_ratio`
+- `cta_single_trade_equity_multiple`
+- `max_directional_leverage`
+- `grid_deviation_reduce_ratio`
+- `grid_liquidation_warning_ratio`
+- `grid_reduction_step_pct`
+
+---
+
+## 运行时观察重点
+
+当前阶段最值得观察的不是“有没有信号”，而是：
+
+### CTA
+- 哪些 `trigger family / group` 最常被拦
+- `waiting_execution_trigger_near_breakout` 是否长期卡住执行
+- `order_flow_blocked` 是否在通过前置条件后成为最后挡板
+- 亏损单是否仍然集中在：
+  - 手续费型薄单
+  - 刚开即反手
+  - 位置差 / chasing 单
+
+### Grid
+- `grid:oracle_adx_trend_blocked`
+- `grid:higher_timeframe_trend_guard_blocked`
+- `grid:adx_trend_not_ready` 是否已被更细粒度原因替代
+- sideways 阶段是否仍长期不挂单
+
+---
+
+## 日志与复盘
+
+### 主日志
+默认主控日志：
+```text
+logs/main_controller.log
+```
+
+### 归档日志
+重启前自动归档到：
+```text
+logs/archive/main_controller-YYYYMMDD-HHMMSS.log
+```
+
+### 当前复盘建议
+- 优先看 `CTA signal heartbeat`
+- 看 `Strategy audit snapshot`
+- 看 `[TRADE_OPEN] / [TRADE_CLOSE]`
+- 配合 `docs/market-adaptive-7day-validation.md` 做阶段验证
+
+---
+
+## 配置与安全说明
+
+### 不要提交真实配置
+请勿把以下内容提交到仓库：
+- 真实 `config/config.yaml`
+- API key / secret / passphrase
+- Discord bot token / webhook
+
+仓库里应只维护：
+- `config/config.yaml.example`
+- 代码层面的配置加载逻辑
+
+### 当前已加的保护
+- YAML 重复 key 会直接报错
+- 可避免 `cta:` / `grid:` 段重复导致静默覆盖
+
+---
+
+## 当前开发策略
+
+项目当前采用：
+> **小步、低风险、可验证、可回退**
+
+即：
+- 一次只做一类增强
+- 先验证、再推进下一节点
+- 优先避免“理论上更强，但实盘样本更少”的过度优化
+
+---
+
+## 当前不建议直接做的事
+以下方向并非永远不做，但当前不是优先级最高：
+- 直接加 1D 硬过滤
+- 大规模重写 RSI 评分链
+- 一口气放宽 OBV 阈值
+- 在样本不足时继续大改 trigger 边界
+
+当前更推荐：
+- 先用真实日志 + family/group 分桶观察
+- 再决定下一轮优化切哪一层
+
+---
+
+## GitHub / 运行差异说明
+仓库中的代码会持续更新到 `main`，但本地运行环境可能还有：
+- 本地私有配置
+- 模拟盘凭证
+- 本地日志归档
+
+因此：
+> GitHub `main` 代表**安全可共享代码状态**，不代表你本机完整私有运行环境。
+
+---
+
+## 下一步最建议的工作流
+1. 保持主控稳定运行一段样本
+2. 观察 CTA / Grid 的 family/group 分布
+3. 用 `7day-validation` 文档更新阶段结果
+4. 再决定下一轮优化是否启动
+
+---
+
+如果你正在接手这个项目，最重要的一句话是：
+> **不要一口气重写整个策略；先看真实样本，再针对主矛盾下刀。**
