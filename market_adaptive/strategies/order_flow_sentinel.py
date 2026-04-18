@@ -24,6 +24,35 @@ class OrderFlowAssessment:
     expected_average_price: float | None
     depth_boundary_price: float | None
     reason: str
+    history_mean: float = 0.0
+    history_sigma: float = 0.0
+    health_floor: float = 0.0
+    confirmation_threshold: float = 0.0
+    high_conviction_threshold: float = 0.0
+    decay_detected: bool = False
+
+    def diagnostics(self) -> dict[str, float | bool | str | None]:
+        return {
+            "reason": self.reason,
+            "entry_allowed": self.entry_allowed,
+            "high_conviction": self.high_conviction,
+            "depth_levels": self.depth_levels,
+            "bid_sum": self.bid_sum,
+            "ask_sum": self.ask_sum,
+            "imbalance_ratio": self.imbalance_ratio,
+            "history_mean": self.history_mean,
+            "history_sigma": self.history_sigma,
+            "health_floor": self.health_floor,
+            "confirmation_threshold": self.confirmation_threshold,
+            "high_conviction_threshold": self.high_conviction_threshold,
+            "decay_detected": self.decay_detected,
+            "best_bid": self.best_bid,
+            "best_ask": self.best_ask,
+            "reference_price": self.reference_price,
+            "expected_average_price": self.expected_average_price,
+            "depth_boundary_price": self.depth_boundary_price,
+            "recommended_limit_price": self.recommended_limit_price,
+        }
 
     @property
     def entry_allowed(self) -> bool:
@@ -76,6 +105,12 @@ class OrderFlowSentinel:
                 expected_average_price=None,
                 depth_boundary_price=None,
                 reason="empty_order_book",
+                history_mean=0.0,
+                history_sigma=0.0,
+                health_floor=0.0,
+                confirmation_threshold=0.0,
+                high_conviction_threshold=max(0.0, float(self.config.order_flow_high_conviction_ratio)),
+                decay_detected=False,
             )
 
         imbalance_ratio = self._compute_imbalance_ratio(
@@ -138,6 +173,12 @@ class OrderFlowSentinel:
             expected_average_price=expected_average_price,
             depth_boundary_price=depth_boundary_price,
             reason=reason,
+            history_mean=history_mean,
+            history_sigma=history_sigma,
+            health_floor=health_floor,
+            confirmation_threshold=confirmation_threshold,
+            high_conviction_threshold=high_conviction_threshold,
+            decay_detected=decay_detected,
         )
 
     @staticmethod

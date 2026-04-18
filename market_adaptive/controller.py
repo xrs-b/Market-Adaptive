@@ -121,12 +121,19 @@ class MainController:
         return self.risk_control.latest_total_pnl
 
     def _sync_total_equity_baseline(self, *, current_equity: float) -> float:
+        stored = self.database.get_system_state("account_initial_equity")
+        if stored is not None:
+            try:
+                stored_value = float(stored.state_value)
+                if stored_value > 0:
+                    return stored_value
+            except (TypeError, ValueError):
+                pass
+
         configured = max(0.0, float(getattr(self.config.runtime, "account_initial_equity", 0.0) or 0.0))
         baseline = configured if configured > 0 else float(current_equity)
         timestamp = datetime.now(timezone.utc).isoformat()
-        stored = self.database.get_system_state("account_initial_equity")
-        if stored is None or abs(float(stored.state_value) - baseline) > 1e-9:
-            self.database.upsert_system_state(SystemStateRecord("account_initial_equity", f"{baseline:.12f}", timestamp))
+        self.database.upsert_system_state(SystemStateRecord("account_initial_equity", f"{baseline:.12f}", timestamp))
         return baseline
 
     def build_account_equity_report(self, *, current_equity: float | None = None) -> str:

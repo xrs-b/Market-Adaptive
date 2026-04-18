@@ -7,7 +7,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from market_adaptive.config import RiskControlConfig, RuntimeConfig
-from market_adaptive.db import DatabaseInitializer, SystemStateRecord
+from market_adaptive.db import AccountDailySnapshotRecord, DatabaseInitializer, SystemStateRecord
 
 logger = logging.getLogger(__name__)
 
@@ -664,33 +664,50 @@ class RiskControlManager:
             return
 
         previous_date = stored_date.state_value if stored_date is not None else None
+        previous_daily_start_equity = float(stored_equity.state_value) if stored_equity is not None else float(current_equity)
+        timestamp = datetime.now(timezone.utc).isoformat()
+        baseline_state = self.database.get_system_state("account_initial_equity")
+        initial_equity = float(baseline_state.state_value) if baseline_state is not None else float(current_equity)
+
+        if previous_date is not None and previous_date != current_date:
+            total_pnl = float(current_equity) - initial_equity
+            total_pnl_pct = (total_pnl / initial_equity * 100.0) if initial_equity > 0 else 0.0
+            previous_daily_pnl = float(current_equity) - previous_daily_start_equity
+            self.database.upsert_account_daily_snapshot(
+                AccountDailySnapshotRecord(
+                    snapshot_date=previous_date,
+                    settled_at=timestamp,
+                    equity=float(current_equity),
+                    daily_start_equity=previous_daily_start_equity,
+                    daily_pnl=previous_daily_pnl,
+                    initial_equity=initial_equity,
+                    total_pnl=total_pnl,
+                )
+            )
+            if self.notifier is not None:
+                daily_pnl_pct = (previous_daily_pnl / previous_daily_start_equity * 100.0) if previous_daily_start_equity > 0 else 0.0
+                self.notifier.send(
+                    "账号资金快照",
+                    (
+                        f"日期：{previous_date}\n"
+                        f"当前权益：{float(current_equity):.4f} USDT\n"
+                        f"初始资金：{initial_equity:.4f} USDT\n"
+                        f"总盈亏：{total_pnl:+.4f} USDT\n"
+                        f"总盈亏率：{total_pnl_pct:+.2f}%\n"
+                        f"今日起始资金：{previous_daily_start_equity:.4f} USDT\n"
+                        f"今日盈亏：{previous_daily_pnl:+.4f} USDT\n"
+                        f"今日盈亏率：{daily_pnl_pct:+.2f}%"
+                    ),
+                )
+
         self.daily_start_date = current_date
         self.daily_start_equity = float(current_equity)
-        timestamp = datetime.now(timezone.utc).isoformat()
         self.database.upsert_system_state(
             SystemStateRecord("risk_daily_start_date", self.daily_start_date, timestamp)
         )
         self.database.upsert_system_state(
             SystemStateRecord("risk_daily_start_equity", f"{self.daily_start_equity:.12f}", timestamp)
         )
-        if previous_date is not None and previous_date != current_date and self.notifier is not None:
-            baseline_state = self.database.get_system_state("account_initial_equity")
-            initial_equity = float(baseline_state.state_value) if baseline_state is not None else float(current_equity)
-            total_pnl = float(current_equity) - initial_equity
-            total_pnl_pct = (total_pnl / initial_equity * 100.0) if initial_equity > 0 else 0.0
-            self.notifier.send(
-                "账号资金快照",
-                (
-                    f"日期：{self.daily_start_date}\n"
-                    f"当前权益：{float(current_equity):.4f} USDT\n"
-                    f"初始资金：{initial_equity:.4f} USDT\n"
-                    f"总盈亏：{total_pnl:+.4f} USDT\n"
-                    f"总盈亏率：{total_pnl_pct:+.2f}%\n"
-                    f"今日起始资金：{self.daily_start_equity:.4f} USDT\n"
-                    f"今日盈亏：{0.0:+.4f} USDT\n"
-                    f"今日盈亏率：{0.0:+.2f}%"
-                ),
-            )
 
     def _persist_system_status(self, status: str) -> None:
         timestamp = datetime.now(timezone.utc).isoformat()

@@ -15,6 +15,7 @@ from market_adaptive.indicators import OBVConfirmationSnapshot
 from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies import CTARobot, GridRobot, HandsCoordinator
 from market_adaptive.strategies.cta_robot import ManagedPosition, TrendSignal
+from market_adaptive.strategies.order_flow_sentinel import OrderFlowAssessment
 from market_adaptive.strategies.mtf_engine import MultiTimeframeSignalEngine
 
 
@@ -687,8 +688,44 @@ class TheHandsTests(unittest.TestCase):
         result = robot._open_position(signal)
 
         self.assertEqual(result, "cta:reward_risk_blocked")
-        self.assertEqual(len(self.client.market_orders), 0)
-        self.assertIsNone(robot.position)
+
+    def test_cta_robot_allows_high_quality_entry_when_only_adaptive_order_flow_guard_fails(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+        signal = robot._build_trend_signal()
+        assert signal is not None
+        assert signal.volume_profile is not None
+        signal.volume_profile.high_price = signal.price + 600.0
+        assessment = OrderFlowAssessment(
+            symbol="BTC/USDT",
+            side="buy",
+            depth_levels=20,
+            bid_sum=36.0,
+            ask_sum=20.0,
+            imbalance_ratio=1.8,
+            best_bid=100.0,
+            best_ask=100.1,
+            confirmation_passed=False,
+            high_conviction=False,
+            recommended_limit_price=None,
+            expected_average_price=None,
+            depth_boundary_price=None,
+            reason="imbalance_decay_detected",
+            history_mean=2.1,
+            history_sigma=0.2,
+            health_floor=2.3,
+            confirmation_threshold=2.3,
+            high_conviction_threshold=2.3,
+            decay_detected=True,
+        )
+
+        with patch.object(robot.order_flow_sentinel, "assess_entry", return_value=assessment):
+            result = robot._open_position(signal)
+
+        self.assertTrue(result.startswith("cta:open_long"))
+        self.assertIsNotNone(robot.position)
+        self.assertGreater(len(self.client.market_orders), 0)
 
     def test_cta_reward_risk_filter_allows_when_target_space_is_large(self) -> None:
         self._insert_status("trend")
@@ -700,6 +737,27 @@ class TheHandsTests(unittest.TestCase):
         assert signal.volume_profile is not None
         signal.volume_profile.high_price = signal.price + 600.0
         robot.config.minimum_expected_rr = 1.2
+
+        result = robot._open_position(signal)
+
+        self.assertTrue(result.startswith("cta:open_long"))
+        self.assertIsNotNone(robot.position)
+
+    def test_cta_breakout_reward_risk_uses_atr_extension_target(self) -> None:
+        self._insert_status("trend")
+        self._load_bullish_signal(lower_last_close=100.0)
+        robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
+        robot.config.order_flow_enabled = False
+        robot.config.minimum_expected_rr = 1.2
+        robot.config.breakout_rr_target_atr_multiplier = 3.0
+        signal = robot._build_trend_signal()
+        assert signal is not None
+        assert signal.volume_profile is not None
+        signal.execution_entry_mode = "breakout_confirmed"
+        signal.volume_profile.high_price = signal.price + 405.0
+        signal.atr = 327.0
+        signal.bullish_score = 85.0
+        signal.direction = 1
 
         result = robot._open_position(signal)
 

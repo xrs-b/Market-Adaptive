@@ -95,17 +95,17 @@ class TrendSignal:
 class CTANearMissSample:
     symbol: str
     captured_at: float
-    execution_trigger_family: str
-    execution_trigger_group: str
-    execution_trigger_reason: str
-    execution_memory_active: bool
-    execution_memory_bars_ago: int | None
-    execution_breakout: bool
-    execution_golden_cross: bool
-    obv_zscore: float
-    obv_threshold: float
-    obv_gap: float
-    price: float
+    execution_trigger_family: str = "waiting"
+    execution_trigger_group: str = "waiting"
+    execution_trigger_reason: str = ""
+    execution_memory_active: bool = False
+    execution_memory_bars_ago: int | None = None
+    execution_breakout: bool = False
+    execution_golden_cross: bool = False
+    obv_zscore: float = 0.0
+    obv_threshold: float = 0.0
+    obv_gap: float = 0.0
+    price: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -687,6 +687,8 @@ class CTARobot(BaseStrategyRobot):
         sample = CTANearMissSample(
             symbol=self.symbol,
             captured_at=float(self._time_provider()),
+            execution_trigger_family=str(signal.execution_trigger_family or "waiting"),
+            execution_trigger_group=str(signal.execution_trigger_group or "waiting"),
             execution_trigger_reason=str(signal.execution_trigger_reason),
             execution_memory_active=bool(signal.execution_memory_active),
             execution_memory_bars_ago=signal.execution_memory_bars_ago,
@@ -737,16 +739,38 @@ class CTARobot(BaseStrategyRobot):
         return samples
 
     def _expected_reward_risk_ratio(self, signal: TrendSignal, *, reference_price: float, stop_distance: float) -> float | None:
-        volume_profile = signal.volume_profile
-        if volume_profile is None or reference_price <= 0 or stop_distance <= 0:
+        target_price = self._resolve_expected_reward_target_price(signal, reference_price=reference_price)
+        if target_price is None or reference_price <= 0 or stop_distance <= 0:
             return None
         if signal.direction > 0:
-            expected_reward = max(0.0, float(volume_profile.high_price) - float(reference_price))
+            expected_reward = max(0.0, float(target_price) - float(reference_price))
         else:
-            expected_reward = max(0.0, float(reference_price) - float(volume_profile.low_price))
+            expected_reward = max(0.0, float(reference_price) - float(target_price))
         if expected_reward <= 0:
             return 0.0
         return float(expected_reward / stop_distance)
+
+    def _resolve_expected_reward_target_price(self, signal: TrendSignal, *, reference_price: float) -> float | None:
+        volume_profile = signal.volume_profile
+        if volume_profile is None or reference_price <= 0:
+            return None
+
+        entry_mode = str(signal.execution_entry_mode or "").lower()
+        breakout_like_entry = entry_mode == "breakout_confirmed"
+        atr_extension = self._normalized_atr(reference_price, signal.atr) * float(
+            getattr(self.config, "breakout_rr_target_atr_multiplier", 3.0)
+        )
+
+        if signal.direction > 0:
+            base_target = float(volume_profile.high_price)
+            if breakout_like_entry:
+                return max(base_target, float(reference_price) + atr_extension)
+            return base_target
+
+        base_target = float(volume_profile.low_price)
+        if breakout_like_entry:
+            return min(base_target, float(reference_price) - atr_extension)
+        return base_target
 
     def _resolve_minimum_expected_rr(self, signal: TrendSignal) -> float:
         minimum_expected_rr = float(getattr(self.config, "minimum_expected_rr", 0.0))
@@ -794,8 +818,34 @@ class CTARobot(BaseStrategyRobot):
         if side == "buy" and self.config.order_flow_enabled:
             order_flow_assessment = self.order_flow_sentinel.assess_entry(self.symbol, side, amount)
             if not order_flow_assessment.entry_allowed and signal.execution_entry_mode not in {"weak_bull_scale_in_limit", "early_bullish_starter_limit", "starter_frontrun_limit", "starter_short_frontrun_limit"}:
-                self._publish_risk_profile(None)
-                return "cta:order_flow_blocked"
+                base_confirmation_ratio = max(0.0, float(self.config.order_flow_confirmation_ratio))
+                strict_order_flow_modes = {"breakout_confirmed", "major_bull_retest_ready", "trend_continuation_near_breakout_ready"}
+                hard_order_flow_block = (
+                    order_flow_assessment.reason == "empty_order_book"
+                    or order_flow_assessment.imbalance_ratio < base_confirmation_ratio
+                    or signal.execution_trigger_reason in strict_order_flow_modes
+                )
+                if hard_order_flow_block:
+                    logger.info(
+                        "CTA order flow blocked | symbol=%s side=%s mode=%s trigger=%s amount=%.8f diagnostics=%s",
+                        self.symbol,
+                        side,
+                        signal.execution_entry_mode,
+                        signal.execution_trigger_reason,
+                        amount,
+                        order_flow_assessment.diagnostics(),
+                    )
+                    self._publish_risk_profile(None)
+                    return "cta:order_flow_blocked"
+                logger.info(
+                    "CTA order flow soft warning | symbol=%s side=%s mode=%s trigger=%s amount=%.8f diagnostics=%s",
+                    self.symbol,
+                    side,
+                    signal.execution_entry_mode,
+                    signal.execution_trigger_reason,
+                    amount,
+                    order_flow_assessment.diagnostics(),
+                )
 
         position_side = "long" if signal.direction > 0 else "short"
         notional_price = signal.price
@@ -1072,7 +1122,7 @@ class CTARobot(BaseStrategyRobot):
         order_flow_assessment: OrderFlowAssessment | None,
         execution_entry_mode: str,
     ) -> float | None:
-        if execution_entry_mode in {"weak_bull_scale_in_limit", "early_bullish_starter_limit", "starter_frontrun_limit", "starter_short_frontrun_limit"}:
+        if execution_entry_mode in {"weak_bull_scale_in_limit", "early_bullish_starter_limit", "starter_frontrun_limit", "starter_short_frontrun_limit", "near_breakout_release_limit"}:
             reference_price = self._resolve_book_reference_price(side=side)
         else:
             if (

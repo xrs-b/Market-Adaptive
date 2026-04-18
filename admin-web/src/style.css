@@ -1,0 +1,268 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+html {
+  font-size: 14px;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-stone-300 text-slate-900 antialiased dark:bg-[#0b1120] dark:text-slate-100;
+  background-image: linear-gradient(180deg, rgba(120, 113, 108, 0.14), rgba(214, 211, 209, 0.22));
+}
+
+html.dark body {
+  background-image: none;
+}
+
+#app {
+  @apply min-h-screen bg-stone-200/80 dark:bg-transparent;
+}
+
+th button {
+  @apply select-none text-slate-500 transition hover:text-slate-900 dark:hover:text-slate-100;
+}
+
+table {
+  font-variant-numeric: tabular-nums;
+}
+
+thead th {
+  @apply text-[12px] font-medium align-middle;
+  vertical-align: middle;
+}
+
+tbody td {
+  @apply align-middle text-[12.5px] leading-5;
+  vertical-align: middle;
+}
+
+.data-table tbody tr > td,
+.data-table thead tr > th {
+  vertical-align: middle !important;
+}
+
+input,
+button,
+select,
+textarea {
+  font-size: 13px;
+}
+
+button {
+  letter-spacing: 0.01em;
+}
+
+input::placeholder {
+  @apply text-slate-400;
+}
+
+input,
+textarea,
+select {
+  @apply shadow-sm;
+}
+
+.card-shell {
+  @apply rounded-lg border border-slate-500/70 bg-stone-100 shadow-md dark:border-slate-800 dark:bg-slate-950/70 dark:shadow-none;
+}
+
+.panel-header {
+  @apply flex items-center justify-between gap-4 border-b border-slate-500/60 px-4 py-3 dark:border-slate-800;
+}
+
+.panel-kicker {
+  @apply text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400;
+}
+
+.panel-title {
+  @apply mt-1 text-[15px] font-semibold;
+}
+
+.panel-desc {
+  @apply mt-1 text-[12.5px] text-slate-600 dark:text-slate-400;
+}
+
+.status-grid {
+  @apply grid gap-px overflow-hidden rounded-lg border border-slate-500/60 bg-slate-500/60 dark:border-slate-800 dark:bg-slate-800;
+}
+
+.status-cell {
+  @apply bg-stone-100 px-4 py-3 dark:bg-slate-900;
+}
+
+.data-table thead {
+  @apply bg-stone-300/95 dark:bg-slate-950/95;
+}
+
+.data-table tbody tr {
+  @apply transition-colors;
+}
+
+.data-table tbody tr:hover {
+  @apply bg-stone-200/80 dark:bg-slate-800/30;
+}
+
+.subpanel-shell {
+  @apply rounded-lg border border-slate-500/55 bg-stone-200/75 dark:border-slate-800 dark:bg-slate-900/35;
+}
+
+.subpanel-header {
+  @apply border-b border-slate-500/55 px-4 py-3 dark:border-slate-800;
+}
+
+.subpanel-title {
+  @apply text-[12.5px] font-semibold;
+}
+
+.subpanel-desc {
+  @apply mt-1 text-xs text-slate-600 dark:text-slate-400;
+}
+
+.toolbar-strip {
+  @apply flex flex-wrap items-center justify-between gap-4 border-b border-slate-500/55 px-4 py-3 dark:border-slate-800;
+}
+
+.result-badge {
+  @apply rounded-full bg-stone-300 px-2.5 py-1 text-[11px] font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-300;
+}
+
+.section-spacing {
+  @apply space-y-4;
+}
+
+.filter-pill {
+  @apply rounded-full px-3 py-1.5 text-xs font-medium transition;
+}
+
+.filter-pill-muted {
+  @apply bg-stone-300 text-slate-700 hover:bg-stone-400 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700;
+}
+
+.filter-pill-dark-active {
+  @apply bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900;
+}
+
+.filter-pill-sky-active {
+  @apply bg-sky-600 text-white dark:bg-sky-500 dark:text-white;
+}
+
+.filter-pill-rose-active {
+  @apply bg-rose-600 text-white dark:bg-rose-500 dark:text-white;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar-nav-button {
+  @apply block w-full rounded-md px-3 py-2 text-left text-[13px] font-medium transition;
+}
+
+.page-hero {
+  @apply rounded-xl border border-slate-500/65 bg-gradient-to-br from-stone-100 via-stone-200 to-stone-300 p-4 shadow-md dark:border-slate-800 dark:bg-slate-950/70 dark:bg-none dark:from-transparent dark:via-transparent dark:to-transparent dark:shadow-none;
+}
+
+.elevated-panel {
+  @apply rounded-xl border border-slate-500/65 bg-gradient-to-b from-stone-100 to-stone-200 shadow-md dark:border-slate-800 dark:bg-slate-950/70 dark:bg-none dark:from-transparent dark:to-transparent dark:shadow-none;
+}
+
+.soft-panel {
+  @apply rounded-xl border border-slate-500/50 bg-stone-300/65 shadow-sm dark:border-slate-800 dark:bg-slate-900/45 dark:shadow-none;
+}
+
+.metric-tile {
+  @apply rounded-xl border border-slate-500/65 bg-stone-100 px-4 py-3.5 shadow-md dark:border-slate-800 dark:bg-slate-900/80 dark:shadow-none;
+}
+
+.timeline-card {
+  @apply rounded-xl border border-slate-500/65 bg-stone-100 p-3.5 shadow-md dark:border-slate-800 dark:bg-slate-950/70 dark:shadow-none;
+}
+
+.panel-divider {
+  @apply border-t border-slate-500/60 dark:border-slate-800;
+}
+
+.data-table thead th {
+  @apply bg-stone-300/90 dark:bg-slate-950/95;
+}
+
+.data-table tbody td,
+.data-table thead th {
+  @apply px-3 py-2;
+}
+
+.focus-card {
+  @apply rounded-xl border border-slate-500/65 bg-stone-100 px-4 py-3.5 shadow-md dark:border-slate-800 dark:bg-slate-900/80 dark:shadow-none;
+}
+
+.badge-soft {
+  @apply rounded-full bg-stone-300 px-2.5 py-1 text-[11px] font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-300;
+}
+
+.table-wrap {
+  @apply overflow-hidden rounded-xl border border-slate-500/65 bg-stone-200/80 shadow-sm dark:border-slate-800 dark:bg-slate-950/30 dark:shadow-none;
+}
+
+.stat-strip {
+  @apply grid gap-px overflow-hidden rounded-xl bg-slate-500/60 dark:bg-slate-800;
+}
+
+.stat-cell {
+  @apply bg-stone-100 px-4 py-3.5 dark:bg-slate-900;
+}
+
+.config-shell {
+  @apply mx-auto max-w-[1520px];
+}
+
+.config-page {
+  @apply mx-auto max-w-[1440px];
+}
+
+.config-main-tab {
+  @apply rounded-full px-4 py-2 text-[12.5px] font-medium transition;
+}
+
+.config-sub-tab {
+  @apply inline-flex items-center gap-2 rounded-full border px-3.5 py-1.5 text-[12px] font-medium transition;
+}
+
+.config-row {
+  @apply grid gap-4 px-4 py-4 xl:grid-cols-[260px,minmax(0,380px),180px] 2xl:grid-cols-[280px,minmax(0,420px),200px] 2xl:justify-start;
+}
+
+.config-row__meta {
+  @apply min-w-0;
+}
+
+.config-row__editor {
+  @apply min-w-0;
+}
+
+.config-row__status {
+  @apply space-y-2 text-[12px];
+}
+
+.config-input {
+  @apply block w-full max-w-[420px] rounded-lg border border-slate-500/65 bg-white px-3 py-2 text-[13px] outline-none transition focus:border-slate-700 dark:border-slate-700 dark:bg-slate-950;
+}

@@ -35,6 +35,18 @@ CREATE TABLE IF NOT EXISTS system_state (
 );
 """
 
+ACCOUNT_DAILY_SNAPSHOT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS account_daily_snapshot (
+    snapshot_date TEXT PRIMARY KEY,
+    settled_at TEXT NOT NULL,
+    equity REAL NOT NULL,
+    daily_start_equity REAL NOT NULL,
+    daily_pnl REAL NOT NULL,
+    initial_equity REAL NOT NULL,
+    total_pnl REAL NOT NULL
+);
+"""
+
 MARKET_STATUS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_market_status_symbol ON market_status(symbol);",
     "CREATE INDEX IF NOT EXISTS idx_market_status_status ON market_status(status);",
@@ -65,6 +77,17 @@ class SystemStateRecord:
     updated_at: str
 
 
+@dataclass
+class AccountDailySnapshotRecord:
+    snapshot_date: str
+    settled_at: str
+    equity: float
+    daily_start_equity: float
+    daily_pnl: float
+    initial_equity: float
+    total_pnl: float
+
+
 class DatabaseInitializer:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path).expanduser().resolve()
@@ -76,6 +99,7 @@ class DatabaseInitializer:
             conn.execute(MARKET_STATUS_SCHEMA)
             conn.execute(STRATEGY_RUNTIME_STATE_SCHEMA)
             conn.execute(SYSTEM_STATE_SCHEMA)
+            conn.execute(ACCOUNT_DAILY_SNAPSHOT_SCHEMA)
             for statement in MARKET_STATUS_INDEXES:
                 conn.execute(statement)
             conn.commit()
@@ -246,3 +270,63 @@ class DatabaseInitializer:
             state_value=str(row["state_value"]),
             updated_at=str(row["updated_at"]),
         )
+
+    def upsert_account_daily_snapshot(self, record: AccountDailySnapshotRecord) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO account_daily_snapshot (
+                    snapshot_date,
+                    settled_at,
+                    equity,
+                    daily_start_equity,
+                    daily_pnl,
+                    initial_equity,
+                    total_pnl
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(snapshot_date)
+                DO UPDATE SET
+                    settled_at=excluded.settled_at,
+                    equity=excluded.equity,
+                    daily_start_equity=excluded.daily_start_equity,
+                    daily_pnl=excluded.daily_pnl,
+                    initial_equity=excluded.initial_equity,
+                    total_pnl=excluded.total_pnl
+                """,
+                (
+                    record.snapshot_date,
+                    record.settled_at,
+                    record.equity,
+                    record.daily_start_equity,
+                    record.daily_pnl,
+                    record.initial_equity,
+                    record.total_pnl,
+                ),
+            )
+            conn.commit()
+
+    def fetch_account_daily_snapshots(self, month_prefix: str) -> list[AccountDailySnapshotRecord]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT snapshot_date, settled_at, equity, daily_start_equity, daily_pnl, initial_equity, total_pnl
+                FROM account_daily_snapshot
+                WHERE snapshot_date LIKE ?
+                ORDER BY snapshot_date ASC
+                """,
+                (f"{month_prefix}%",),
+            ).fetchall()
+
+        return [
+            AccountDailySnapshotRecord(
+                snapshot_date=str(row["snapshot_date"]),
+                settled_at=str(row["settled_at"]),
+                equity=float(row["equity"]),
+                daily_start_equity=float(row["daily_start_equity"]),
+                daily_pnl=float(row["daily_pnl"]),
+                initial_equity=float(row["initial_equity"]),
+                total_pnl=float(row["total_pnl"]),
+            )
+            for row in rows
+        ]

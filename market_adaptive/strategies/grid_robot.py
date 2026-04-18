@@ -519,7 +519,7 @@ class GridRobot(BaseStrategyRobot):
         one_minute_range = self._latest_flash_crash_range(now)
         atr_multiplier = float(getattr(self.config, "flash_crash_atr_multiplier", 1.5))
         threshold = float(context.atr_value) * atr_multiplier
-        logger.warning(
+        logger.info(
             "Grid flash crash check | symbol=%s range_1m=%.2f atr=%.2f threshold=%.2f",
             self.symbol,
             one_minute_range,
@@ -1383,6 +1383,17 @@ class GridRobot(BaseStrategyRobot):
                 balance = float(self.client.fetch_total_equity("USDT"))
             except Exception:
                 balance = 0.0
+        logger.info(
+            "[GRID_TRADE_CLOSE] entry_side=%s exit_side=%s entry=%.4f exit=%.4f size=%.8f pnl=%.4f roi=%.4f%% pos_side=%s",
+            entry_side,
+            side,
+            float(entry_price),
+            float(fill_price),
+            float(delta_amount),
+            float(pnl),
+            float(roi),
+            str(tracked.get("pos_side") or ""),
+        )
         self.notifier.notify_profit(
             pnl=pnl,
             roi=roi,

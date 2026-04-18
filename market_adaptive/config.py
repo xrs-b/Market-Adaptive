@@ -220,6 +220,7 @@ class CTAConfig:
     minimum_expected_rr: float = 0.0
     relaxed_entry_minimum_expected_rr: float = 0.0
     starter_entry_minimum_expected_rr: float = 0.0
+    breakout_rr_target_atr_multiplier: float = 3.0
     early_entry_minimum_score: float = 70.0
     starter_frontrun_minimum_score: float = 80.0
     relaxed_entry_require_near_breakout: bool = True
@@ -249,6 +250,10 @@ class CTAConfig:
     starter_frontrun_fraction: float = 0.20
     starter_frontrun_breakout_buffer_ratio: float = 0.002
     bullish_memory_retest_breakout_buffer_ratio: float = 0.0026
+    near_breakout_release_enabled: bool = True
+    near_breakout_release_fraction: float = 0.12
+    near_breakout_release_minimum_score: float = 70.0
+    near_breakout_release_obv_zscore_floor: float = -0.25
     starter_frontrun_impulse_bars: int = 3
     starter_frontrun_volume_window: int = 12
     starter_frontrun_volume_multiplier: float = 1.15
@@ -322,6 +327,7 @@ class CTAConfig:
         self.weak_bias_slow_ema = max(self.weak_bias_fast_ema + 1, int(self.weak_bias_slow_ema))
         self.obv_signal_window = max(1, int(self.obv_signal_window))
         self.obv_signal_threshold_degrees = float(self.obv_signal_threshold_degrees)
+        self.breakout_rr_target_atr_multiplier = max(0.0, float(self.breakout_rr_target_atr_multiplier))
         self.order_flow_depth_levels = max(1, int(self.order_flow_depth_levels))
         self.order_flow_confirmation_ratio = max(0.0, float(self.order_flow_confirmation_ratio))
         self.order_flow_high_conviction_ratio = max(
@@ -735,6 +741,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         minimum_expected_rr=float(cta_payload.get("minimum_expected_rr", 0.0)),
         relaxed_entry_minimum_expected_rr=float(cta_payload.get("relaxed_entry_minimum_expected_rr", 0.0)),
         starter_entry_minimum_expected_rr=float(cta_payload.get("starter_entry_minimum_expected_rr", 0.0)),
+        breakout_rr_target_atr_multiplier=float(cta_payload.get("breakout_rr_target_atr_multiplier", 3.0)),
         early_entry_minimum_score=float(cta_payload.get("early_entry_minimum_score", 70.0)),
         starter_frontrun_minimum_score=float(cta_payload.get("starter_frontrun_minimum_score", 80.0)),
         relaxed_entry_require_near_breakout=bool(cta_payload.get("relaxed_entry_require_near_breakout", True)),
@@ -766,6 +773,10 @@ def load_config(config_path: str | Path) -> AppConfig:
         starter_frontrun_fraction=float(cta_payload.get("starter_frontrun_fraction", 0.20)),
         starter_frontrun_breakout_buffer_ratio=float(cta_payload.get("starter_frontrun_breakout_buffer_ratio", 0.002)),
         bullish_memory_retest_breakout_buffer_ratio=float(cta_payload.get("bullish_memory_retest_breakout_buffer_ratio", 0.0026)),
+        near_breakout_release_enabled=bool(cta_payload.get("near_breakout_release_enabled", True)),
+        near_breakout_release_fraction=float(cta_payload.get("near_breakout_release_fraction", 0.12)),
+        near_breakout_release_minimum_score=float(cta_payload.get("near_breakout_release_minimum_score", 70.0)),
+        near_breakout_release_obv_zscore_floor=float(cta_payload.get("near_breakout_release_obv_zscore_floor", -0.25)),
         starter_frontrun_impulse_bars=int(cta_payload.get("starter_frontrun_impulse_bars", 3)),
         starter_frontrun_volume_window=int(cta_payload.get("starter_frontrun_volume_window", 12)),
         starter_frontrun_volume_multiplier=float(cta_payload.get("starter_frontrun_volume_multiplier", 1.15)),

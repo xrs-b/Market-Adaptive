@@ -794,6 +794,16 @@ class MultiTimeframeSignalEngine:
             and self._has_direction_confirmation(swing_supertrend["direction"], -1)
             and (bearish_memory_active or kdj_dead_cross)
         )
+        near_breakout_release_ready = bool(
+            getattr(self.config, "near_breakout_release_enabled", True)
+            and bullish_ready
+            and bullish_score >= float(getattr(self.config, "near_breakout_release_minimum_score", 70.0))
+            and frontrun_near_breakout
+            and not prior_high_break
+            and not kdj_dead_cross
+            and self._has_direction_confirmation(swing_supertrend["direction"], 1)
+            and (bullish_memory_active or bullish_latch_active)
+        )
         high_confidence_price_override = bool(bullish_score >= 75.0 and frontrun_near_breakout and not kdj_dead_cross)
         trend_continuation_near_breakout_ready = self._trend_continuation_near_breakout_ready(
             major_direction=major_direction,
@@ -893,6 +903,9 @@ class MultiTimeframeSignalEngine:
         elif starter_frontrun_ready:
             trigger_family = "starter_frontrun"
             reason = f"starter_frontrun: gap={frontrun_gap_ratio * 100:.3f}% + 1m {int(getattr(self.config, 'starter_frontrun_impulse_bars', 3))} bullish bars + OBV confirmed"
+        elif near_breakout_release_ready:
+            trigger_family = "near_breakout_release"
+            reason = f"near_breakout_release: bullish_score={bullish_score:.0f} + gap={frontrun_gap_ratio * 100:.3f}% + latch_or_memory_active"
         elif trend_continuation_near_breakout_ready:
             trigger_family = "trend_continuation_near_breakout"
             reason = f"trend_continuation_near_breakout_ready: bullish_score={bullish_score:.0f} + gap={frontrun_gap_ratio * 100:.3f}% + obv_support={'confirmed' if execution_obv_ready else 'positive_zscore'}"
