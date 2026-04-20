@@ -306,6 +306,7 @@ class CTAConfig:
     signal_strength_direction_bonus_cap: float = 10.0
     signal_strength_volatility_bonus_cap: float = 5.0
     signal_strength_obv_bonus_cap: float = 10.0
+    fast_track_reuse_cooldown_seconds: int = 300
 
     def __post_init__(self) -> None:
         default_execution = "15m"
@@ -409,6 +410,7 @@ class CTAConfig:
         self.signal_strength_direction_bonus_cap = max(0.0, float(self.signal_strength_direction_bonus_cap))
         self.signal_strength_volatility_bonus_cap = max(0.0, float(self.signal_strength_volatility_bonus_cap))
         self.signal_strength_obv_bonus_cap = max(0.0, float(self.signal_strength_obv_bonus_cap))
+        self.fast_track_reuse_cooldown_seconds = max(0, int(self.fast_track_reuse_cooldown_seconds))
         self.early_entry_minimum_score = max(0.0, float(self.early_entry_minimum_score))
         self.starter_frontrun_minimum_score = max(self.early_entry_minimum_score, float(self.starter_frontrun_minimum_score))
         self.early_entry_direction_confirmation_bars = max(1, int(self.early_entry_direction_confirmation_bars))
@@ -804,6 +806,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         relaxed_entry_minimum_expected_rr=float(cta_payload.get("relaxed_entry_minimum_expected_rr", 0.0)),
         starter_entry_minimum_expected_rr=float(cta_payload.get("starter_entry_minimum_expected_rr", 0.0)),
         standard_entry_minimum_expected_rr=float(cta_payload.get("standard_entry_minimum_expected_rr", 0.0)),
+        fast_track_reuse_cooldown_seconds=int(cta_payload.get("fast_track_reuse_cooldown_seconds", 300)),
         breakout_rr_target_atr_multiplier=float(cta_payload.get("breakout_rr_target_atr_multiplier", 3.0)),
         early_entry_minimum_score=float(cta_payload.get("early_entry_minimum_score", 70.0)),
         starter_frontrun_minimum_score=float(cta_payload.get("starter_frontrun_minimum_score", 80.0)),

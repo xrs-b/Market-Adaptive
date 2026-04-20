@@ -1263,6 +1263,7 @@ class GridRobot(BaseStrategyRobot):
                 counter_amount,
             )
             if self.notifier is not None and hasattr(self.notifier, "notify_trade"):
+                trade_notional = self.client.estimate_notional(self.symbol, counter_amount, fill_price)
                 self.notifier.notify_trade(
                     side=side,
                     price=fill_price,
@@ -1270,6 +1271,7 @@ class GridRobot(BaseStrategyRobot):
                     strategy=self.strategy_name,
                     signal="grid_fill_websocket",
                     symbol=self.symbol,
+                    notional=trade_notional,
                 )
             self._confirm_ws_hedge_order(response, counter_side=counter_side, counter_price=counter_price, amount=counter_amount)
 

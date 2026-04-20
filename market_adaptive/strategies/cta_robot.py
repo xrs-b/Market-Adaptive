@@ -248,6 +248,8 @@ class CTARobot(BaseStrategyRobot):
         self._signal_flip_pending = False
         self._same_direction_cooldown_until: dict[str, float] = {"long": 0.0, "short": 0.0}
         self._same_direction_stop_events: dict[str, deque[float]] = {"long": deque(), "short": deque()}
+        self._fast_track_reuse_until: dict[str, float] = {"long": 0.0, "short": 0.0}
+        self._fast_track_reuse_signature: dict[str, tuple | None] = {"long": None, "short": None}
 
     def _resolve_obv_gate(self, signal: MTFSignal):
         return resolve_dynamic_obv_gate_for_signal(
@@ -447,12 +449,53 @@ class CTARobot(BaseStrategyRobot):
         )
 
     def reset_local_position(self, reason: str) -> None:
-        del reason
+        previous_side = self.position.side if self.position is not None else None
         self.position = None
+        if previous_side is not None and reason in {"position_mismatch", "exchange_flat"}:
+            self._activate_same_direction_cooldown(previous_side, f"recovery_reset:{reason}")
         self._publish_risk_profile(None)
 
     def _cooldown_remaining_seconds(self, side: str) -> int:
         until_ts = float(self._same_direction_cooldown_until.get(side, 0.0))
+        remaining = max(0.0, until_ts - float(self._time_provider()))
+        return int(remaining)
+
+    def _build_fast_track_reuse_signature(self, signal: TrendSignal) -> tuple | None:
+        if signal.entry_pathway is not EntryPathway.FAST_TRACK or signal.direction <= 0:
+            return None
+        return (
+            int(signal.direction),
+            str(signal.execution_trigger_family or "waiting"),
+            str(signal.execution_trigger_reason or ""),
+            signal.execution_memory_bars_ago,
+        )
+
+    def _arm_fast_track_reuse_cooldown(self, signal: TrendSignal) -> None:
+        signature = self._build_fast_track_reuse_signature(signal)
+        if signature is None:
+            return
+        cooldown_seconds = max(0, int(getattr(self.config, "fast_track_reuse_cooldown_seconds", 300)))
+        if cooldown_seconds <= 0:
+            return
+        side = "long" if signal.direction > 0 else "short"
+        self._fast_track_reuse_signature[side] = signature
+        self._fast_track_reuse_until[side] = float(self._time_provider()) + cooldown_seconds
+        logger.info(
+            "CTA fast-track reuse cooldown armed | symbol=%s side=%s cooldown=%ss signature=%s",
+            self.symbol,
+            side,
+            cooldown_seconds,
+            signature,
+        )
+
+    def _fast_track_reuse_remaining_seconds(self, signal: TrendSignal) -> int:
+        signature = self._build_fast_track_reuse_signature(signal)
+        if signature is None:
+            return 0
+        side = "long" if signal.direction > 0 else "short"
+        if self._fast_track_reuse_signature.get(side) != signature:
+            return 0
+        until_ts = float(self._fast_track_reuse_until.get(side, 0.0))
         remaining = max(0.0, until_ts - float(self._time_provider()))
         return int(remaining)
 
@@ -1411,6 +1454,7 @@ class CTARobot(BaseStrategyRobot):
         self._signal_flip_pending = False
         self._publish_risk_profile(signal)
         if self.notifier is not None and hasattr(self.notifier, "notify_trade"):
+            trade_notional = self.client.estimate_notional(self.symbol, filled_amount, entry_price)
             self.notifier.notify_trade(
                 side=side,
                 price=entry_price,
@@ -1418,6 +1462,7 @@ class CTARobot(BaseStrategyRobot):
                 strategy=self.strategy_name,
                 signal=f"cta_open_{position_side}",
                 symbol=self.symbol,
+                notional=trade_notional,
             )
         action = f"cta:open_{position_side}"
         if signal.quick_trade_mode:
@@ -1435,6 +1480,28 @@ class CTARobot(BaseStrategyRobot):
         side: str,
         amount: float,
     ) -> tuple[str | None, str, float, OrderFlowAssessment | None]:
+        position_side = "long" if signal.direction > 0 else "short"
+        cooldown_remaining = self._cooldown_remaining_seconds(position_side)
+        if cooldown_remaining > 0:
+            logger.info(
+                "CTA same-direction cooldown blocked | symbol=%s side=%s remaining=%ss",
+                self.symbol,
+                position_side,
+                cooldown_remaining,
+            )
+            return "cta:same_direction_cooldown", position_side, 0.0, None
+
+        fast_track_reuse_remaining = self._fast_track_reuse_remaining_seconds(signal)
+        if fast_track_reuse_remaining > 0:
+            logger.info(
+                "CTA fast-track reuse cooldown blocked | symbol=%s side=%s remaining=%ss trigger=%s",
+                self.symbol,
+                position_side,
+                fast_track_reuse_remaining,
+                signal.execution_trigger_reason,
+            )
+            return "cta:fast_track_reuse_cooldown", position_side, 0.0, None
+
         order_flow_assessment: OrderFlowAssessment | None = self._assess_order_flow(side=side, amount=amount)
         pathway_result = self._apply_entry_pathway_checks(
             signal=signal,
@@ -1445,7 +1512,6 @@ class CTARobot(BaseStrategyRobot):
         if pathway_result is not None:
             return pathway_result, "", 0.0, order_flow_assessment
 
-        position_side = "long" if signal.direction > 0 else "short"
         notional_price = signal.price
         if order_flow_assessment is not None and order_flow_assessment.reference_price is not None:
             notional_price = max(notional_price, order_flow_assessment.reference_price)
@@ -1503,6 +1569,7 @@ class CTARobot(BaseStrategyRobot):
             filled_amount=filled_amount,
             entry_price=entry_price,
         )
+        self._arm_fast_track_reuse_cooldown(signal)
         return self._finalize_open_action(
             signal=signal,
             side=side,

@@ -304,6 +304,7 @@ class NotificationTests(unittest.TestCase):
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
         self.assertEqual(field_map["交易对"], "BTC/USDT")
         self.assertEqual(field_map["策略"], "CTA 策略")
+        self.assertEqual(field_map["名义成交额"], "20.0000 USDT")
         self.assertEqual(field_map["触发信号"], "cta_open_long")
 
     def test_discord_notifier_throttles_duplicate_market_shift_notifications(self) -> None:

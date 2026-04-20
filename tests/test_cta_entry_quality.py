@@ -15,6 +15,7 @@ def _robot() -> CTARobot:
         quick_trade_minimum_expected_rr=1.35,
         starter_entry_minimum_expected_rr=0.6,
         standard_entry_minimum_expected_rr=1.4,
+        fast_track_reuse_cooldown_seconds=300,
         relaxed_short_minimum_score=48.0,
         relaxed_short_max_countertrend_score_gap=12.0,
         relaxed_short_require_early_or_breakdown=True,
@@ -277,3 +278,60 @@ def test_standard_order_flow_blocks_on_empty_order_book() -> None:
     )
 
     assert robot._apply_standard_order_flow_checks(signal=signal, side="buy", amount=1.0, order_flow_assessment=assessment) == "cta:order_flow_blocked"
+
+
+def test_reset_local_position_arms_same_direction_cooldown_for_position_mismatch() -> None:
+    robot = _robot()
+    robot.symbol = "BTC/USDT"
+    robot._time_provider = lambda: 1000.0
+    robot._same_direction_cooldown_until = {"long": 0.0, "short": 0.0}
+    from collections import deque
+    robot._same_direction_stop_events = {"long": deque(), "short": deque()}
+    robot.position = SimpleNamespace(side="long")
+    robot._publish_risk_profile = lambda signal: None
+
+    robot.reset_local_position("position_mismatch")
+
+    assert robot._same_direction_cooldown_until["long"] > 1000.0
+
+
+def test_prepare_entry_execution_context_blocks_same_direction_during_cooldown() -> None:
+    robot = _robot()
+    robot.symbol = "BTC/USDT"
+    robot._time_provider = lambda: 1000.0
+    robot._same_direction_cooldown_until = {"long": 1200.0, "short": 0.0}
+    robot._fast_track_reuse_until = {"long": 0.0, "short": 0.0}
+    robot._fast_track_reuse_signature = {"long": None, "short": None}
+    signal = _signal(direction=1, raw_direction=1, entry_pathway=EntryPathway.FAST_TRACK)
+
+    result, position_side, notional_price, order_flow = robot._prepare_entry_execution_context(signal=signal, side="buy", amount=1.0)
+
+    assert result == "cta:same_direction_cooldown"
+    assert position_side == "long"
+    assert notional_price == 0.0
+    assert order_flow is None
+
+
+def test_arm_fast_track_reuse_cooldown_blocks_repeated_fast_track_long_setup() -> None:
+    robot = _robot()
+    robot.symbol = "BTC/USDT"
+    robot._time_provider = lambda: 1000.0
+    robot._same_direction_cooldown_until = {"long": 0.0, "short": 0.0}
+    signal = _signal(
+        direction=1,
+        raw_direction=1,
+        entry_pathway=EntryPathway.FAST_TRACK,
+        execution_trigger_family="bullish_memory_breakout",
+        execution_trigger_reason="Triggered via Memory Window: KDJ crossed 4 bars ago + Price Breakout NOW",
+        execution_memory_bars_ago=4,
+    )
+    robot._fast_track_reuse_until = {"long": 0.0, "short": 0.0}
+    robot._fast_track_reuse_signature = {"long": None, "short": None}
+
+    robot._arm_fast_track_reuse_cooldown(signal)
+    result, position_side, notional_price, order_flow = robot._prepare_entry_execution_context(signal=signal, side="buy", amount=1.0)
+
+    assert result == "cta:fast_track_reuse_cooldown"
+    assert position_side == "long"
+    assert notional_price == 0.0
+    assert order_flow is None

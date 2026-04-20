@@ -107,17 +107,18 @@ class DiscordNotifier:
         payload = self._build_embed_payload(title=title, description=message, color=color)
         return self._submit_coroutine(self._post_payload(payload))
 
-    def notify_trade(self, side: str, price: float, size: float, strategy: str, signal: str, *, symbol: str | None = None) -> bool:
+    def notify_trade(self, side: str, price: float, size: float, strategy: str, signal: str, *, symbol: str | None = None, notional: float | None = None) -> bool:
         if not self.enabled:
             return False
 
         normalized_strategy = str(strategy or "unknown")
         normalized_signal = str(signal or "trade")
+        resolved_notional = abs(float(notional)) if notional not in (None, "") else abs(float(price)) * abs(float(size))
         trade = {
             "side": str(side).upper(),
             "price": float(price),
             "size": float(size),
-            "notional": abs(float(price)) * abs(float(size)),
+            "notional": float(resolved_notional),
             "captured_at": datetime.now(timezone.utc),
         }
 
@@ -131,7 +132,7 @@ class DiscordNotifier:
             {"name": "策略", "value": self._display_strategy_name(normalized_strategy), "inline": True},
             {"name": "成交价", "value": f"{trade['price']:.4f}", "inline": True},
             {"name": "成交量", "value": f"{trade['size']:.8f}", "inline": True},
-            {"name": "成交额", "value": f"{trade['notional']:.4f} USDT", "inline": True},
+            {"name": "名义成交额", "value": f"{trade['notional']:.4f} USDT", "inline": True},
             {"name": "触发信号", "value": normalized_signal, "inline": False},
         ]
         payload = self._build_embed_payload(title=title, description="订单已成交，请留意仓位变化与后续管理动作。", color=EMBED_COLOR_GOOD, fields=fields)
