@@ -17,6 +17,43 @@ from scripts.cta_backtest_sandbox import load_csv, CTABacktester
 from market_adaptive.config import CTAConfig, ExecutionConfig
 
 
+def _build_aggregate(results: list[dict]) -> dict:
+    total_trades = sum(r['report']['total_trades'] for r in results)
+    total_fees = sum(r['report']['fees_paid'] for r in results)
+    total_realized = sum(r['report']['realized_pnl'] for r in results)
+    avg_return = sum(r['report']['total_return_pct'] for r in results) / len(results) if results else 0.0
+    max_drawdown_pct = max((r['report']['max_drawdown_pct'] for r in results), default=0.0)
+    opened_obv_scalp_actions = sum(r['report']['diagnostics'].get('opened_obv_scalp_actions', 0) for r in results)
+    blocked_obv = sum(r['report']['diagnostics'].get('blocked_obv', 0) for r in results)
+    directional_ready = sum(r['report']['diagnostics'].get('directional_ready', 0) for r in results)
+    opened_actions = sum(r['report']['diagnostics'].get('opened_actions', 0) for r in results)
+    quality_tier_counts = Counter()
+    entry_pathway_counts = Counter()
+    opened_by_pathway = Counter()
+    opened_by_quality_tier = Counter()
+    for result in results:
+        diagnostics = result['report']['diagnostics']
+        quality_tier_counts.update(diagnostics.get('quality_tier_counts', {}))
+        entry_pathway_counts.update(diagnostics.get('entry_pathway_counts', {}))
+        opened_by_pathway.update(diagnostics.get('opened_by_pathway', {}))
+        opened_by_quality_tier.update(diagnostics.get('opened_by_quality_tier', {}))
+    return {
+        'avg_segment_return_pct': avg_return,
+        'max_segment_drawdown_pct': max_drawdown_pct,
+        'total_trades': total_trades,
+        'total_fees_paid': total_fees,
+        'total_realized_pnl': total_realized,
+        'opened_actions': opened_actions,
+        'opened_obv_scalp_actions': opened_obv_scalp_actions,
+        'blocked_obv': blocked_obv,
+        'directional_ready': directional_ready,
+        'quality_tier_counts': dict(quality_tier_counts),
+        'entry_pathway_counts': dict(entry_pathway_counts),
+        'opened_by_pathway': dict(opened_by_pathway),
+        'opened_by_quality_tier': dict(opened_by_quality_tier),
+    }
+
+
 def main() -> int:
     csv_path = ROOT / 'data' / 'okx' / 'BTC-USDT-SWAP' / '1m.csv'
     out_dir_name = os.environ.get('CTA_BACKTEST_OUTDIR', 'cta_backtest_segments')
@@ -31,7 +68,7 @@ def main() -> int:
     dry_bt = CTABacktester(df.tail(min(total_rows, 20000)).reset_index(drop=True), cta_config=base_cfg, execution_config=ExecutionConfig(), symbol='BTC/USDT', warmup_bars=400)
     warmup = int(dry_bt.warmup_bars)
 
-    segment_total_rows = 20000
+    segment_total_rows = int(os.environ.get('CTA_SEGMENT_TOTAL_ROWS', '20000'))
     usable_rows_per_segment = max(500, segment_total_rows - warmup)
     if usable_rows_per_segment <= 0:
         raise SystemExit(f'Invalid segmentation config: warmup={warmup}, segment_total_rows={segment_total_rows}')
@@ -87,29 +124,23 @@ def main() -> int:
             'opened_by_pathway': report.diagnostics.get('opened_by_pathway', {}),
         }, ensure_ascii=False), flush=True)
         results.append(segment_payload)
+        partial_summary = {
+            'csv_path': str(csv_path),
+            'total_rows': total_rows,
+            'derived_warmup_bars': warmup,
+            'segment_total_rows': segment_total_rows,
+            'usable_rows_per_segment': usable_rows_per_segment,
+            'segments': num_segments,
+            'segment_start': segment_start,
+            'segment_end': segment_end,
+            'segments_ran': len(results),
+            'last_completed_segment': seg_idx + 1,
+            'aggregate': _build_aggregate(results),
+        }
+        summary_path.write_text(json.dumps(partial_summary, ensure_ascii=False, indent=2))
 
     if not results:
         raise SystemExit('No segments were run; check CTA_SEGMENT_START/CTA_SEGMENT_END')
-
-    total_trades = sum(r['report']['total_trades'] for r in results)
-    total_fees = sum(r['report']['fees_paid'] for r in results)
-    total_realized = sum(r['report']['realized_pnl'] for r in results)
-    avg_return = sum(r['report']['total_return_pct'] for r in results) / len(results)
-    max_drawdown_pct = max(r['report']['max_drawdown_pct'] for r in results)
-    opened_obv_scalp_actions = sum(r['report']['diagnostics'].get('opened_obv_scalp_actions', 0) for r in results)
-    blocked_obv = sum(r['report']['diagnostics'].get('blocked_obv', 0) for r in results)
-    directional_ready = sum(r['report']['diagnostics'].get('directional_ready', 0) for r in results)
-    opened_actions = sum(r['report']['diagnostics'].get('opened_actions', 0) for r in results)
-    quality_tier_counts = Counter()
-    entry_pathway_counts = Counter()
-    opened_by_pathway = Counter()
-    opened_by_quality_tier = Counter()
-    for result in results:
-        diagnostics = result['report']['diagnostics']
-        quality_tier_counts.update(diagnostics.get('quality_tier_counts', {}))
-        entry_pathway_counts.update(diagnostics.get('entry_pathway_counts', {}))
-        opened_by_pathway.update(diagnostics.get('opened_by_pathway', {}))
-        opened_by_quality_tier.update(diagnostics.get('opened_by_quality_tier', {}))
 
     summary = {
         'csv_path': str(csv_path),
@@ -121,21 +152,8 @@ def main() -> int:
         'segment_start': segment_start,
         'segment_end': segment_end,
         'segments_ran': len(results),
-        'aggregate': {
-            'avg_segment_return_pct': avg_return,
-            'max_segment_drawdown_pct': max_drawdown_pct,
-            'total_trades': total_trades,
-            'total_fees_paid': total_fees,
-            'total_realized_pnl': total_realized,
-            'opened_actions': opened_actions,
-            'opened_obv_scalp_actions': opened_obv_scalp_actions,
-            'blocked_obv': blocked_obv,
-            'directional_ready': directional_ready,
-            'quality_tier_counts': dict(quality_tier_counts),
-            'entry_pathway_counts': dict(entry_pathway_counts),
-            'opened_by_pathway': dict(opened_by_pathway),
-            'opened_by_quality_tier': dict(opened_by_quality_tier),
-        },
+        'last_completed_segment': results[-1]['segment_index'],
+        'aggregate': _build_aggregate(results),
     }
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2))
     print('SUMMARY', json.dumps(summary['aggregate'], ensure_ascii=False), flush=True)
