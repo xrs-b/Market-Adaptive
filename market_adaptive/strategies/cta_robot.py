@@ -1334,76 +1334,28 @@ class CTARobot(BaseStrategyRobot):
             entry_reason = f"{entry_reason} | Relaxations: {', '.join(signal.relaxed_reasons)}"
         logger.info("[TRADE_OPEN] Type: %s | Pathway: %s | Reason: %s", entry_type, signal.entry_pathway.name, entry_reason)
 
-    def _open_position(self, signal: TrendSignal) -> str:
-        side = "buy" if signal.direction > 0 else "sell"
-        amount_result, amount, sentiment_halved = self._resolve_entry_amount(signal=signal, side=side)
-        if amount_result is not None:
-            self._publish_risk_profile(None)
-            return amount_result
-
-        order_flow_assessment: OrderFlowAssessment | None = self._assess_order_flow(side=side, amount=amount)
-        pathway_result = self._apply_entry_pathway_checks(
-            signal=signal,
-            side=side,
-            amount=amount,
-            order_flow_assessment=order_flow_assessment,
-        )
-        if pathway_result is not None:
-            self._publish_risk_profile(None)
-            return pathway_result
-
-        position_side = "long" if signal.direction > 0 else "short"
-        notional_price = signal.price
-        if order_flow_assessment is not None and order_flow_assessment.reference_price is not None:
-            notional_price = max(notional_price, order_flow_assessment.reference_price)
-        risk_budget_result = self._check_entry_risk_budget(
-            signal=signal,
-            amount=amount,
-            notional_price=notional_price,
-        )
-        if risk_budget_result is not None:
-            self._publish_risk_profile(None)
-            return risk_budget_result
-
-        reward_risk_result = self._check_entry_reward_risk(
-            signal=signal,
-            side=side,
-            reference_price=notional_price,
-        )
-        if reward_risk_result is not None:
-            self._publish_risk_profile(None)
-            return reward_risk_result
-
-        self._log_trade_open_context(signal=signal, side=side)
-
-        entry_order = self._place_entry_order(
-            side=side,
-            amount=amount,
-            order_flow_assessment=order_flow_assessment,
-            execution_entry_mode=signal.execution_entry_mode,
-        )
+    def _finalize_entry_fill(
+        self,
+        *,
+        entry_order: EntryOrderResult,
+        requested_amount: float,
+    ) -> tuple[str | None, float, float]:
         filled_amount = self._normalize_order_amount(entry_order.filled_amount)
-        fill_ratio = (filled_amount / amount) if amount > 0 else 0.0
+        fill_ratio = (filled_amount / requested_amount) if requested_amount > 0 else 0.0
         if filled_amount <= 0:
-            self._publish_risk_profile(None)
-            return "cta:low_fill_ratio" if entry_order.used_limit_order else "cta:risk_blocked"
+            return ("cta:low_fill_ratio" if entry_order.used_limit_order else "cta:risk_blocked"), 0.0, 0.0
         if entry_order.used_limit_order and fill_ratio < 0.5:
-            self._publish_risk_profile(None)
-            return "cta:low_fill_ratio"
+            return "cta:low_fill_ratio", filled_amount, fill_ratio
+        return None, filled_amount, fill_ratio
 
-        entry_price = (
-            float(entry_order.average_price)
-            if entry_order.average_price not in (None, 0, "0")
-            else self._extract_order_price(
-                entry_order.order,
-                fallback=(
-                    order_flow_assessment.expected_average_price
-                    if order_flow_assessment is not None and order_flow_assessment.expected_average_price is not None
-                    else notional_price
-                ),
-            )
-        )
-        entry_price = float(entry_price)
+    def _build_managed_position(
+        self,
+        *,
+        signal: TrendSignal,
+        position_side: str,
+        filled_amount: float,
+        entry_price: float,
+    ) -> ManagedPosition:
         atr_value = self._normalized_atr(entry_price, signal.atr)
         stop_loss_multiplier = self._resolve_dynamic_stop_loss_multiplier(signal)
         stop_distance = atr_value * stop_loss_multiplier
@@ -1411,8 +1363,7 @@ class CTARobot(BaseStrategyRobot):
             stop_price = entry_price - stop_distance
         else:
             stop_price = entry_price + stop_distance
-
-        self.position = ManagedPosition(
+        return ManagedPosition(
             side=position_side,
             entry_price=entry_price,
             initial_size=filled_amount,
@@ -1424,6 +1375,39 @@ class CTARobot(BaseStrategyRobot):
             risk_percent=signal.risk_percent,
             quick_trade_mode=signal.quick_trade_mode,
         )
+
+    def _resolve_filled_entry_price(
+        self,
+        *,
+        entry_order: EntryOrderResult,
+        order_flow_assessment: OrderFlowAssessment | None,
+        fallback_price: float,
+    ) -> float:
+        entry_price = (
+            float(entry_order.average_price)
+            if entry_order.average_price not in (None, 0, "0")
+            else self._extract_order_price(
+                entry_order.order,
+                fallback=(
+                    order_flow_assessment.expected_average_price
+                    if order_flow_assessment is not None and order_flow_assessment.expected_average_price is not None
+                    else fallback_price
+                ),
+            )
+        )
+        return float(entry_price)
+
+    def _finalize_open_action(
+        self,
+        *,
+        signal: TrendSignal,
+        side: str,
+        position_side: str,
+        filled_amount: float,
+        entry_price: float,
+        entry_order: EntryOrderResult,
+        sentiment_halved: bool,
+    ) -> str:
         self._signal_flip_pending = False
         self._publish_risk_profile(signal)
         if self.notifier is not None and hasattr(self.notifier, "notify_trade"):
@@ -1443,6 +1427,120 @@ class CTARobot(BaseStrategyRobot):
         if sentiment_halved:
             action += "_sentiment_halved"
         return action
+
+    def _prepare_entry_execution_context(
+        self,
+        *,
+        signal: TrendSignal,
+        side: str,
+        amount: float,
+    ) -> tuple[str | None, str, float, OrderFlowAssessment | None]:
+        order_flow_assessment: OrderFlowAssessment | None = self._assess_order_flow(side=side, amount=amount)
+        pathway_result = self._apply_entry_pathway_checks(
+            signal=signal,
+            side=side,
+            amount=amount,
+            order_flow_assessment=order_flow_assessment,
+        )
+        if pathway_result is not None:
+            return pathway_result, "", 0.0, order_flow_assessment
+
+        position_side = "long" if signal.direction > 0 else "short"
+        notional_price = signal.price
+        if order_flow_assessment is not None and order_flow_assessment.reference_price is not None:
+            notional_price = max(notional_price, order_flow_assessment.reference_price)
+        risk_budget_result = self._check_entry_risk_budget(
+            signal=signal,
+            amount=amount,
+            notional_price=notional_price,
+        )
+        if risk_budget_result is not None:
+            return risk_budget_result, position_side, notional_price, order_flow_assessment
+
+        reward_risk_result = self._check_entry_reward_risk(
+            signal=signal,
+            side=side,
+            reference_price=notional_price,
+        )
+        if reward_risk_result is not None:
+            return reward_risk_result, position_side, notional_price, order_flow_assessment
+
+        self._log_trade_open_context(signal=signal, side=side)
+        return None, position_side, notional_price, order_flow_assessment
+
+    def _execute_entry_and_build_position(
+        self,
+        *,
+        signal: TrendSignal,
+        side: str,
+        amount: float,
+        position_side: str,
+        notional_price: float,
+        order_flow_assessment: OrderFlowAssessment | None,
+        sentiment_halved: bool,
+    ) -> str:
+        entry_order = self._place_entry_order(
+            side=side,
+            amount=amount,
+            order_flow_assessment=order_flow_assessment,
+            execution_entry_mode=signal.execution_entry_mode,
+        )
+        fill_result, filled_amount, _fill_ratio = self._finalize_entry_fill(
+            entry_order=entry_order,
+            requested_amount=amount,
+        )
+        if fill_result is not None:
+            return fill_result
+
+        entry_price = self._resolve_filled_entry_price(
+            entry_order=entry_order,
+            order_flow_assessment=order_flow_assessment,
+            fallback_price=notional_price,
+        )
+        self.position = self._build_managed_position(
+            signal=signal,
+            position_side=position_side,
+            filled_amount=filled_amount,
+            entry_price=entry_price,
+        )
+        return self._finalize_open_action(
+            signal=signal,
+            side=side,
+            position_side=position_side,
+            filled_amount=filled_amount,
+            entry_price=entry_price,
+            entry_order=entry_order,
+            sentiment_halved=sentiment_halved,
+        )
+
+    def _open_position(self, signal: TrendSignal) -> str:
+        side = "buy" if signal.direction > 0 else "sell"
+        amount_result, amount, sentiment_halved = self._resolve_entry_amount(signal=signal, side=side)
+        if amount_result is not None:
+            self._publish_risk_profile(None)
+            return amount_result
+
+        context_result, position_side, notional_price, order_flow_assessment = self._prepare_entry_execution_context(
+            signal=signal,
+            side=side,
+            amount=amount,
+        )
+        if context_result is not None:
+            self._publish_risk_profile(None)
+            return context_result
+
+        execution_result = self._execute_entry_and_build_position(
+            signal=signal,
+            side=side,
+            amount=amount,
+            position_side=position_side,
+            notional_price=notional_price,
+            order_flow_assessment=order_flow_assessment,
+            sentiment_halved=sentiment_halved,
+        )
+        if execution_result in {"cta:low_fill_ratio", "cta:risk_blocked"}:
+            self._publish_risk_profile(None)
+        return execution_result
 
     def _calculate_entry_amount(self, reference_price: float) -> float:
         target_margin = max(0.0, float(self.config.margin_fraction_per_trade))
