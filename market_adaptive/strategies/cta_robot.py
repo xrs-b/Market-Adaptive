@@ -1273,8 +1273,7 @@ class CTARobot(BaseStrategyRobot):
             return "cta:reward_risk_blocked"
         return None
 
-    def _open_position(self, signal: TrendSignal) -> str:
-        side = "buy" if signal.direction > 0 else "sell"
+    def _resolve_entry_amount(self, *, signal: TrendSignal, side: str) -> tuple[str | None, float, bool]:
         amount = self._calculate_entry_amount(signal.price)
         sentiment_halved = False
 
@@ -1283,57 +1282,41 @@ class CTARobot(BaseStrategyRobot):
             amount *= max(0.0, min(1.0, float(getattr(self.config, 'obv_scalp_entry_fraction', 0.35))))
         amount = self._normalize_order_amount(amount)
         if amount <= 0:
-            self._publish_risk_profile(None)
-            return "cta:risk_blocked"
+            return "cta:risk_blocked", 0.0, False
 
         if side == "buy" and self.sentiment_analyst is not None:
             sentiment_decision = self.sentiment_analyst.evaluate_cta_buy(self.symbol)
             if sentiment_decision.blocked:
-                self._publish_risk_profile(None)
-                return "cta:sentiment_blocked"
+                return "cta:sentiment_blocked", 0.0, False
             if sentiment_decision.size_multiplier < 1.0:
                 amount = self._normalize_order_amount(amount * sentiment_decision.size_multiplier)
                 sentiment_halved = amount > 0
                 if amount <= 0:
-                    self._publish_risk_profile(None)
-                    return "cta:sentiment_blocked"
+                    return "cta:sentiment_blocked", 0.0, False
+        return None, amount, sentiment_halved
 
-        order_flow_assessment: OrderFlowAssessment | None = self._assess_order_flow(side=side, amount=amount)
-        pathway_result = self._apply_entry_pathway_checks(
-            signal=signal,
-            side=side,
-            amount=amount,
-            order_flow_assessment=order_flow_assessment,
-        )
-        if pathway_result is not None:
-            self._publish_risk_profile(None)
-            return pathway_result
-
+    def _check_entry_risk_budget(
+        self,
+        *,
+        signal: TrendSignal,
+        amount: float,
+        notional_price: float,
+    ) -> str | None:
         position_side = "long" if signal.direction > 0 else "short"
-        notional_price = signal.price
-        if order_flow_assessment is not None and order_flow_assessment.reference_price is not None:
-            notional_price = max(notional_price, order_flow_assessment.reference_price)
-        if self.risk_manager is not None:
-            requested_notional = self.client.estimate_notional(self.symbol, amount, notional_price)
-            allowed, _reason = self.risk_manager.can_open_new_position(
-                self.symbol,
-                requested_notional,
-                strategy_name=self.strategy_name,
-                opening_side=position_side,
-            )
-            if not allowed:
-                self._publish_risk_profile(None)
-                return "cta:risk_blocked"
-
-        reward_risk_result = self._check_entry_reward_risk(
-            signal=signal,
-            side=side,
-            reference_price=notional_price,
+        if self.risk_manager is None:
+            return None
+        requested_notional = self.client.estimate_notional(self.symbol, amount, notional_price)
+        allowed, _reason = self.risk_manager.can_open_new_position(
+            self.symbol,
+            requested_notional,
+            strategy_name=self.strategy_name,
+            opening_side=position_side,
         )
-        if reward_risk_result is not None:
-            self._publish_risk_profile(None)
-            return reward_risk_result
+        if not allowed:
+            return "cta:risk_blocked"
+        return None
 
+    def _log_trade_open_context(self, *, signal: TrendSignal, side: str) -> None:
         if signal.execution_memory_active and (signal.execution_breakout or signal.weak_bull_bias):
             logger.info(
                 "CTA entry trigger | symbol=%s side=%s %s",
@@ -1350,6 +1333,48 @@ class CTARobot(BaseStrategyRobot):
         if signal.relaxed_entry and signal.relaxed_reasons:
             entry_reason = f"{entry_reason} | Relaxations: {', '.join(signal.relaxed_reasons)}"
         logger.info("[TRADE_OPEN] Type: %s | Pathway: %s | Reason: %s", entry_type, signal.entry_pathway.name, entry_reason)
+
+    def _open_position(self, signal: TrendSignal) -> str:
+        side = "buy" if signal.direction > 0 else "sell"
+        amount_result, amount, sentiment_halved = self._resolve_entry_amount(signal=signal, side=side)
+        if amount_result is not None:
+            self._publish_risk_profile(None)
+            return amount_result
+
+        order_flow_assessment: OrderFlowAssessment | None = self._assess_order_flow(side=side, amount=amount)
+        pathway_result = self._apply_entry_pathway_checks(
+            signal=signal,
+            side=side,
+            amount=amount,
+            order_flow_assessment=order_flow_assessment,
+        )
+        if pathway_result is not None:
+            self._publish_risk_profile(None)
+            return pathway_result
+
+        position_side = "long" if signal.direction > 0 else "short"
+        notional_price = signal.price
+        if order_flow_assessment is not None and order_flow_assessment.reference_price is not None:
+            notional_price = max(notional_price, order_flow_assessment.reference_price)
+        risk_budget_result = self._check_entry_risk_budget(
+            signal=signal,
+            amount=amount,
+            notional_price=notional_price,
+        )
+        if risk_budget_result is not None:
+            self._publish_risk_profile(None)
+            return risk_budget_result
+
+        reward_risk_result = self._check_entry_reward_risk(
+            signal=signal,
+            side=side,
+            reference_price=notional_price,
+        )
+        if reward_risk_result is not None:
+            self._publish_risk_profile(None)
+            return reward_risk_result
+
+        self._log_trade_open_context(signal=signal, side=side)
 
         entry_order = self._place_entry_order(
             side=side,
