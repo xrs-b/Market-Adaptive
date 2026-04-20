@@ -685,18 +685,17 @@ class RiskControlManager:
                 )
             )
             if self.notifier is not None:
-                daily_pnl_pct = (previous_daily_pnl / previous_daily_start_equity * 100.0) if previous_daily_start_equity > 0 else 0.0
                 self.notifier.send(
                     "账号资金快照",
                     (
-                        f"日期：{previous_date}\n"
+                        f"日期：{current_date}\n"
                         f"当前权益：{float(current_equity):.4f} USDT\n"
                         f"初始资金：{initial_equity:.4f} USDT\n"
                         f"总盈亏：{total_pnl:+.4f} USDT\n"
                         f"总盈亏率：{total_pnl_pct:+.2f}%\n"
-                        f"今日起始资金：{previous_daily_start_equity:.4f} USDT\n"
-                        f"今日盈亏：{previous_daily_pnl:+.4f} USDT\n"
-                        f"今日盈亏率：{daily_pnl_pct:+.2f}%"
+                        f"今日起始资金：{float(current_equity):.4f} USDT\n"
+                        f"今日盈亏：{0.0:+.4f} USDT\n"
+                        f"今日盈亏率：{0.0:+.2f}%"
                     ),
                 )
 

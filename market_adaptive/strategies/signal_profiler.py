@@ -190,14 +190,16 @@ class SignalProfiler:
 
         execution_price = self._normalize_execution_price(getattr(signal, "current_price", None))
 
+        execution_trigger = getattr(signal, "execution_trigger", None)
+
         record = CycleAuditRecord(
             cycle=self.counters.total_cycles,
             server_time_iso=signal.server_time_iso,
             local_time_iso=signal.local_time_iso,
             server_local_skew_ms=signal.server_local_skew_ms,
             major_supertrend_direction=signal.major_direction,
-            trigger_family=str(getattr(signal.execution_trigger, "family", "waiting")),
-            trigger_group=str(getattr(signal.execution_trigger, "group", "waiting")),
+            trigger_family=str(getattr(execution_trigger, "family", "waiting")),
+            trigger_group=str(getattr(execution_trigger, "group", "waiting")),
             swing_rsi=float(signal.swing_rsi),
             execution_obv_zscore=float(signal.execution_obv_zscore),
             execution_obv_threshold=float(signal.execution_obv_threshold if execution_obv_threshold is None else execution_obv_threshold),

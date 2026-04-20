@@ -146,6 +146,20 @@ class ExecutionConfig:
 
 
 @dataclass
+class WebsocketRuntimeConfig:
+    enabled: bool = True
+    ticker_enabled: bool = True
+    orders_enabled: bool = True
+    positions_enabled: bool = True
+    reconnect_delay_seconds: float = 1.0
+    reconnect_max_delay_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        self.reconnect_delay_seconds = max(0.01, float(self.reconnect_delay_seconds))
+        self.reconnect_max_delay_seconds = max(self.reconnect_delay_seconds, float(self.reconnect_max_delay_seconds))
+
+
+@dataclass
 class CTAConfig:
     symbol: str = "BTC/USDT"
     margin_fraction_per_trade: float = 0.05
@@ -262,6 +276,28 @@ class CTAConfig:
     slow_ema: int = 21  # legacy compatibility
     polling_interval_seconds: int = 60
     cta_assist_trim_ratio: float = 0.25
+    same_direction_stop_cooldown_seconds: int = 300
+    same_direction_stop_cooldown_window_seconds: int = 1200
+    same_direction_stop_cooldown_escalation_count: int = 2
+    same_direction_stop_cooldown_escalation_seconds: int = 900
+    obv_scalp_entry_fraction: float = 0.35
+    obv_scalp_first_take_profit_pct: float = 0.006
+    obv_scalp_second_take_profit_pct: float = 0.012
+    obv_scalp_stop_multiplier_scale: float = 0.60
+    obv_scalp_break_even_profit_pct: float = 0.003
+    obv_scalp_max_hold_seconds: int = 1800
+    relaxed_short_minimum_score: float = 48.0
+    relaxed_short_minimum_expected_rr: float = 1.15
+    relaxed_short_max_countertrend_score_gap: float = 12.0
+    relaxed_short_require_early_or_breakdown: bool = True
+    obv_scalp_min_bearish_score: float = 52.0
+    obv_scalp_max_bullish_score: float = 62.0
+    obv_scalp_require_early_bearish: bool = True
+    obv_scalp_max_positive_obv_zscore: float = 0.15
+    quick_trade_minimum_expected_rr: float = 1.35
+    starter_quality_minimum_score: float = 72.0
+    scale_in_quality_minimum_score: float = 68.0
+    starter_countertrend_max_score_gap: float = 10.0
 
     def __post_init__(self) -> None:
         default_execution = "15m"
@@ -347,6 +383,16 @@ class CTAConfig:
         self.minimum_expected_rr = max(0.0, float(self.minimum_expected_rr))
         self.relaxed_entry_minimum_expected_rr = max(self.minimum_expected_rr, float(self.relaxed_entry_minimum_expected_rr))
         self.starter_entry_minimum_expected_rr = max(self.relaxed_entry_minimum_expected_rr, float(self.starter_entry_minimum_expected_rr))
+        self.relaxed_short_minimum_score = max(0.0, float(self.relaxed_short_minimum_score))
+        self.relaxed_short_minimum_expected_rr = max(self.relaxed_entry_minimum_expected_rr, float(self.relaxed_short_minimum_expected_rr))
+        self.relaxed_short_max_countertrend_score_gap = max(0.0, float(self.relaxed_short_max_countertrend_score_gap))
+        self.obv_scalp_min_bearish_score = max(0.0, float(self.obv_scalp_min_bearish_score))
+        self.obv_scalp_max_bullish_score = max(0.0, float(self.obv_scalp_max_bullish_score))
+        self.obv_scalp_max_positive_obv_zscore = float(self.obv_scalp_max_positive_obv_zscore)
+        self.quick_trade_minimum_expected_rr = max(self.relaxed_short_minimum_expected_rr, float(self.quick_trade_minimum_expected_rr))
+        self.starter_quality_minimum_score = max(0.0, float(self.starter_quality_minimum_score))
+        self.scale_in_quality_minimum_score = max(0.0, float(self.scale_in_quality_minimum_score))
+        self.starter_countertrend_max_score_gap = max(0.0, float(self.starter_countertrend_max_score_gap))
         self.early_entry_minimum_score = max(0.0, float(self.early_entry_minimum_score))
         self.starter_frontrun_minimum_score = max(self.early_entry_minimum_score, float(self.starter_frontrun_minimum_score))
         self.early_entry_direction_confirmation_bars = max(1, int(self.early_entry_direction_confirmation_bars))

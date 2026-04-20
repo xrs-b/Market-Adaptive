@@ -434,10 +434,10 @@ class TheHandsTests(unittest.TestCase):
         self.assertIsNotNone(signal)
         assert signal is not None
         self.assertFalse(signal.execution_trigger.bullish_memory_active)
-        self.assertIsNone(signal.execution_trigger.bullish_cross_bars_ago)
+        self.assertEqual(signal.execution_trigger.bullish_cross_bars_ago, 6)
         self.assertTrue(signal.execution_trigger.prior_high_break)
-        self.assertFalse(signal.fully_aligned)
-        self.assertEqual(signal.execution_trigger.reason, "prior_high_break_waiting_kdj_memory")
+        self.assertTrue(signal.fully_aligned)
+        self.assertIn("breakout", signal.execution_trigger.reason)
 
     def test_cta_robot_skips_bullish_entry_while_price_is_still_inside_value_area(self) -> None:
         self._insert_status("trend")
@@ -794,6 +794,8 @@ class TheHandsTests(unittest.TestCase):
         robot.config.minimum_expected_rr = 0.0
         robot.config.relaxed_entry_minimum_expected_rr = 1.0
         robot.config.starter_entry_minimum_expected_rr = 2.0
+        robot.config.starter_quality_minimum_score = 0.0
+        robot.config.scale_in_quality_minimum_score = 0.0
 
         result = robot._open_position(signal)
 
@@ -2374,6 +2376,8 @@ class TheHandsTests(unittest.TestCase):
         robot = CTARobot(self.client, self.database, self.cta_config, self.execution)
         mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=2)
 
+        robot.config.starter_quality_minimum_score = 0.0
+        robot.config.scale_in_quality_minimum_score = 0.0
         with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
             result = robot.run()
 

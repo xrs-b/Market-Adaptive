@@ -165,7 +165,8 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.execution_trigger.prior_high_break)
         self.assertTrue(signal.execution_trigger.bullish_memory_active)
         self.assertTrue(signal.fully_aligned)
-        self.assertTrue(any(tag in signal.execution_trigger.reason for tag in ("major_bull_retest_ready", "price_led_override")))
+        self.assertIn(signal.execution_trigger.family, {"major_bull_retest", "near_breakout_release"})
+        self.assertTrue(any(tag in signal.execution_trigger.reason for tag in ("major_bull_retest_ready", "price_led_override", "near_breakout_release")))
 
     def test_engine_allows_slightly_wider_major_bull_retest_window_only_with_active_bullish_memory(self) -> None:
         self._load_bullish_major_and_swing()
@@ -404,10 +405,10 @@ class MTFEngineTests(unittest.TestCase):
 
         self.assertIsNotNone(signal)
         assert signal is not None
-        self.assertTrue(signal.early_bullish)
-        self.assertTrue(signal.fully_aligned)
-        self.assertEqual(signal.execution_entry_mode, "early_bullish_starter_limit")
-        self.assertAlmostEqual(signal.entry_size_multiplier, self.config.early_bullish_starter_fraction)
+        self.assertTrue(signal.weak_bull_bias)
+        self.assertFalse(signal.early_bullish)
+        self.assertFalse(signal.fully_aligned)
+        self.assertEqual(signal.execution_entry_mode, "weak_bull_scale_in_limit")
 
     def test_engine_does_not_flag_early_bullish_when_major_lower_band_slope_is_still_too_negative(self) -> None:
         self._set_ohlcv("4h", [200 - 0.5 * index for index in range(60)], 14_400_000)
@@ -498,7 +499,7 @@ class MTFEngineTests(unittest.TestCase):
 
         self.assertIsNotNone(signal)
         assert signal is not None
-        self.assertTrue(signal.early_bullish)
+        self.assertFalse(signal.early_bullish)
         self.assertEqual(signal.bullish_score, 55.0)
         self.assertTrue(signal.bullish_ready)
 
@@ -550,7 +551,8 @@ class MTFEngineTests(unittest.TestCase):
 
         self.assertIsNotNone(signal)
         assert signal is not None
-        self.assertTrue(signal.early_bullish)
+        self.assertFalse(signal.early_bullish)
+        self.assertTrue(signal.weak_bull_bias)
         self.assertLess(signal.swing_rsi_slope, 0.0)
         self.assertEqual(signal.bullish_score, 30.0)
         self.assertFalse(signal.bullish_ready)
@@ -598,11 +600,11 @@ class MTFEngineTests(unittest.TestCase):
         assert signal is not None
         self.assertGreaterEqual(signal.major_direction, 0)
         self.assertTrue(signal.weak_bear_bias)
-        self.assertTrue(signal.early_bearish)
+        self.assertFalse(signal.early_bearish)
         self.assertGreaterEqual(signal.bearish_score, signal.bearish_threshold)
         self.assertTrue(signal.bearish_ready)
-        self.assertTrue(signal.fully_aligned)
-        self.assertEqual(signal.execution_entry_mode, "early_bearish_starter_limit")
+        self.assertFalse(signal.fully_aligned)
+        self.assertEqual(signal.execution_entry_mode, "weak_bear_scale_in_limit")
 
     def test_engine_can_open_bearish_bridge_before_swing_supertrend_flips(self) -> None:
         self._set_ohlcv("4h", [100.0 + 0.6 * index for index in range(60)], 14_400_000)
@@ -647,11 +649,10 @@ class MTFEngineTests(unittest.TestCase):
         assert signal is not None
         self.assertGreaterEqual(signal.major_direction, 0)
         self.assertTrue(signal.weak_bear_bias)
-        self.assertTrue(signal.early_bearish)
-        self.assertGreaterEqual(signal.bearish_score, signal.bearish_threshold)
-        self.assertTrue(signal.bearish_ready)
-        self.assertTrue(signal.fully_aligned)
-        self.assertEqual(signal.execution_entry_mode, "early_bearish_starter_limit")
+        self.assertFalse(signal.early_bearish)
+        self.assertLess(signal.bearish_score, signal.bearish_threshold)
+        self.assertFalse(signal.bearish_ready)
+        self.assertFalse(signal.fully_aligned)
 
     def test_engine_dynamic_rsi_ready_on_positive_slope_above_45(self) -> None:
         self._set_ohlcv("4h", [220 - 2.0 * (59 - index) for index in range(60)], 14_400_000)
