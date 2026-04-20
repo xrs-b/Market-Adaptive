@@ -7,6 +7,7 @@ import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from collections import Counter
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -82,6 +83,8 @@ def main() -> int:
             'fees': report.fees_paid,
             'opened_obv_scalp_actions': report.diagnostics.get('opened_obv_scalp_actions'),
             'blocked_obv': report.diagnostics.get('blocked_obv'),
+            'pathways': report.diagnostics.get('entry_pathway_counts', {}),
+            'opened_by_pathway': report.diagnostics.get('opened_by_pathway', {}),
         }, ensure_ascii=False), flush=True)
         results.append(segment_payload)
 
@@ -97,6 +100,16 @@ def main() -> int:
     blocked_obv = sum(r['report']['diagnostics'].get('blocked_obv', 0) for r in results)
     directional_ready = sum(r['report']['diagnostics'].get('directional_ready', 0) for r in results)
     opened_actions = sum(r['report']['diagnostics'].get('opened_actions', 0) for r in results)
+    quality_tier_counts = Counter()
+    entry_pathway_counts = Counter()
+    opened_by_pathway = Counter()
+    opened_by_quality_tier = Counter()
+    for result in results:
+        diagnostics = result['report']['diagnostics']
+        quality_tier_counts.update(diagnostics.get('quality_tier_counts', {}))
+        entry_pathway_counts.update(diagnostics.get('entry_pathway_counts', {}))
+        opened_by_pathway.update(diagnostics.get('opened_by_pathway', {}))
+        opened_by_quality_tier.update(diagnostics.get('opened_by_quality_tier', {}))
 
     summary = {
         'csv_path': str(csv_path),
@@ -118,6 +131,10 @@ def main() -> int:
             'opened_obv_scalp_actions': opened_obv_scalp_actions,
             'blocked_obv': blocked_obv,
             'directional_ready': directional_ready,
+            'quality_tier_counts': dict(quality_tier_counts),
+            'entry_pathway_counts': dict(entry_pathway_counts),
+            'opened_by_pathway': dict(opened_by_pathway),
+            'opened_by_quality_tier': dict(opened_by_quality_tier),
         },
     }
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2))

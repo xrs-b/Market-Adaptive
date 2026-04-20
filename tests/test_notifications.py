@@ -533,11 +533,16 @@ class NotificationTests(unittest.TestCase):
                 dominant_blocking_label='已通过',
                 dominant_blocking_count=10,
                 blocking_layer_counts={'PASSED': 10},
+                quality_tier_counts={'TIER_HIGH': 6, 'TIER_MEDIUM': 4},
+                entry_pathway_counts={'FAST_TRACK': 6, 'STANDARD': 4},
                 latest_blocker_reason='PASSED',
                 latest_execution_obv_zscore=1.2,
                 latest_execution_obv_threshold=1.0,
                 latest_execution_price=70250.5,
                 latest_grid_center_gap=0.0,
+                latest_signal_quality_tier='TIER_HIGH',
+                latest_entry_pathway='FAST_TRACK',
+                latest_signal_confidence=0.91,
             )
         )
 
@@ -562,11 +567,16 @@ class NotificationTests(unittest.TestCase):
                 'dominant_blocking_layer': 'OBV',
                 'dominant_blocking_label': 'OBV（执行过滤层）',
                 'dominant_blocking_count': 4,
+                'quality_tier_counts': {'TIER_HIGH': 2, 'TIER_MEDIUM': 3, 'TIER_LOW': 5},
+                'entry_pathway_counts': {'FAST_TRACK': 2, 'STANDARD': 3, 'STRICT': 5},
                 'latest_blocker_reason': 'Blocked_By_BELOW_POC',
                 'latest_execution_obv_zscore': 0.73,
                 'latest_execution_obv_threshold': 1.0,
                 'latest_execution_price': 70250.5,
                 'latest_grid_center_gap': -55.2,
+                'latest_signal_quality_tier': 'TIER_MEDIUM',
+                'latest_entry_pathway': 'STANDARD',
+                'latest_signal_confidence': 0.67,
             },
         )
 
@@ -578,6 +588,9 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(field_map['当前主阻塞层'], 'OBV（执行过滤层）（4 次）')
         self.assertEqual(field_map['统计窗口'], '最近 10 个 CTA 周期')
         self.assertEqual(field_map['通过 Trigger'], '2/10 (20.0%)')
+        self.assertEqual(field_map['质量层分布'], 'TIER_HIGH:2 / TIER_LOW:5 / TIER_MEDIUM:3')
+        self.assertEqual(field_map['路径分布'], 'FAST_TRACK:2 / STANDARD:3 / STRICT:5')
+        self.assertEqual(field_map['最近质量/路径'], 'TIER_MEDIUM / STANDARD / conf=0.67')
         self.assertEqual(field_map['最近价格'], '70250.5000')
         self.assertEqual(field_map['距离网格中心'], '-55.2000')
         self.assertIn('Blocked_By_OBV_STRENGTH_NOT_CONFIRMED × 4', field_map['主要拦截原因'])
@@ -602,17 +615,25 @@ class NotificationTests(unittest.TestCase):
                 'dominant_blocking_layer': 'OBV',
                 'dominant_blocking_label': 'OBV（执行过滤层）',
                 'dominant_blocking_count': 4,
+                'quality_tier_counts': {'TIER_LOW': 10},
+                'entry_pathway_counts': {'STRICT': 10},
                 'latest_blocker_reason': 'Blocked_By_BELOW_POC',
                 'latest_execution_obv_zscore': 0.73,
                 'latest_execution_obv_threshold': 1.0,
                 'latest_execution_price': None,
                 'latest_grid_center_gap': None,
+                'latest_signal_quality_tier': 'TIER_LOW',
+                'latest_entry_pathway': 'STRICT',
+                'latest_signal_confidence': 0.0,
             },
         )
 
         self.assertEqual(len(notifier.payloads), 1)
         embed = notifier.payloads[0]['embeds'][0]
         field_map = {field['name']: field['value'] for field in embed['fields']}
+        self.assertEqual(field_map['质量层分布'], 'TIER_LOW:10')
+        self.assertEqual(field_map['路径分布'], 'STRICT:10')
+        self.assertEqual(field_map['最近质量/路径'], 'TIER_LOW / STRICT / conf=0.00')
         self.assertEqual(field_map['最近价格'], '暂无有效样本')
         self.assertEqual(field_map['距离网格中心'], '未进入执行层')
 

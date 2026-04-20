@@ -9,7 +9,7 @@ from market_adaptive.config import CTAConfig, ExecutionConfig
 from market_adaptive.coordination import StrategyRuntimeContext
 from market_adaptive.indicators import OBVConfirmationSnapshot
 from market_adaptive.strategies.cta_robot import CTANearMissSample, CTARobot, TrendSignal
-from market_adaptive.strategies.mtf_engine import ExecutionTriggerSnapshot, MTFSignal
+from market_adaptive.strategies.mtf_engine import ExecutionTriggerSnapshot, MTFSignal, SignalQualityTier
 
 
 class DummyClient:
@@ -21,7 +21,7 @@ class DummyDatabase:
 
 
 class CTAHeartbeatTests(unittest.TestCase):
-    def _build_mtf_signal(self, *, bullish_score: float, fully_aligned: bool = True, weak_bull_bias: bool = False, early_bullish: bool = False, execution_entry_mode: str = "breakout_confirmed", trigger_reason: str = "Triggered via Memory Window", frontrun_near_breakout: bool = False, major_direction: int = 1, rsi_blocking_overridden: bool = False) -> MTFSignal:
+    def _build_mtf_signal(self, *, bullish_score: float, fully_aligned: bool = True, weak_bull_bias: bool = False, early_bullish: bool = False, execution_entry_mode: str = "breakout_confirmed", trigger_reason: str = "Triggered via Memory Window", frontrun_near_breakout: bool = False, major_direction: int = 1, rsi_blocking_overridden: bool = False, signal_quality_tier: SignalQualityTier = SignalQualityTier.TIER_LOW, signal_confidence: float = 0.0, signal_strength_bonus: float = 0.0) -> MTFSignal:
         execution_frame = pd.DataFrame({
             "timestamp": pd.to_datetime([1_700_000_000_000], unit="ms", utc=True),
             "open": [99.0],
@@ -79,6 +79,9 @@ class CTAHeartbeatTests(unittest.TestCase):
             swing_frame=execution_frame.copy(),
             execution_frame=execution_frame,
             rsi_blocking_overridden=rsi_blocking_overridden,
+            signal_quality_tier=signal_quality_tier,
+            signal_confidence=signal_confidence,
+            signal_strength_bonus=signal_strength_bonus,
         )
 
 
@@ -125,7 +128,7 @@ class CTAHeartbeatTests(unittest.TestCase):
         self.assertFalse(signal.long_setup_blocked)
         self.assertEqual(signal.long_setup_reason, "")
         self.assertEqual(signal.blocker_reason, "")
-        mock_logger.info.assert_called_with(
+        mock_logger.info.assert_any_call(
             "Passed: VA Override [Reason: %s] [%s]",
             "High Momentum",
             "POC: 99.0000, VAH: 100.5000, VAL: 98.5000, Price: 100.0000",
@@ -172,7 +175,7 @@ class CTAHeartbeatTests(unittest.TestCase):
         assert signal is not None
         self.assertEqual(signal.direction, 1)
         self.assertFalse(signal.long_setup_blocked)
-        mock_logger.info.assert_called_with(
+        mock_logger.info.assert_any_call(
             "Passed: VA Override [Reason: %s] [%s]",
             "Edge Proximity",
             "POC: 99.0000, VAH: 100.9000, VAL: 98.0000, Price: 100.0000",
@@ -221,10 +224,105 @@ class CTAHeartbeatTests(unittest.TestCase):
         self.assertTrue(signal.long_setup_blocked)
         self.assertEqual(signal.long_setup_reason, "inside_value_area")
         self.assertEqual(signal.blocker_reason, "Blocked_By_INSIDE_VALUE_AREA")
-        mock_logger.info.assert_called_with(
+        mock_logger.info.assert_any_call(
             "Blocked: Inside VA [%s]",
             "POC: 99.0000, VAH: 101.5000, VAL: 98.0000, Price: 100.0000",
         )
+
+    def test_standard_path_can_bypass_value_area_and_below_vah_blocks(self) -> None:
+        robot = CTARobot(
+            client=DummyClient(),
+            database=DummyDatabase(),
+            config=CTAConfig(symbol="BTC/USDT", obv_zscore_threshold=0.6),
+            execution_config=ExecutionConfig(),
+            notifier=None,
+            risk_manager=None,
+            sentiment_analyst=None,
+        )
+        mtf_signal = self._build_mtf_signal(
+            bullish_score=72.0,
+            signal_quality_tier=SignalQualityTier.TIER_MEDIUM,
+            signal_confidence=0.61,
+        )
+        obv_snapshot = OBVConfirmationSnapshot(
+            current_obv=1100.0,
+            sma_value=1000.0,
+            increment_value=0.5,
+            increment_mean=1.0,
+            increment_std=2.0,
+            zscore=0.2,
+        )
+        volume_profile = type("VolumeProfile", (), {
+            "poc_price": 99.0,
+            "value_area_low": 98.0,
+            "value_area_high": 101.5,
+            "above_poc": lambda self, price: True,
+            "contains_price": lambda self, price: True,
+            "above_value_area": lambda self, price: False,
+        })()
+
+        with (
+            patch.object(robot.mtf_engine, "build_signal", return_value=mtf_signal),
+            patch("market_adaptive.strategies.cta_robot.compute_obv", return_value=pd.Series([1.0])),
+            patch("market_adaptive.strategies.cta_robot.compute_atr", return_value=pd.Series([1.0])),
+            patch("market_adaptive.strategies.cta_robot.compute_obv_confirmation_snapshot", return_value=obv_snapshot),
+            patch("market_adaptive.strategies.cta_robot.compute_volume_profile", return_value=volume_profile),
+        ):
+            signal = robot._build_trend_signal()
+
+        assert signal is not None
+        self.assertEqual(signal.entry_pathway.name, "STANDARD")
+        self.assertEqual(signal.direction, 1)
+        self.assertFalse(signal.long_setup_blocked)
+        self.assertIn("STANDARD_VA_BYPASS", signal.relaxed_reasons)
+
+    def test_standard_path_can_tolerate_small_below_poc_gap_near_breakout(self) -> None:
+        robot = CTARobot(
+            client=DummyClient(),
+            database=DummyDatabase(),
+            config=CTAConfig(symbol="BTC/USDT", obv_zscore_threshold=0.6),
+            execution_config=ExecutionConfig(),
+            notifier=None,
+            risk_manager=None,
+            sentiment_analyst=None,
+        )
+        mtf_signal = self._build_mtf_signal(
+            bullish_score=72.0,
+            frontrun_near_breakout=True,
+            signal_quality_tier=SignalQualityTier.TIER_MEDIUM,
+            signal_confidence=0.64,
+        )
+        obv_snapshot = OBVConfirmationSnapshot(
+            current_obv=1100.0,
+            sma_value=1000.0,
+            increment_value=0.5,
+            increment_mean=1.0,
+            increment_std=2.0,
+            zscore=0.2,
+        )
+        volume_profile = type("VolumeProfile", (), {
+            "poc_price": 100.6,
+            "value_area_low": 98.0,
+            "value_area_high": 101.5,
+            "above_poc": lambda self, price: False,
+            "contains_price": lambda self, price: False,
+            "above_value_area": lambda self, price: True,
+        })()
+
+        with (
+            patch.object(robot.mtf_engine, "build_signal", return_value=mtf_signal),
+            patch("market_adaptive.strategies.cta_robot.compute_obv", return_value=pd.Series([1.0])),
+            patch("market_adaptive.strategies.cta_robot.compute_atr", return_value=pd.Series([1.0])),
+            patch("market_adaptive.strategies.cta_robot.compute_obv_confirmation_snapshot", return_value=obv_snapshot),
+            patch("market_adaptive.strategies.cta_robot.compute_volume_profile", return_value=volume_profile),
+        ):
+            signal = robot._build_trend_signal()
+
+        assert signal is not None
+        self.assertEqual(signal.entry_pathway.name, "STANDARD")
+        self.assertEqual(signal.direction, 1)
+        self.assertFalse(signal.long_setup_blocked)
+        self.assertTrue(any(reason.startswith("STANDARD_POC_RECLAIM_OK") for reason in signal.relaxed_reasons))
 
     def test_resolve_obv_gate_uses_bullish_score_tiers(self) -> None:
         robot = CTARobot(

@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from market_adaptive.config import CTAConfig
 from market_adaptive.indicators import OBVConfirmationSnapshot
-from market_adaptive.strategies.mtf_engine import MultiTimeframeSignalEngine, classify_waiting_execution_trigger
+from market_adaptive.strategies.mtf_engine import MultiTimeframeSignalEngine, SignalQualityTier, classify_waiting_execution_trigger
 
 
 class DummyClient:
@@ -128,6 +128,9 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.fully_aligned)
         self.assertEqual(signal.execution_trigger.family, "waiting_execution_trigger_drift")
         self.assertEqual(signal.execution_trigger.reason, "waiting_execution_trigger_drift")
+        self.assertIsInstance(signal.signal_quality_tier, SignalQualityTier)
+        self.assertGreaterEqual(signal.signal_confidence, 0.0)
+        self.assertGreaterEqual(signal.signal_strength_bonus, 0.0)
 
     def test_engine_confirms_entry_when_execution_breaks_prior_high(self) -> None:
         self._load_bullish_major_and_swing()
@@ -345,7 +348,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertTrue(signal.execution_trigger.frontrun_near_breakout)
         self.assertTrue(signal.execution_trigger.frontrun_impulse_confirmed)
         self.assertTrue(signal.fully_aligned)
-        self.assertIn("major_bull_impulse_reclaim_ready", signal.execution_trigger.reason)
+        self.assertIn("trend_continuation_near_breakout_ready", signal.execution_trigger.reason)
 
     def test_engine_allows_weak_bull_bias_before_major_supertrend_flip(self) -> None:
         major_closes = [200 - 0.5 * index for index in range(60)]
@@ -500,8 +503,8 @@ class MTFEngineTests(unittest.TestCase):
         self.assertIsNotNone(signal)
         assert signal is not None
         self.assertFalse(signal.early_bullish)
-        self.assertEqual(signal.bullish_score, 55.0)
-        self.assertTrue(signal.bullish_ready)
+        self.assertEqual(signal.bullish_score, 45.0)
+        self.assertFalse(signal.bullish_ready)
 
     def test_engine_keeps_early_bullish_bonus_off_when_rsi_falls_back_under_its_sma(self) -> None:
         config = CTAConfig(
@@ -742,7 +745,8 @@ class MTFEngineTests(unittest.TestCase):
         self.assertEqual(signal.bullish_score, 40.0)
         self.assertFalse(signal.bullish_ready)
         joined_logs = "\n".join(logs.output)
-        self.assertIn("Bullish Score: 40/55 [4H: 0, 1H: 30, Magnet: 0, RSI: 0, Early: 0, KDJ: 10]", joined_logs)
+        self.assertIn("Bullish Score: 40/55 [base=40 strength=0.0 4H: 0, 1H: 30, Magnet: 0, RSI: 0, Early: 0, KDJ: 10]", joined_logs)
+        self.assertIn("Signal Quality | symbol=BTC/USDT", joined_logs)
 
     def test_drive_first_major_trend_does_not_report_rsi_block_when_score_is_tradeable(self) -> None:
         signal = self.engine._resolve_blocker_reason(
@@ -1011,7 +1015,7 @@ class MTFEngineTests(unittest.TestCase):
         self.assertIsNotNone(signal.execution_trigger.latch_low_price)
         self.assertTrue(signal.execution_trigger.prior_high_break)
         self.assertTrue(signal.fully_aligned)
-        self.assertIn("soft_latch_breakout", signal.execution_trigger.reason)
+        self.assertIn("major_bull_retest_ready", signal.execution_trigger.reason)
 
     def test_engine_resets_soft_latch_after_defended_low_breaks(self) -> None:
         config = CTAConfig(

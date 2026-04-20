@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from market_adaptive.strategies.cta_robot import CTARobot, TrendSignal
+from market_adaptive.strategies.cta_robot import CTARobot, EntryPathway, TrendSignal
+from market_adaptive.strategies.order_flow_sentinel import OrderFlowAssessment
 
 
 def _robot() -> CTARobot:
@@ -13,6 +14,7 @@ def _robot() -> CTARobot:
         relaxed_short_minimum_expected_rr=1.15,
         quick_trade_minimum_expected_rr=1.35,
         starter_entry_minimum_expected_rr=0.6,
+        standard_entry_minimum_expected_rr=1.4,
         relaxed_short_minimum_score=48.0,
         relaxed_short_max_countertrend_score_gap=12.0,
         relaxed_short_require_early_or_breakdown=True,
@@ -139,3 +141,139 @@ def test_starter_quality_gate_allows_good_quality_starter() -> None:
 
     assert passed is True
     assert reason is None
+
+
+def test_resolve_entry_pathway_fast_track_for_high_quality_aligned_signal() -> None:
+    robot = _robot()
+    robot.config.tier_high_confidence_threshold = 0.8
+    mtf_signal = SimpleNamespace(
+        signal_quality_tier=SimpleNamespace(name="TIER_HIGH"),
+        signal_confidence=0.86,
+        fully_aligned=True,
+    )
+
+    assert robot._resolve_entry_pathway(mtf_signal) == EntryPathway.FAST_TRACK
+
+
+def test_resolve_entry_pathway_standard_for_medium_quality_signal() -> None:
+    robot = _robot()
+    mtf_signal = SimpleNamespace(
+        signal_quality_tier=SimpleNamespace(name="TIER_MEDIUM"),
+        signal_confidence=0.55,
+        fully_aligned=False,
+    )
+
+    assert robot._resolve_entry_pathway(mtf_signal) == EntryPathway.STANDARD
+
+
+def test_resolve_entry_pathway_strict_for_low_quality_signal() -> None:
+    robot = _robot()
+    mtf_signal = SimpleNamespace(
+        signal_quality_tier=SimpleNamespace(name="TIER_LOW"),
+        signal_confidence=0.0,
+        fully_aligned=False,
+    )
+
+    assert robot._resolve_entry_pathway(mtf_signal) == EntryPathway.STRICT
+
+
+def test_fast_track_uses_lighter_rr_floor() -> None:
+    robot = _robot()
+    signal = _signal(
+        direction=1,
+        raw_direction=1,
+        relaxed_entry=False,
+        quick_trade_mode=False,
+        execution_entry_mode="breakout_confirmed",
+        entry_pathway=EntryPathway.FAST_TRACK,
+    )
+
+    assert robot._resolve_minimum_expected_rr_for_pathway(signal) == 0.0
+
+
+def test_standard_path_uses_its_own_rr_floor() -> None:
+    robot = _robot()
+    signal = _signal(
+        direction=1,
+        raw_direction=1,
+        relaxed_entry=False,
+        quick_trade_mode=False,
+        execution_entry_mode="breakout_confirmed",
+        entry_pathway=EntryPathway.STANDARD,
+    )
+
+    assert robot._resolve_minimum_expected_rr_for_pathway(signal) == 1.4
+
+
+def test_fast_track_blocks_on_strong_reverse_obv() -> None:
+    robot = _robot()
+    signal = _signal(
+        direction=1,
+        raw_direction=1,
+        entry_pathway=EntryPathway.FAST_TRACK,
+        obv_confirmation=SimpleNamespace(zscore=-1.2, above_sma=False),
+        obv_threshold=1.0,
+    )
+    robot.symbol = "BTC/USDT"
+
+    assert robot._apply_fast_track_checks(signal) == "cta:fast_track_blocked"
+
+
+def test_standard_order_flow_soft_passes_on_non_empty_book_warning() -> None:
+    robot = _robot()
+    robot.symbol = "BTC/USDT"
+    signal = _signal(direction=1, raw_direction=1, entry_pathway=EntryPathway.STANDARD)
+    assessment = OrderFlowAssessment(
+        symbol="BTC/USDT",
+        side="buy",
+        depth_levels=20,
+        bid_sum=10.0,
+        ask_sum=9.0,
+        imbalance_ratio=1.11,
+        best_bid=100.0,
+        best_ask=100.1,
+        confirmation_passed=False,
+        high_conviction=False,
+        recommended_limit_price=None,
+        expected_average_price=None,
+        depth_boundary_price=None,
+        reason="imbalance_decay_detected",
+        history_mean=1.3,
+        history_sigma=0.1,
+        health_floor=1.2,
+        confirmation_threshold=1.2,
+        high_conviction_threshold=1.5,
+        decay_detected=True,
+    )
+
+    assert robot._apply_standard_order_flow_checks(signal=signal, side="buy", amount=1.0, order_flow_assessment=assessment) is None
+
+
+def test_standard_order_flow_blocks_on_empty_order_book() -> None:
+    robot = _robot()
+    robot.symbol = "BTC/USDT"
+    signal = _signal(direction=1, raw_direction=1, entry_pathway=EntryPathway.STANDARD)
+    assessment = OrderFlowAssessment(
+        symbol="BTC/USDT",
+        side="buy",
+        depth_levels=20,
+        bid_sum=0.0,
+        ask_sum=0.0,
+        imbalance_ratio=0.0,
+        best_bid=0.0,
+        best_ask=0.0,
+        confirmation_passed=False,
+        high_conviction=False,
+        recommended_limit_price=None,
+        expected_average_price=None,
+        depth_boundary_price=None,
+        reason="empty_order_book",
+        history_mean=0.0,
+        history_sigma=0.0,
+        health_floor=0.0,
+        confirmation_threshold=1.2,
+        high_conviction_threshold=1.5,
+        decay_detected=False,
+    )
+
+    assert robot._apply_standard_order_flow_checks(signal=signal, side="buy", amount=1.0, order_flow_assessment=assessment) == "cta:order_flow_blocked"

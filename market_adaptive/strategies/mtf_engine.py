@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 
 import pandas as pd
 
@@ -19,6 +20,24 @@ from market_adaptive.indicators import (
 from market_adaptive.timeframe_utils import maybe_use_closed_candles
 
 logger = logging.getLogger(__name__)
+
+
+class SignalQualityTier(Enum):
+    """Signal quality tier derived from score strength + readiness."""
+
+    TIER_HIGH = 1
+    TIER_MEDIUM = 2
+    TIER_LOW = 3
+
+
+@dataclass(frozen=True)
+class EnhancedSignalScore:
+    base_score: float
+    strength_bonus: float
+    total_score: float
+    quality_tier: SignalQualityTier
+    confidence: float
+    rejection_reason: str = ""
 
 
 def classify_trigger_group(family: str) -> str:
@@ -153,6 +172,9 @@ class MTFSignal:
     bearish_score: float = 0.0
     bearish_threshold: float = 0.0
     bearish_ready: bool = False
+    signal_quality_tier: SignalQualityTier = SignalQualityTier.TIER_LOW
+    signal_confidence: float = 0.0
+    signal_strength_bonus: float = 0.0
 
 
 class MultiTimeframeSignalEngine:
@@ -169,6 +191,14 @@ class MultiTimeframeSignalEngine:
                 return bars_ago
         return None
 
+
+    @staticmethod
+    def _count_bars_since_direction_change(direction_series: pd.Series) -> int:
+        current_dir = int(direction_series.iloc[-1])
+        for i in range(len(direction_series) - 2, -1, -1):
+            if int(direction_series.iloc[i]) != current_dir:
+                return len(direction_series) - 1 - i
+        return len(direction_series)
 
     @staticmethod
     def _timeframe_to_milliseconds(timeframe: str) -> int:
@@ -315,6 +345,51 @@ class MultiTimeframeSignalEngine:
             execution_timestamp_ms=execution_ts,
             max_gap_ms=max_gap_ms,
             valid=valid,
+        )
+
+    def _compute_signal_quality(
+        self,
+        *,
+        base_score: float,
+        strength_bonus: float,
+        total_score: float,
+        ready: bool,
+        fully_aligned: bool,
+    ) -> EnhancedSignalScore:
+        high_floor = float(getattr(self.config, "tier_high_minimum_score", 85.0))
+        medium_floor = float(getattr(self.config, "tier_medium_minimum_score", 70.0))
+        if total_score >= high_floor and ready and fully_aligned:
+            confidence = min(1.0, max(float(getattr(self.config, "tier_high_confidence_threshold", 0.8)), 0.75 + min(0.25, (total_score - high_floor) / 20.0)))
+            return EnhancedSignalScore(
+                base_score=float(base_score),
+                strength_bonus=float(strength_bonus),
+                total_score=float(total_score),
+                quality_tier=SignalQualityTier.TIER_HIGH,
+                confidence=float(confidence),
+            )
+        if total_score >= medium_floor and ready:
+            confidence = min(0.79, 0.50 + max(0.0, (total_score - medium_floor) / max(1.0, (high_floor - medium_floor))) * 0.25)
+            return EnhancedSignalScore(
+                base_score=float(base_score),
+                strength_bonus=float(strength_bonus),
+                total_score=float(total_score),
+                quality_tier=SignalQualityTier.TIER_MEDIUM,
+                confidence=float(confidence),
+            )
+        rejection_reason = ""
+        if total_score < medium_floor:
+            rejection_reason = f"Score too low: {total_score:.1f} < {medium_floor:.1f}"
+        elif not ready:
+            rejection_reason = "Signal not ready"
+        else:
+            rejection_reason = "Not fully aligned"
+        return EnhancedSignalScore(
+            base_score=float(base_score),
+            strength_bonus=float(strength_bonus),
+            total_score=float(total_score),
+            quality_tier=SignalQualityTier.TIER_LOW,
+            confidence=0.0,
+            rejection_reason=rejection_reason,
         )
 
     def _resolve_blocker_reason(self, *, data_alignment_valid: bool, major_direction: int, weak_bull_bias: bool, early_bullish: bool, swing_score: float, bullish_ready: bool, fully_aligned: bool, execution_reason: str, bullish_score: float, execution_frontrun_near_breakout: bool, drive_first_tradeable: bool, rsi_rollover_blocked: bool) -> str:
@@ -651,7 +726,8 @@ class MultiTimeframeSignalEngine:
         score_early_recovery = self._resolve_early_bullish_recovery_bonus(early_bullish=early_bullish, swing_rsi=swing_rsi)
         score_kdj = float(getattr(self.config, "kdj_memory_score_bonus", 0.0)) if bullish_memory_active else 0.0
         score_magnet = 0.0
-        bullish_score = score_4h + score_1h + score_rsi + score_early_recovery + score_kdj
+        base_bullish_score = score_4h + score_1h + score_rsi + score_early_recovery + score_kdj
+        bullish_score = base_bullish_score
 
         bearish_score_4h = float(self.config.strong_bull_bias_score) if major_direction < 0 else 0.0
         bearish_score_1h = 0.0
@@ -663,7 +739,8 @@ class MultiTimeframeSignalEngine:
         bearish_score_rsi = float(self.config.dynamic_rsi_trend_score) if current_swing_rsi <= float(self.config.dynamic_rsi_floor) and swing_rsi_slope < 0.0 else 0.0
         bearish_score_early = self._resolve_early_bearish_score_bonus(early_bearish=early_bearish, swing_rsi=swing_rsi)
         bearish_score_kdj = float(getattr(self.config, "kdj_memory_score_bonus", 0.0)) if bearish_memory_active else 0.0
-        bearish_score = bearish_score_4h + bearish_score_1h + bearish_score_rsi + bearish_score_early + bearish_score_kdj
+        base_bearish_score = bearish_score_4h + bearish_score_1h + bearish_score_rsi + bearish_score_early + bearish_score_kdj
+        bearish_score = base_bearish_score
         drive_first_tradeable = bullish_score >= float(getattr(self.config, "drive_first_tradeable_score", 60.0))
 
         prior_high_series = execution_frame["high"].shift(1).rolling(
@@ -724,6 +801,38 @@ class MultiTimeframeSignalEngine:
                 float(execution_obv_confirmation.zscore),
             )
 
+        trend_strength_bars = min(20, self._count_bars_since_direction_change(major_supertrend["direction"]))
+        trend_strength_bonus = min(
+            float(getattr(self.config, "signal_strength_trend_bonus_cap", 5.0)),
+            (trend_strength_bars / 20.0) * float(getattr(self.config, "signal_strength_trend_bonus_cap", 5.0)),
+        )
+        upper_band = float(major_supertrend["upper_band"].iloc[-1])
+        lower_band = float(major_supertrend["lower_band"].iloc[-1])
+        band_width = max(upper_band - lower_band, 1e-12)
+        price_position_in_band = (current_price - lower_band) / band_width
+        direction_clarity_bonus = min(
+            float(getattr(self.config, "signal_strength_direction_bonus_cap", 10.0)),
+            abs(price_position_in_band - 0.5) * 20.0,
+        )
+        if len(execution_frame) >= 2:
+            recent_range = float(execution_frame["high"].iloc[-1]) - float(execution_frame["low"].iloc[-1])
+            prev_range = float(execution_frame["high"].iloc[-2]) - float(execution_frame["low"].iloc[-2])
+            volatility_expansion_bonus = min(
+                float(getattr(self.config, "signal_strength_volatility_bonus_cap", 5.0)),
+                max(0.0, ((recent_range / max(prev_range, 1e-12)) - 1.0) * 10.0),
+            )
+        else:
+            volatility_expansion_bonus = 0.0
+        dominant_direction = 1 if bullish_score >= bearish_score else -1
+        dominant_obv_strength = max(0.0, float(execution_obv_confirmation.zscore) * dominant_direction)
+        obv_strength_bonus = min(
+            float(getattr(self.config, "signal_strength_obv_bonus_cap", 10.0)),
+            dominant_obv_strength * 5.0,
+        )
+        strength_bonus = trend_strength_bonus + direction_clarity_bonus + volatility_expansion_bonus + obv_strength_bonus
+        bullish_score += strength_bonus if dominant_direction > 0 else 0.0
+        bearish_score += strength_bonus if dominant_direction < 0 else 0.0
+
         bullish_threshold = float(self.config.bullish_ready_score_threshold)
         bearish_threshold = float(self.config.bullish_ready_score_threshold)
         if major_direction >= 0 and early_bearish:
@@ -744,9 +853,11 @@ class MultiTimeframeSignalEngine:
             and current_swing_rsi < current_rsi_sma
         )
         logger.info(
-            "Bullish Score: %.0f/%.0f [4H: %.0f, 1H: %.0f, Magnet: %.0f, RSI: %.0f, Early: %.0f, KDJ: %.0f] | symbol=%s major_dir=%s swing_dir=%s weak_bull=%s early_bullish=%s",
+            "Bullish Score: %.0f/%.0f [base=%.0f strength=%.1f 4H: %.0f, 1H: %.0f, Magnet: %.0f, RSI: %.0f, Early: %.0f, KDJ: %.0f] | symbol=%s major_dir=%s swing_dir=%s weak_bull=%s early_bullish=%s",
             bullish_score,
             bullish_threshold,
+            base_bullish_score,
+            strength_bonus if dominant_direction > 0 else 0.0,
             score_4h,
             score_1h,
             score_magnet,
@@ -777,7 +888,7 @@ class MultiTimeframeSignalEngine:
         starter_frontrun_ready = bool(
             getattr(self.config, "starter_frontrun_enabled", True)
             and bullish_ready
-            and bullish_score >= starter_frontrun_minimum_score
+            and base_bullish_score >= starter_frontrun_minimum_score
             and execution_obv_ready
             and frontrun_near_breakout
             and frontrun_impulse_confirmed
@@ -787,7 +898,7 @@ class MultiTimeframeSignalEngine:
         starter_short_frontrun_ready = bool(
             getattr(self.config, "starter_frontrun_enabled", True)
             and bearish_ready
-            and bearish_score >= starter_frontrun_minimum_score
+            and base_bearish_score >= starter_frontrun_minimum_score
             and execution_obv_sell_ready
             and short_frontrun_near_breakout
             and short_frontrun_impulse_confirmed
@@ -1027,6 +1138,25 @@ class MultiTimeframeSignalEngine:
             rsi_rollover_blocked=rsi_rollover_blocked,
         )
 
+        dominant_is_bullish = bool(bullish_score >= bearish_score)
+        enhanced_signal_score = self._compute_signal_quality(
+            base_score=(base_bullish_score + score_magnet) if dominant_is_bullish else base_bearish_score,
+            strength_bonus=strength_bonus,
+            total_score=bullish_score if dominant_is_bullish else bearish_score,
+            ready=bullish_ready if dominant_is_bullish else bearish_ready,
+            fully_aligned=fully_aligned,
+        )
+        logger.info(
+            "Signal Quality | symbol=%s tier=%s confidence=%.2f total=%.1f base=%.1f strength=%.1f reject=%s",
+            self.config.symbol,
+            enhanced_signal_score.quality_tier.name,
+            enhanced_signal_score.confidence,
+            enhanced_signal_score.total_score,
+            enhanced_signal_score.base_score,
+            enhanced_signal_score.strength_bonus,
+            enhanced_signal_score.rejection_reason or "n/a",
+        )
+
         return MTFSignal(
             major_timeframe=self.config.major_timeframe,
             swing_timeframe=self.config.swing_timeframe,
@@ -1067,4 +1197,7 @@ class MultiTimeframeSignalEngine:
             swing_frame=swing_frame,
             execution_frame=execution_frame,
             rsi_blocking_overridden=rsi_blocking_overridden,
+            signal_quality_tier=enhanced_signal_score.quality_tier,
+            signal_confidence=enhanced_signal_score.confidence,
+            signal_strength_bonus=enhanced_signal_score.strength_bonus,
         )

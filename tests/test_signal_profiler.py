@@ -17,6 +17,10 @@ class SignalProfilerTests(unittest.TestCase):
             major_direction = 1
             weak_bull_bias = False
             early_bullish = False
+            signal_quality_tier = "TIER_HIGH"
+            entry_pathway = "FAST_TRACK"
+            signal_confidence = 0.91
+            signal_strength_bonus = 8.0
             swing_rsi = 55.0
             execution_obv_zscore = 1.3
             execution_obv_threshold = 1.0
@@ -31,6 +35,10 @@ class SignalProfilerTests(unittest.TestCase):
             blocker_reason = "PASSED"
             bullish_ready = True
             fully_aligned = True
+            signal_quality_tier = "TIER_HIGH"
+            entry_pathway = "FAST_TRACK"
+            signal_confidence = 0.88
+            signal_strength_bonus = 6.0
 
         profiler.record(DummySignal(), grid_center_price=99.0)
 
@@ -49,6 +57,10 @@ class SignalProfilerTests(unittest.TestCase):
             major_direction = -1
             weak_bull_bias = False
             early_bullish = False
+            signal_quality_tier = "TIER_LOW"
+            entry_pathway = "STRICT"
+            signal_confidence = 0.0
+            signal_strength_bonus = 0.0
             swing_rsi = 45.0
             execution_obv_zscore = 0.1
             execution_obv_threshold = 1.0
@@ -81,6 +93,10 @@ class SignalProfilerTests(unittest.TestCase):
             major_direction = 1
             weak_bull_bias = False
             early_bullish = False
+            signal_quality_tier = "TIER_LOW"
+            entry_pathway = "STRICT"
+            signal_confidence = 0.0
+            signal_strength_bonus = 0.0
             swing_rsi = 55.0
             execution_obv_zscore = 1.3
             execution_obv_threshold = 1.0
@@ -95,6 +111,10 @@ class SignalProfilerTests(unittest.TestCase):
             blocker_reason = "PASSED"
             bullish_ready = True
             fully_aligned = True
+            signal_quality_tier = "TIER_HIGH"
+            entry_pathway = "FAST_TRACK"
+            signal_confidence = 0.88
+            signal_strength_bonus = 6.0
 
         class BlockedSignal:
             server_time_iso = "2026-04-13T00:05:00+00:00"
@@ -103,6 +123,10 @@ class SignalProfilerTests(unittest.TestCase):
             major_direction = 1
             weak_bull_bias = False
             early_bullish = False
+            signal_quality_tier = "TIER_LOW"
+            entry_pathway = "STRICT"
+            signal_confidence = 0.0
+            signal_strength_bonus = 0.0
             swing_rsi = 48.0
             execution_obv_zscore = 0.7
             execution_obv_threshold = 1.0
@@ -136,7 +160,12 @@ class SignalProfilerTests(unittest.TestCase):
         self.assertEqual(call["summary"]["dominant_blocking_label"], "OBV（执行过滤层）")
         self.assertEqual(call["summary"]["dominant_blocking_count"], 1)
         self.assertEqual(call["summary"]["blocking_layer_counts"], {"OBV": 1})
+        self.assertEqual(call["summary"]["quality_tier_counts"], {"TIER_HIGH": 1, "TIER_LOW": 1})
+        self.assertEqual(call["summary"]["entry_pathway_counts"], {"FAST_TRACK": 1, "STRICT": 1})
         self.assertEqual(call["summary"]["latest_blocker_reason"], "Blocked_By_OBV_STRENGTH_NOT_CONFIRMED")
+        self.assertEqual(call["summary"]["latest_signal_quality_tier"], "TIER_LOW")
+        self.assertEqual(call["summary"]["latest_entry_pathway"], "STRICT")
+        self.assertAlmostEqual(call["summary"]["latest_signal_confidence"], 0.0)
         self.assertAlmostEqual(call["summary"]["latest_execution_price"], 98.0)
         self.assertAlmostEqual(call["summary"]["latest_grid_center_gap"], -3.0)
 
@@ -151,6 +180,10 @@ class SignalProfilerTests(unittest.TestCase):
             major_direction = 1
             weak_bull_bias = False
             early_bullish = False
+            signal_quality_tier = "TIER_LOW"
+            entry_pathway = "STRICT"
+            signal_confidence = 0.0
+            signal_strength_bonus = 0.0
             swing_rsi = 55.0
             execution_obv_zscore = 1.3
             execution_obv_threshold = 1.0
@@ -165,6 +198,10 @@ class SignalProfilerTests(unittest.TestCase):
             blocker_reason = "PASSED"
             bullish_ready = True
             fully_aligned = True
+            signal_quality_tier = "TIER_HIGH"
+            entry_pathway = "FAST_TRACK"
+            signal_confidence = 0.88
+            signal_strength_bonus = 6.0
 
         class MissingCurrentSnapshotSignal:
             server_time_iso = "2026-04-13T00:05:00+00:00"
@@ -173,6 +210,10 @@ class SignalProfilerTests(unittest.TestCase):
             major_direction = 1
             weak_bull_bias = False
             early_bullish = False
+            signal_quality_tier = "TIER_LOW"
+            entry_pathway = "STRICT"
+            signal_confidence = 0.0
+            signal_strength_bonus = 0.0
             swing_rsi = 48.0
             execution_obv_zscore = 0.7
             execution_obv_threshold = 1.0
@@ -206,6 +247,10 @@ class SignalProfilerTests(unittest.TestCase):
             major_direction = 0
             weak_bull_bias = False
             early_bullish = False
+            signal_quality_tier = "TIER_LOW"
+            entry_pathway = "STRICT"
+            signal_confidence = 0.0
+            signal_strength_bonus = 0.0
             swing_rsi = 45.0
             execution_obv_zscore = 0.5
             execution_obv_threshold = 1.0
@@ -228,6 +273,10 @@ class SignalProfilerTests(unittest.TestCase):
             major_direction = 1
             weak_bull_bias = False
             early_bullish = False
+            signal_quality_tier = "TIER_LOW"
+            entry_pathway = "STRICT"
+            signal_confidence = 0.0
+            signal_strength_bonus = 0.0
             swing_rsi = 55.0
             execution_obv_zscore = 0.8
             execution_obv_threshold = 1.0
@@ -264,6 +313,10 @@ class SignalProfilerTests(unittest.TestCase):
             major_direction = 1
             weak_bull_bias = False
             early_bullish = False
+            signal_quality_tier = "TIER_LOW"
+            entry_pathway = "STRICT"
+            signal_confidence = 0.0
+            signal_strength_bonus = 0.0
             swing_rsi = 55.0
             execution_obv_zscore = 1.3
             execution_obv_threshold = 1.0
@@ -278,6 +331,10 @@ class SignalProfilerTests(unittest.TestCase):
             blocker_reason = "PASSED"
             bullish_ready = True
             fully_aligned = True
+            signal_quality_tier = "TIER_HIGH"
+            entry_pathway = "FAST_TRACK"
+            signal_confidence = 0.88
+            signal_strength_bonus = 6.0
 
         class SingleBlockedSignal:
             server_time_iso = "2026-04-13T00:05:00+00:00"
@@ -286,6 +343,10 @@ class SignalProfilerTests(unittest.TestCase):
             major_direction = 1
             weak_bull_bias = False
             early_bullish = False
+            signal_quality_tier = "TIER_LOW"
+            entry_pathway = "STRICT"
+            signal_confidence = 0.0
+            signal_strength_bonus = 0.0
             swing_rsi = 48.0
             execution_obv_zscore = 0.7
             execution_obv_threshold = 1.0
@@ -316,6 +377,10 @@ class SignalProfilerTests(unittest.TestCase):
             major_direction = 1
             weak_bull_bias = False
             early_bullish = False
+            signal_quality_tier = "TIER_LOW"
+            entry_pathway = "STRICT"
+            signal_confidence = 0.0
+            signal_strength_bonus = 0.0
             swing_rsi = 55.0
             execution_obv_zscore = 1.3
             execution_obv_threshold = 1.0
@@ -330,6 +395,10 @@ class SignalProfilerTests(unittest.TestCase):
             blocker_reason = "PASSED"
             bullish_ready = True
             fully_aligned = True
+            signal_quality_tier = "TIER_HIGH"
+            entry_pathway = "FAST_TRACK"
+            signal_confidence = 0.88
+            signal_strength_bonus = 6.0
 
         profiler.record(PassingSignal(), grid_center_price=99.0)
         summary = profiler._build_window_summary()

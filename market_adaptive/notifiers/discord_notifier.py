@@ -287,6 +287,13 @@ class DiscordNotifier:
             blocker_lines = ["PASSED × 0"]
         dominant_label = self._format_signal_profiler_blocking_label(summary)
         dominant_count = max(0, int(summary.get("dominant_blocking_count", 0)))
+        quality_counts = summary.get("quality_tier_counts") or {}
+        pathway_counts = summary.get("entry_pathway_counts") or {}
+        quality_line = " / ".join(f"{name}:{count}" for name, count in sorted(quality_counts.items())) or "暂无"
+        pathway_line = " / ".join(f"{name}:{count}" for name, count in sorted(pathway_counts.items())) or "暂无"
+        latest_quality = str(summary.get("latest_signal_quality_tier") or "TIER_LOW")
+        latest_pathway = str(summary.get("latest_entry_pathway") or "STRICT")
+        latest_confidence = float(summary.get("latest_signal_confidence", 0.0) or 0.0)
         fields = [
             {"name": "当前主阻塞层", "value": f"{dominant_label}（{dominant_count} 次）", "inline": False},
             {"name": "交易对", "value": str(symbol), "inline": True},
@@ -295,6 +302,9 @@ class DiscordNotifier:
             {"name": "通过 Regime", "value": f"{int(summary.get('passed_regime', 0))}/{int(summary.get('window_cycles', 0))} ({float(summary.get('regime_pass_rate_pct', 0.0)):.1f}%)", "inline": True},
             {"name": "通过 Swing", "value": f"{int(summary.get('passed_swing', 0))}/{int(summary.get('window_cycles', 0))} ({float(summary.get('swing_pass_rate_pct', 0.0)):.1f}%)", "inline": True},
             {"name": "通过 Trigger", "value": f"{int(summary.get('passed_trigger', 0))}/{int(summary.get('window_cycles', 0))} ({float(summary.get('trigger_pass_rate_pct', 0.0)):.1f}%)", "inline": True},
+            {"name": "质量层分布", "value": self._truncate(quality_line, 1000), "inline": False},
+            {"name": "路径分布", "value": self._truncate(pathway_line, 1000), "inline": False},
+            {"name": "最近质量/路径", "value": f"{latest_quality} / {latest_pathway} / conf={latest_confidence:.2f}", "inline": False},
             {"name": "最近 OBV 强度", "value": self._format_signal_profiler_obv(summary), "inline": True},
             {"name": "最近价格", "value": self._format_signal_profiler_price(summary.get('latest_execution_price')), "inline": True},
             {"name": "距离网格中心", "value": self._format_signal_profiler_gap(summary.get('latest_grid_center_gap')), "inline": True},

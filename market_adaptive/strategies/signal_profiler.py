@@ -27,6 +27,10 @@ class CycleAuditRecord:
     major_supertrend_direction: int
     trigger_family: str
     trigger_group: str
+    signal_quality_tier: str
+    entry_pathway: str
+    signal_confidence: float
+    signal_strength_bonus: float
     swing_rsi: float
     execution_obv_zscore: float
     execution_obv_threshold: float
@@ -61,11 +65,16 @@ class FunnelWindowSummary:
     dominant_blocking_label: str
     dominant_blocking_count: int
     blocking_layer_counts: dict[str, int]
+    quality_tier_counts: dict[str, int]
+    entry_pathway_counts: dict[str, int]
     latest_blocker_reason: str
     latest_execution_obv_zscore: float
     latest_execution_obv_threshold: float
     latest_execution_price: float | None
     latest_grid_center_gap: float | None
+    latest_signal_quality_tier: str
+    latest_entry_pathway: str
+    latest_signal_confidence: float
 
     def as_notification_payload(self) -> dict[str, Any]:
         return {
@@ -82,11 +91,16 @@ class FunnelWindowSummary:
             "dominant_blocking_label": self.dominant_blocking_label,
             "dominant_blocking_count": self.dominant_blocking_count,
             "blocking_layer_counts": dict(self.blocking_layer_counts),
+            "quality_tier_counts": dict(self.quality_tier_counts),
+            "entry_pathway_counts": dict(self.entry_pathway_counts),
             "latest_blocker_reason": self.latest_blocker_reason,
             "latest_execution_obv_zscore": self.latest_execution_obv_zscore,
             "latest_execution_obv_threshold": self.latest_execution_obv_threshold,
             "latest_execution_price": self.latest_execution_price,
             "latest_grid_center_gap": self.latest_grid_center_gap,
+            "latest_signal_quality_tier": self.latest_signal_quality_tier,
+            "latest_entry_pathway": self.latest_entry_pathway,
+            "latest_signal_confidence": self.latest_signal_confidence,
         }
 
 
@@ -200,6 +214,10 @@ class SignalProfiler:
             major_supertrend_direction=signal.major_direction,
             trigger_family=str(getattr(execution_trigger, "family", "waiting")),
             trigger_group=str(getattr(execution_trigger, "group", "waiting")),
+            signal_quality_tier=str(getattr(getattr(signal, "signal_quality_tier", None), "name", getattr(signal, "signal_quality_tier", "TIER_LOW")) or "TIER_LOW"),
+            entry_pathway=str(getattr(getattr(signal, "entry_pathway", None), "name", getattr(signal, "entry_pathway", "STRICT")) or "STRICT"),
+            signal_confidence=float(getattr(signal, "signal_confidence", 0.0) or 0.0),
+            signal_strength_bonus=float(getattr(signal, "signal_strength_bonus", 0.0) or 0.0),
             swing_rsi=float(signal.swing_rsi),
             execution_obv_zscore=float(signal.execution_obv_zscore),
             execution_obv_threshold=float(signal.execution_obv_threshold if execution_obv_threshold is None else execution_obv_threshold),
@@ -220,12 +238,16 @@ class SignalProfiler:
         )
         self._window_records.append(record)
         logger.info(
-            "Strategy audit snapshot | cycle=%s server_time=%s local_time=%s skew_ms=%s 4h_supertrend=%s 1h_rsi=%.2f 15m_obv_z=%.2f/%.2f price=%.4f grid_center=%s grid_gap=%s atr=%.6f atr_price_pct=%.4f data_ok=%s mismatch_ms=%s blocker=%s",
+            "Strategy audit snapshot | cycle=%s server_time=%s local_time=%s skew_ms=%s 4h_supertrend=%s quality=%s pathway=%s confidence=%.2f strength_bonus=%.1f 1h_rsi=%.2f 15m_obv_z=%.2f/%.2f price=%.4f grid_center=%s grid_gap=%s atr=%.6f atr_price_pct=%.4f data_ok=%s mismatch_ms=%s blocker=%s",
             record.cycle,
             record.server_time_iso,
             record.local_time_iso,
             record.server_local_skew_ms,
             record.major_supertrend_direction,
+            record.signal_quality_tier,
+            record.entry_pathway,
+            record.signal_confidence,
+            record.signal_strength_bonus,
             record.swing_rsi,
             record.execution_obv_zscore,
             record.execution_obv_threshold,
@@ -255,9 +277,15 @@ class SignalProfiler:
         records = list(self._window_records)
         latest = records[-1]
         blocker_counts: dict[str, int] = {}
+        quality_tier_counts: dict[str, int] = {}
+        entry_pathway_counts: dict[str, int] = {}
         for record in records:
             blocker = str(record.blocker_reason or "PASSED")
             blocker_counts[blocker] = blocker_counts.get(blocker, 0) + 1
+            quality_tier = str(record.signal_quality_tier or "TIER_LOW")
+            quality_tier_counts[quality_tier] = quality_tier_counts.get(quality_tier, 0) + 1
+            entry_pathway = str(record.entry_pathway or "STRICT")
+            entry_pathway_counts[entry_pathway] = entry_pathway_counts.get(entry_pathway, 0) + 1
         top_blockers = sorted(blocker_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
         dominant_layer, dominant_label, dominant_count, layer_counts = self._resolve_dominant_blocking_layer(records)
         window_cycles = max(1, len(records))
@@ -275,11 +303,16 @@ class SignalProfiler:
             dominant_blocking_label=dominant_label,
             dominant_blocking_count=dominant_count,
             blocking_layer_counts=layer_counts,
+            quality_tier_counts=quality_tier_counts,
+            entry_pathway_counts=entry_pathway_counts,
             latest_blocker_reason=latest.blocker_reason,
             latest_execution_obv_zscore=latest.execution_obv_zscore,
             latest_execution_obv_threshold=latest.execution_obv_threshold,
             latest_execution_price=self._latest_non_null(records, "execution_price"),
             latest_grid_center_gap=self._latest_non_null(records, "grid_center_gap"),
+            latest_signal_quality_tier=str(latest.signal_quality_tier or "TIER_LOW"),
+            latest_entry_pathway=str(latest.entry_pathway or "STRICT"),
+            latest_signal_confidence=float(latest.signal_confidence),
         )
 
     def _notify_summary(self, summary: FunnelWindowSummary) -> None:

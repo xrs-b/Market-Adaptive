@@ -65,7 +65,7 @@ class RiskControlConfig:
     daily_loss_warning_scale: float = 0.50
     daily_loss_stop_openings_pct: float = 0.05
     daily_loss_reduce_exposure_pct: float = 0.07
-    daily_loss_cutoff_pct: float = 0.10
+    daily_loss_cutoff_pct: float = 0.05
     max_margin_ratio: float = 0.60
     recovery_check_interval_seconds: int = 60
     position_sync_tolerance: float = 1e-6
@@ -295,9 +295,17 @@ class CTAConfig:
     obv_scalp_require_early_bearish: bool = True
     obv_scalp_max_positive_obv_zscore: float = 0.15
     quick_trade_minimum_expected_rr: float = 1.35
+    standard_entry_minimum_expected_rr: float = 0.0
     starter_quality_minimum_score: float = 72.0
     scale_in_quality_minimum_score: float = 68.0
     starter_countertrend_max_score_gap: float = 10.0
+    tier_high_minimum_score: float = 85.0
+    tier_medium_minimum_score: float = 70.0
+    tier_high_confidence_threshold: float = 0.8
+    signal_strength_trend_bonus_cap: float = 5.0
+    signal_strength_direction_bonus_cap: float = 10.0
+    signal_strength_volatility_bonus_cap: float = 5.0
+    signal_strength_obv_bonus_cap: float = 10.0
 
     def __post_init__(self) -> None:
         default_execution = "15m"
@@ -390,9 +398,17 @@ class CTAConfig:
         self.obv_scalp_max_bullish_score = max(0.0, float(self.obv_scalp_max_bullish_score))
         self.obv_scalp_max_positive_obv_zscore = float(self.obv_scalp_max_positive_obv_zscore)
         self.quick_trade_minimum_expected_rr = max(self.relaxed_short_minimum_expected_rr, float(self.quick_trade_minimum_expected_rr))
+        self.standard_entry_minimum_expected_rr = max(self.minimum_expected_rr, float(self.standard_entry_minimum_expected_rr))
         self.starter_quality_minimum_score = max(0.0, float(self.starter_quality_minimum_score))
         self.scale_in_quality_minimum_score = max(0.0, float(self.scale_in_quality_minimum_score))
         self.starter_countertrend_max_score_gap = max(0.0, float(self.starter_countertrend_max_score_gap))
+        self.tier_medium_minimum_score = max(0.0, float(self.tier_medium_minimum_score))
+        self.tier_high_minimum_score = max(self.tier_medium_minimum_score, float(self.tier_high_minimum_score))
+        self.tier_high_confidence_threshold = min(1.0, max(0.0, float(self.tier_high_confidence_threshold)))
+        self.signal_strength_trend_bonus_cap = max(0.0, float(self.signal_strength_trend_bonus_cap))
+        self.signal_strength_direction_bonus_cap = max(0.0, float(self.signal_strength_direction_bonus_cap))
+        self.signal_strength_volatility_bonus_cap = max(0.0, float(self.signal_strength_volatility_bonus_cap))
+        self.signal_strength_obv_bonus_cap = max(0.0, float(self.signal_strength_obv_bonus_cap))
         self.early_entry_minimum_score = max(0.0, float(self.early_entry_minimum_score))
         self.starter_frontrun_minimum_score = max(self.early_entry_minimum_score, float(self.starter_frontrun_minimum_score))
         self.early_entry_direction_confirmation_bars = max(1, int(self.early_entry_direction_confirmation_bars))
@@ -644,7 +660,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         daily_loss_warning_scale=float(risk_payload.get("daily_loss_warning_scale", 0.50)),
         daily_loss_stop_openings_pct=float(risk_payload.get("daily_loss_stop_openings_pct", 0.05)),
         daily_loss_reduce_exposure_pct=float(risk_payload.get("daily_loss_reduce_exposure_pct", 0.07)),
-        daily_loss_cutoff_pct=float(risk_payload.get("daily_loss_cutoff_pct", 0.10)),
+        daily_loss_cutoff_pct=float(risk_payload.get("daily_loss_cutoff_pct", 0.05)),
         max_margin_ratio=float(risk_payload.get("max_margin_ratio", 0.60)),
         recovery_check_interval_seconds=int(risk_payload.get("recovery_check_interval_seconds", 60)),
         position_sync_tolerance=float(risk_payload.get("position_sync_tolerance", 1e-6)),
@@ -787,6 +803,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         minimum_expected_rr=float(cta_payload.get("minimum_expected_rr", 0.0)),
         relaxed_entry_minimum_expected_rr=float(cta_payload.get("relaxed_entry_minimum_expected_rr", 0.0)),
         starter_entry_minimum_expected_rr=float(cta_payload.get("starter_entry_minimum_expected_rr", 0.0)),
+        standard_entry_minimum_expected_rr=float(cta_payload.get("standard_entry_minimum_expected_rr", 0.0)),
         breakout_rr_target_atr_multiplier=float(cta_payload.get("breakout_rr_target_atr_multiplier", 3.0)),
         early_entry_minimum_score=float(cta_payload.get("early_entry_minimum_score", 70.0)),
         starter_frontrun_minimum_score=float(cta_payload.get("starter_frontrun_minimum_score", 80.0)),

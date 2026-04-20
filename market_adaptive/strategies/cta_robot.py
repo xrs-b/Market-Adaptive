@@ -4,6 +4,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from enum import Enum
 
 from market_adaptive.config import CTAConfig, ExecutionConfig
 from market_adaptive.coordination import StrategyRuntimeContext
@@ -24,6 +25,12 @@ from market_adaptive.strategies.order_flow_sentinel import OrderFlowAssessment, 
 from market_adaptive.strategies.signal_profiler import SignalProfiler
 
 logger = logging.getLogger(__name__)
+
+
+class EntryPathway(Enum):
+    FAST_TRACK = "fast_track"
+    STANDARD = "standard"
+    STRICT = "strict"
 
 
 @dataclass
@@ -76,6 +83,10 @@ class TrendSignal:
     relaxed_entry: bool = False
     relaxed_reasons: tuple[str, ...] = ()
     quick_trade_mode: bool = False
+    entry_pathway: EntryPathway = EntryPathway.STRICT
+    signal_quality_tier: str = "TIER_LOW"
+    signal_confidence: float = 0.0
+    signal_strength_bonus: float = 0.0
 
     @property
     def obv_signal_strength(self) -> float:
@@ -271,6 +282,18 @@ class CTARobot(BaseStrategyRobot):
             used_rsi_override=used_rsi_override,
             used_value_area_override=used_value_area_override,
         )
+
+    def _resolve_entry_pathway(self, mtf_signal: MTFSignal) -> EntryPathway:
+        quality_tier = str(getattr(getattr(mtf_signal, "signal_quality_tier", None), "name", "TIER_LOW"))
+        confidence = float(getattr(mtf_signal, "signal_confidence", 0.0) or 0.0)
+        fully_aligned = bool(getattr(mtf_signal, "fully_aligned", False))
+        high_confidence_floor = float(getattr(self.config, "tier_high_confidence_threshold", 0.8))
+
+        if quality_tier == "TIER_HIGH" and fully_aligned and confidence >= high_confidence_floor:
+            return EntryPathway.FAST_TRACK
+        if quality_tier == "TIER_MEDIUM":
+            return EntryPathway.STANDARD
+        return EntryPathway.STRICT
 
     def _resolve_dynamic_stop_loss_multiplier(self, signal: TrendSignal) -> float:
         base_multiplier = float(self.config.stop_loss_atr)
@@ -526,6 +549,10 @@ class CTARobot(BaseStrategyRobot):
             )
         ) else 0
         raw_direction = bullish_raw_direction if bullish_raw_direction != 0 else bearish_raw_direction
+        entry_pathway = self._resolve_entry_pathway(mtf_signal)
+        signal_quality_tier = str(getattr(getattr(mtf_signal, "signal_quality_tier", None), "name", "TIER_LOW"))
+        signal_confidence = float(getattr(mtf_signal, "signal_confidence", 0.0) or 0.0)
+        signal_strength_bonus = float(getattr(mtf_signal, "signal_strength_bonus", 0.0) or 0.0)
         obv_gate = self._resolve_obv_gate(mtf_signal)
         obv_threshold = float(obv_gate.threshold)
         obv_exempt = bool(obv_gate.exempt)
@@ -561,6 +588,11 @@ class CTARobot(BaseStrategyRobot):
         obv_confirmation_passed = True
         relaxed_reasons: list[str] = []
         quick_trade_mode = False
+        standard_path = entry_pathway is EntryPathway.STANDARD
+        standard_obv_floor = max(
+            float(getattr(self.config, "near_breakout_release_obv_zscore_floor", -0.25)),
+            float(obv_threshold) - 1.0,
+        )
 
         if raw_direction > 0:
             obv_confirmation_passed = volume_filter_passed
@@ -575,23 +607,42 @@ class CTARobot(BaseStrategyRobot):
                 raw_direction=raw_direction,
             )
             if not obv_exempt and not obv_confirmation_passed:
-                long_setup_blocked = True
-                long_setup_reason = "obv_strength_not_confirmed"
+                if standard_path and float(obv_confirmation.zscore) >= standard_obv_floor:
+                    relaxed_reasons.append(f"STANDARD_OBV({float(obv_confirmation.zscore):.2f}) >= Floor({float(standard_obv_floor):.2f})")
+                else:
+                    long_setup_blocked = True
+                    long_setup_reason = "obv_strength_not_confirmed"
             elif not obv_exempt and not obv_confirmation.above_sma:
                 if relaxed_obv_allowed:
                     relaxed_reasons.append(f"OBV({float(obv_confirmation.zscore):.2f}) > Floor({float(obv_threshold):.2f})")
+                elif standard_path and float(obv_confirmation.zscore) >= standard_obv_floor:
+                    relaxed_reasons.append(f"STANDARD_OBV_BELOW_SMA({float(obv_confirmation.zscore):.2f})")
                 else:
                     long_setup_blocked = True
                     long_setup_reason = "obv_below_sma"
             elif volume_profile is None:
-                long_setup_blocked = True
-                long_setup_reason = "missing_volume_profile"
+                if standard_path:
+                    relaxed_reasons.append("STANDARD_NO_VOLUME_PROFILE")
+                else:
+                    long_setup_blocked = True
+                    long_setup_reason = "missing_volume_profile"
             elif not volume_profile.above_poc(current_price):
-                long_setup_blocked = True
-                long_setup_reason = "below_poc"
+                poc_reclaim_tolerance = max(
+                    float(getattr(self.config, "value_area_edge_atr_multiplier", 1.0)) * max(float(atr_series.iloc[-1]), 0.0),
+                    float(current_price) * 0.001,
+                )
+                poc_gap = max(0.0, float(volume_profile.poc_price) - float(current_price))
+                if standard_path and bool(mtf_signal.execution_trigger.frontrun_near_breakout or mtf_signal.execution_trigger.prior_high_break) and poc_gap <= poc_reclaim_tolerance:
+                    relaxed_reasons.append(f"STANDARD_POC_RECLAIM_OK({poc_gap:.4f})")
+                else:
+                    long_setup_blocked = True
+                    long_setup_reason = "below_poc"
             elif value_area_decision.blocked:
-                long_setup_blocked = True
-                long_setup_reason = "inside_value_area"
+                if standard_path:
+                    relaxed_reasons.append("STANDARD_VA_BYPASS")
+                else:
+                    long_setup_blocked = True
+                    long_setup_reason = "inside_value_area"
             elif value_area_decision.inside_value_area and value_area_decision.reason:
                 if value_area_decision.reason in {"High Momentum", "Edge Proximity"}:
                     relaxed_reasons.append(f"VA:{value_area_decision.reason}")
@@ -601,8 +652,11 @@ class CTARobot(BaseStrategyRobot):
                     decision=value_area_decision,
                 )
             elif not volume_profile.above_value_area(current_price):
-                long_setup_blocked = True
-                long_setup_reason = "below_value_area_high"
+                if standard_path:
+                    relaxed_reasons.append("STANDARD_BELOW_VAH_OK")
+                else:
+                    long_setup_blocked = True
+                    long_setup_reason = "below_value_area_high"
 
             if long_setup_reason == "inside_value_area":
                 self._log_value_area_event(
@@ -727,8 +781,26 @@ class CTARobot(BaseStrategyRobot):
             relaxed_entry=bool(relaxed_reasons),
             relaxed_reasons=tuple(dict.fromkeys(relaxed_reasons)),
             quick_trade_mode=quick_trade_mode,
+            entry_pathway=entry_pathway,
+            signal_quality_tier=signal_quality_tier,
+            signal_confidence=signal_confidence,
+            signal_strength_bonus=signal_strength_bonus,
         )
-        return self._quality_filter_short_signal(signal)
+        signal = self._quality_filter_short_signal(signal)
+        logger.info(
+            "CTA Signal | symbol=%s quality=%s pathway=%s direction=%s raw_direction=%s score=%.1f confidence=%.2f strength_bonus=%.1f aligned=%s trigger=%s",
+            self.symbol,
+            signal.signal_quality_tier,
+            signal.entry_pathway.name,
+            signal.direction,
+            signal.raw_direction,
+            float(signal.bullish_score if signal.raw_direction >= 0 else signal.bearish_score),
+            float(signal.signal_confidence),
+            float(signal.signal_strength_bonus),
+            bool(signal.mtf_aligned),
+            signal.execution_trigger_reason,
+        )
+        return signal
 
     def _effective_signal_obv_threshold(self, signal: TrendSignal) -> float:
         if signal.obv_threshold is not None:
@@ -756,6 +828,10 @@ class CTARobot(BaseStrategyRobot):
             "raw_direction": int(signal.raw_direction),
             "direction": int(signal.direction),
             "execution_entry_mode": str(signal.execution_entry_mode),
+            "entry_pathway": str(signal.entry_pathway.name),
+            "signal_quality_tier": str(signal.signal_quality_tier),
+            "signal_confidence": float(signal.signal_confidence),
+            "signal_strength_bonus": float(signal.signal_strength_bonus),
             "execution_trigger_reason": str(signal.execution_trigger_reason),
             "execution_memory_active": bool(signal.execution_memory_active),
             "execution_latch_active": bool(signal.execution_latch_active),
@@ -966,6 +1042,168 @@ class CTARobot(BaseStrategyRobot):
             return "starter_entry_chasing"
         return None
 
+    def _fast_track_hard_block_reason(self, signal: TrendSignal) -> str | None:
+        reverse_obv_threshold = max(0.5, abs(float(self._effective_signal_obv_threshold(signal))))
+        obv_zscore = float(signal.obv_confirmation.zscore)
+        if signal.direction > 0:
+            if bool(signal.obv_confirmation.above_sma) is False and obv_zscore <= -reverse_obv_threshold:
+                return "fast_track_reverse_obv"
+        elif signal.direction < 0:
+            if bool(signal.obv_confirmation.above_sma) and obv_zscore >= reverse_obv_threshold:
+                return "fast_track_reverse_obv"
+        return None
+
+    def _resolve_minimum_expected_rr_for_pathway(self, signal: TrendSignal) -> float:
+        minimum_expected_rr = self._resolve_minimum_expected_rr(signal)
+        if signal.entry_pathway is EntryPathway.STANDARD:
+            standard_floor = float(getattr(self.config, "standard_entry_minimum_expected_rr", minimum_expected_rr))
+            return max(minimum_expected_rr, standard_floor)
+        if signal.entry_pathway is not EntryPathway.FAST_TRACK:
+            return minimum_expected_rr
+        if signal.relaxed_entry:
+            return minimum_expected_rr
+        entry_mode = str(signal.execution_entry_mode or "").lower()
+        if not any(marker in entry_mode for marker in ("starter", "frontrun", "scale_in", "early_")):
+            return minimum_expected_rr
+        starter_floor = float(getattr(self.config, "starter_entry_minimum_expected_rr", minimum_expected_rr))
+        return min(minimum_expected_rr, starter_floor)
+
+    def _pathway_skips_strict_order_flow(self, signal: TrendSignal) -> bool:
+        if signal.entry_pathway is not EntryPathway.FAST_TRACK:
+            return False
+        entry_mode = str(signal.execution_entry_mode or "").lower()
+        return any(marker in entry_mode for marker in ("starter", "frontrun", "scale_in", "early_"))
+
+    def _apply_fast_track_checks(self, signal: TrendSignal) -> str | None:
+        hard_block_reason = self._fast_track_hard_block_reason(signal)
+        if hard_block_reason is not None:
+            logger.info(
+                "CTA fast-track blocked | symbol=%s side=%s reason=%s obv_above_sma=%s obv_z=%.2f threshold=%.2f",
+                self.symbol,
+                "buy" if signal.direction > 0 else "sell",
+                hard_block_reason,
+                bool(signal.obv_confirmation.above_sma),
+                float(signal.obv_confirmation.zscore),
+                float(self._effective_signal_obv_threshold(signal)),
+            )
+            return "cta:fast_track_blocked"
+        return None
+
+    def _apply_standard_checks(self, signal: TrendSignal) -> str | None:
+        entry_location_block_reason = self._resolve_entry_location_block_reason(signal)
+        if entry_location_block_reason is not None:
+            logger.info(
+                "CTA entry location blocked | symbol=%s side=%s mode=%s pathway=%s reason=%s breakout=%s breakdown=%s near_breakout=%s",
+                self.symbol,
+                "buy" if signal.direction > 0 else "sell",
+                signal.execution_entry_mode,
+                signal.entry_pathway.name,
+                entry_location_block_reason,
+                signal.execution_breakout,
+                signal.execution_breakdown,
+                signal.execution_frontrun_near_breakout,
+            )
+            return "cta:entry_location_blocked"
+
+        starter_quality_passed, starter_quality_reason = self._starter_entry_passes_quality_gate(signal)
+        if not starter_quality_passed:
+            logger.info(
+                "CTA starter quality blocked | symbol=%s side=%s mode=%s pathway=%s reason=%s bullish_score=%.1f bearish_score=%.1f major_direction=%s",
+                self.symbol,
+                "buy" if signal.direction > 0 else "sell",
+                signal.execution_entry_mode,
+                signal.entry_pathway.name,
+                starter_quality_reason,
+                float(signal.bullish_score),
+                float(signal.bearish_score),
+                int(signal.major_direction),
+            )
+            return "cta:entry_quality_blocked"
+        return None
+
+    def _assess_order_flow(self, *, side: str, amount: float) -> OrderFlowAssessment | None:
+        if side != "buy" or not self.config.order_flow_enabled:
+            return None
+        return self.order_flow_sentinel.assess_entry(self.symbol, side, amount)
+
+    def _apply_standard_order_flow_checks(
+        self,
+        *,
+        signal: TrendSignal,
+        side: str,
+        amount: float,
+        order_flow_assessment: OrderFlowAssessment | None,
+    ) -> str | None:
+        if order_flow_assessment is None:
+            return None
+        if order_flow_assessment.entry_allowed:
+            return None
+        if order_flow_assessment.reason == "empty_order_book":
+            logger.info(
+                "CTA order flow blocked | symbol=%s side=%s mode=%s pathway=%s trigger=%s amount=%.8f diagnostics=%s",
+                self.symbol,
+                side,
+                signal.execution_entry_mode,
+                signal.entry_pathway.name,
+                signal.execution_trigger_reason,
+                amount,
+                order_flow_assessment.diagnostics(),
+            )
+            return "cta:order_flow_blocked"
+        logger.info(
+            "CTA standard order flow soft warning | symbol=%s side=%s mode=%s pathway=%s trigger=%s amount=%.8f diagnostics=%s",
+            self.symbol,
+            side,
+            signal.execution_entry_mode,
+            signal.entry_pathway.name,
+            signal.execution_trigger_reason,
+            amount,
+            order_flow_assessment.diagnostics(),
+        )
+        return None
+
+    def _apply_strict_order_flow_checks(
+        self,
+        *,
+        signal: TrendSignal,
+        side: str,
+        amount: float,
+        order_flow_assessment: OrderFlowAssessment | None,
+    ) -> str | None:
+        if order_flow_assessment is None:
+            return None
+        if not order_flow_assessment.entry_allowed and signal.execution_entry_mode not in {"weak_bull_scale_in_limit", "early_bullish_starter_limit", "starter_frontrun_limit", "starter_short_frontrun_limit"}:
+            base_confirmation_ratio = max(0.0, float(self.config.order_flow_confirmation_ratio))
+            strict_order_flow_modes = {"breakout_confirmed", "major_bull_retest_ready", "trend_continuation_near_breakout_ready"}
+            hard_order_flow_block = (
+                order_flow_assessment.reason == "empty_order_book"
+                or order_flow_assessment.imbalance_ratio < base_confirmation_ratio
+                or signal.execution_trigger_reason in strict_order_flow_modes
+            )
+            if hard_order_flow_block:
+                logger.info(
+                    "CTA order flow blocked | symbol=%s side=%s mode=%s pathway=%s trigger=%s amount=%.8f diagnostics=%s",
+                    self.symbol,
+                    side,
+                    signal.execution_entry_mode,
+                    signal.entry_pathway.name,
+                    signal.execution_trigger_reason,
+                    amount,
+                    order_flow_assessment.diagnostics(),
+                )
+                return "cta:order_flow_blocked"
+            logger.info(
+                "CTA order flow soft warning | symbol=%s side=%s mode=%s pathway=%s trigger=%s amount=%.8f diagnostics=%s",
+                self.symbol,
+                side,
+                signal.execution_entry_mode,
+                signal.entry_pathway.name,
+                signal.execution_trigger_reason,
+                amount,
+                order_flow_assessment.diagnostics(),
+            )
+        return None
+
     def _open_position(self, signal: TrendSignal) -> str:
         side = "buy" if signal.direction > 0 else "sell"
         amount = self._calculate_entry_amount(signal.price)
@@ -991,38 +1229,54 @@ class CTARobot(BaseStrategyRobot):
                     self._publish_risk_profile(None)
                     return "cta:sentiment_blocked"
 
-        order_flow_assessment: OrderFlowAssessment | None = None
-        if side == "buy" and self.config.order_flow_enabled:
-            order_flow_assessment = self.order_flow_sentinel.assess_entry(self.symbol, side, amount)
-            if not order_flow_assessment.entry_allowed and signal.execution_entry_mode not in {"weak_bull_scale_in_limit", "early_bullish_starter_limit", "starter_frontrun_limit", "starter_short_frontrun_limit"}:
-                base_confirmation_ratio = max(0.0, float(self.config.order_flow_confirmation_ratio))
-                strict_order_flow_modes = {"breakout_confirmed", "major_bull_retest_ready", "trend_continuation_near_breakout_ready"}
-                hard_order_flow_block = (
-                    order_flow_assessment.reason == "empty_order_book"
-                    or order_flow_assessment.imbalance_ratio < base_confirmation_ratio
-                    or signal.execution_trigger_reason in strict_order_flow_modes
+        order_flow_assessment: OrderFlowAssessment | None = self._assess_order_flow(side=side, amount=amount)
+        if signal.entry_pathway is EntryPathway.FAST_TRACK:
+            fast_track_result = self._apply_fast_track_checks(signal)
+            if fast_track_result is not None:
+                self._publish_risk_profile(None)
+                return fast_track_result
+            if not self._pathway_skips_strict_order_flow(signal):
+                strict_result = self._apply_strict_order_flow_checks(
+                    signal=signal,
+                    side=side,
+                    amount=amount,
+                    order_flow_assessment=order_flow_assessment,
                 )
-                if hard_order_flow_block:
-                    logger.info(
-                        "CTA order flow blocked | symbol=%s side=%s mode=%s trigger=%s amount=%.8f diagnostics=%s",
-                        self.symbol,
-                        side,
-                        signal.execution_entry_mode,
-                        signal.execution_trigger_reason,
-                        amount,
-                        order_flow_assessment.diagnostics(),
-                    )
+                if strict_result is not None:
                     self._publish_risk_profile(None)
-                    return "cta:order_flow_blocked"
-                logger.info(
-                    "CTA order flow soft warning | symbol=%s side=%s mode=%s trigger=%s amount=%.8f diagnostics=%s",
-                    self.symbol,
-                    side,
-                    signal.execution_entry_mode,
-                    signal.execution_trigger_reason,
-                    amount,
-                    order_flow_assessment.diagnostics(),
-                )
+                    return strict_result
+            standard_result = self._apply_standard_checks(signal)
+            if standard_result is not None:
+                self._publish_risk_profile(None)
+                return standard_result
+        elif signal.entry_pathway is EntryPathway.STANDARD:
+            standard_order_flow_result = self._apply_standard_order_flow_checks(
+                signal=signal,
+                side=side,
+                amount=amount,
+                order_flow_assessment=order_flow_assessment,
+            )
+            if standard_order_flow_result is not None:
+                self._publish_risk_profile(None)
+                return standard_order_flow_result
+            standard_result = self._apply_standard_checks(signal)
+            if standard_result is not None:
+                self._publish_risk_profile(None)
+                return standard_result
+        else:
+            strict_result = self._apply_strict_order_flow_checks(
+                signal=signal,
+                side=side,
+                amount=amount,
+                order_flow_assessment=order_flow_assessment,
+            )
+            if strict_result is not None:
+                self._publish_risk_profile(None)
+                return strict_result
+            standard_result = self._apply_standard_checks(signal)
+            if standard_result is not None:
+                self._publish_risk_profile(None)
+                return standard_result
 
         position_side = "long" if signal.direction > 0 else "short"
         notional_price = signal.price
@@ -1040,45 +1294,16 @@ class CTARobot(BaseStrategyRobot):
                 self._publish_risk_profile(None)
                 return "cta:risk_blocked"
 
-        entry_location_block_reason = self._resolve_entry_location_block_reason(signal)
-        if entry_location_block_reason is not None:
-            logger.info(
-                "CTA entry location blocked | symbol=%s side=%s mode=%s reason=%s breakout=%s breakdown=%s near_breakout=%s",
-                self.symbol,
-                side,
-                signal.execution_entry_mode,
-                entry_location_block_reason,
-                signal.execution_breakout,
-                signal.execution_breakdown,
-                signal.execution_frontrun_near_breakout,
-            )
-            self._publish_risk_profile(None)
-            return "cta:entry_location_blocked"
-
-        starter_quality_passed, starter_quality_reason = self._starter_entry_passes_quality_gate(signal)
-        if not starter_quality_passed:
-            logger.info(
-                "CTA starter quality blocked | symbol=%s side=%s mode=%s reason=%s bullish_score=%.1f bearish_score=%.1f major_direction=%s",
-                self.symbol,
-                side,
-                signal.execution_entry_mode,
-                starter_quality_reason,
-                float(signal.bullish_score),
-                float(signal.bearish_score),
-                int(signal.major_direction),
-            )
-            self._publish_risk_profile(None)
-            return "cta:entry_quality_blocked"
-
         pre_entry_atr = self._normalized_atr(notional_price, signal.atr)
         pre_entry_stop_distance = pre_entry_atr * self._resolve_dynamic_stop_loss_multiplier(signal)
         expected_rr = self._expected_reward_risk_ratio(signal, reference_price=notional_price, stop_distance=pre_entry_stop_distance)
-        minimum_expected_rr = self._resolve_minimum_expected_rr(signal)
+        minimum_expected_rr = self._resolve_minimum_expected_rr_for_pathway(signal)
         if expected_rr is not None and expected_rr < minimum_expected_rr:
             logger.info(
-                "CTA reward/risk blocked | symbol=%s side=%s expected_rr=%.2f threshold=%.2f price=%.2f stop_distance=%.2f",
+                "CTA reward/risk blocked | symbol=%s side=%s pathway=%s expected_rr=%.2f threshold=%.2f price=%.2f stop_distance=%.2f",
                 self.symbol,
                 side,
+                signal.entry_pathway.name,
                 expected_rr,
                 minimum_expected_rr,
                 notional_price,
@@ -1102,7 +1327,7 @@ class CTARobot(BaseStrategyRobot):
         )
         if signal.relaxed_entry and signal.relaxed_reasons:
             entry_reason = f"{entry_reason} | Relaxations: {', '.join(signal.relaxed_reasons)}"
-        logger.info("[TRADE_OPEN] Type: %s | Reason: %s", entry_type, entry_reason)
+        logger.info("[TRADE_OPEN] Type: %s | Pathway: %s | Reason: %s", entry_type, signal.entry_pathway.name, entry_reason)
 
         entry_order = self._place_entry_order(
             side=side,
