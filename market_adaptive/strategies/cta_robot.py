@@ -1204,6 +1204,75 @@ class CTARobot(BaseStrategyRobot):
             )
         return None
 
+    def _apply_entry_pathway_checks(
+        self,
+        *,
+        signal: TrendSignal,
+        side: str,
+        amount: float,
+        order_flow_assessment: OrderFlowAssessment | None,
+    ) -> str | None:
+        if signal.entry_pathway is EntryPathway.FAST_TRACK:
+            fast_track_result = self._apply_fast_track_checks(signal)
+            if fast_track_result is not None:
+                return fast_track_result
+            if not self._pathway_skips_strict_order_flow(signal):
+                strict_result = self._apply_strict_order_flow_checks(
+                    signal=signal,
+                    side=side,
+                    amount=amount,
+                    order_flow_assessment=order_flow_assessment,
+                )
+                if strict_result is not None:
+                    return strict_result
+            return self._apply_standard_checks(signal)
+
+        if signal.entry_pathway is EntryPathway.STANDARD:
+            standard_order_flow_result = self._apply_standard_order_flow_checks(
+                signal=signal,
+                side=side,
+                amount=amount,
+                order_flow_assessment=order_flow_assessment,
+            )
+            if standard_order_flow_result is not None:
+                return standard_order_flow_result
+            return self._apply_standard_checks(signal)
+
+        strict_result = self._apply_strict_order_flow_checks(
+            signal=signal,
+            side=side,
+            amount=amount,
+            order_flow_assessment=order_flow_assessment,
+        )
+        if strict_result is not None:
+            return strict_result
+        return self._apply_standard_checks(signal)
+
+    def _check_entry_reward_risk(
+        self,
+        *,
+        signal: TrendSignal,
+        side: str,
+        reference_price: float,
+    ) -> str | None:
+        pre_entry_atr = self._normalized_atr(reference_price, signal.atr)
+        pre_entry_stop_distance = pre_entry_atr * self._resolve_dynamic_stop_loss_multiplier(signal)
+        expected_rr = self._expected_reward_risk_ratio(signal, reference_price=reference_price, stop_distance=pre_entry_stop_distance)
+        minimum_expected_rr = self._resolve_minimum_expected_rr_for_pathway(signal)
+        if expected_rr is not None and expected_rr < minimum_expected_rr:
+            logger.info(
+                "CTA reward/risk blocked | symbol=%s side=%s pathway=%s expected_rr=%.2f threshold=%.2f price=%.2f stop_distance=%.2f",
+                self.symbol,
+                side,
+                signal.entry_pathway.name,
+                expected_rr,
+                minimum_expected_rr,
+                reference_price,
+                pre_entry_stop_distance,
+            )
+            return "cta:reward_risk_blocked"
+        return None
+
     def _open_position(self, signal: TrendSignal) -> str:
         side = "buy" if signal.direction > 0 else "sell"
         amount = self._calculate_entry_amount(signal.price)
@@ -1230,53 +1299,15 @@ class CTARobot(BaseStrategyRobot):
                     return "cta:sentiment_blocked"
 
         order_flow_assessment: OrderFlowAssessment | None = self._assess_order_flow(side=side, amount=amount)
-        if signal.entry_pathway is EntryPathway.FAST_TRACK:
-            fast_track_result = self._apply_fast_track_checks(signal)
-            if fast_track_result is not None:
-                self._publish_risk_profile(None)
-                return fast_track_result
-            if not self._pathway_skips_strict_order_flow(signal):
-                strict_result = self._apply_strict_order_flow_checks(
-                    signal=signal,
-                    side=side,
-                    amount=amount,
-                    order_flow_assessment=order_flow_assessment,
-                )
-                if strict_result is not None:
-                    self._publish_risk_profile(None)
-                    return strict_result
-            standard_result = self._apply_standard_checks(signal)
-            if standard_result is not None:
-                self._publish_risk_profile(None)
-                return standard_result
-        elif signal.entry_pathway is EntryPathway.STANDARD:
-            standard_order_flow_result = self._apply_standard_order_flow_checks(
-                signal=signal,
-                side=side,
-                amount=amount,
-                order_flow_assessment=order_flow_assessment,
-            )
-            if standard_order_flow_result is not None:
-                self._publish_risk_profile(None)
-                return standard_order_flow_result
-            standard_result = self._apply_standard_checks(signal)
-            if standard_result is not None:
-                self._publish_risk_profile(None)
-                return standard_result
-        else:
-            strict_result = self._apply_strict_order_flow_checks(
-                signal=signal,
-                side=side,
-                amount=amount,
-                order_flow_assessment=order_flow_assessment,
-            )
-            if strict_result is not None:
-                self._publish_risk_profile(None)
-                return strict_result
-            standard_result = self._apply_standard_checks(signal)
-            if standard_result is not None:
-                self._publish_risk_profile(None)
-                return standard_result
+        pathway_result = self._apply_entry_pathway_checks(
+            signal=signal,
+            side=side,
+            amount=amount,
+            order_flow_assessment=order_flow_assessment,
+        )
+        if pathway_result is not None:
+            self._publish_risk_profile(None)
+            return pathway_result
 
         position_side = "long" if signal.direction > 0 else "short"
         notional_price = signal.price
@@ -1294,23 +1325,14 @@ class CTARobot(BaseStrategyRobot):
                 self._publish_risk_profile(None)
                 return "cta:risk_blocked"
 
-        pre_entry_atr = self._normalized_atr(notional_price, signal.atr)
-        pre_entry_stop_distance = pre_entry_atr * self._resolve_dynamic_stop_loss_multiplier(signal)
-        expected_rr = self._expected_reward_risk_ratio(signal, reference_price=notional_price, stop_distance=pre_entry_stop_distance)
-        minimum_expected_rr = self._resolve_minimum_expected_rr_for_pathway(signal)
-        if expected_rr is not None and expected_rr < minimum_expected_rr:
-            logger.info(
-                "CTA reward/risk blocked | symbol=%s side=%s pathway=%s expected_rr=%.2f threshold=%.2f price=%.2f stop_distance=%.2f",
-                self.symbol,
-                side,
-                signal.entry_pathway.name,
-                expected_rr,
-                minimum_expected_rr,
-                notional_price,
-                pre_entry_stop_distance,
-            )
+        reward_risk_result = self._check_entry_reward_risk(
+            signal=signal,
+            side=side,
+            reference_price=notional_price,
+        )
+        if reward_risk_result is not None:
             self._publish_risk_profile(None)
-            return "cta:reward_risk_blocked"
+            return reward_risk_result
 
         if signal.execution_memory_active and (signal.execution_breakout or signal.weak_bull_bias):
             logger.info(
