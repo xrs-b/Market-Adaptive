@@ -23,7 +23,7 @@ from market_adaptive.db import AccountDailySnapshotRecord, DatabaseInitializer, 
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = ROOT / "Market-Adaptive" / "config" / "config.yaml"
-DEFAULT_LOG_PATH = ROOT / "Market-Adaptive" / "logs" / "main_controller.log"
+DEFAULT_LOG_PATH = Path("/Users/oink/.openclaw/logs/main_controller_manual.log")
 RESTART_SCRIPT = ROOT / "scripts" / "restart_main_controller.sh"
 RUN_SCRIPT = ROOT / "scripts" / "run_main_controller.py"
 PROCESS_MATCH = str(RUN_SCRIPT)
@@ -188,6 +188,14 @@ def get_settings() -> AppSettings:
     )
 
 
+def safe_okx(default: Any, fn, *, context: str) -> Any:
+    try:
+        return fn()
+    except Exception as exc:
+        print(f"[admin-api] degraded {context}: {exc}")
+        return default
+
+
 def strip_ansi(value: str) -> str:
     while ANSI_ESCAPE in value:
         start = value.find(ANSI_ESCAPE)
@@ -332,7 +340,7 @@ def build_calendar_payload(settings: AppSettings, month: str | None = None) -> d
 
     if selected_month == current_month:
         client = OKXClient(cfg.okx, cfg.execution)
-        current_equity = float(client.fetch_total_equity("USDT"))
+        current_equity = float(safe_okx(initial_equity, lambda: client.fetch_total_equity("USDT"), context="account_daily_calendar:current_equity"))
         daily_state = database.get_system_state("risk_daily_start_equity")
         daily_start_equity = float(daily_state.state_value) if daily_state is not None else current_equity
         total_pnl = current_equity - initial_equity
@@ -741,8 +749,14 @@ def dashboard_overview(
     del session
     cfg = load_runtime_config(settings)
     client = OKXClient(cfg.okx, cfg.execution)
-    risk_snapshot = client.fetch_account_risk_snapshot([cfg.cta.symbol])
-    unrealized_pnl = client.fetch_total_unrealized_pnl([cfg.cta.symbol])
+    risk_snapshot = safe_okx({
+        "equity": None,
+        "margin_ratio": None,
+        "position_notional": None,
+        "open_order_notional": None,
+        "total_notional": None,
+    }, lambda: client.fetch_account_risk_snapshot([cfg.cta.symbol]), context="dashboard_overview:risk_snapshot")
+    unrealized_pnl = safe_okx(None, lambda: client.fetch_total_unrealized_pnl([cfg.cta.symbol]), context="dashboard_overview:unrealized_pnl")
     lines = tail_lines(settings.log_path, limit=300)
     latest = latest_worker_actions(lines)
     initial_equity, _, _ = resolve_initial_equity(settings)
@@ -798,7 +812,7 @@ def account_positions(
     del session
     cfg = load_runtime_config(settings)
     client = OKXClient(cfg.okx, cfg.execution)
-    positions = client.fetch_positions([cfg.cta.symbol])
+    positions = safe_okx([], lambda: client.fetch_positions([cfg.cta.symbol]), context="account_positions")
     items = []
     for item in positions:
         contracts = float(item.get("contracts") or item.get("info", {}).get("pos") or 0.0)
@@ -825,7 +839,7 @@ def account_orders(
     del session
     cfg = load_runtime_config(settings)
     client = OKXClient(cfg.okx, cfg.execution)
-    orders = client.fetch_open_orders(cfg.cta.symbol)
+    orders = safe_okx([], lambda: client.fetch_open_orders(cfg.cta.symbol), context="account_orders")
     items = []
     for item in orders:
         items.append(
