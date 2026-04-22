@@ -77,9 +77,7 @@ class TrendSignal:
     long_setup_blocked: bool = False
     long_setup_reason: str = ""
     price: float = 0.0
-
-@dataclass
-
+    atr: float = 0.0
 
 
 @dataclass
