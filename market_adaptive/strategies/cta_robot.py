@@ -78,6 +78,17 @@ class TrendSignal:
     long_setup_reason: str = ""
     price: float = 0.0
     atr: float = 0.0
+    risk_percent: float = 0.0
+    blocker_reason: str = ""
+    data_alignment_valid: bool = True
+    data_mismatch_ms: int = 0
+    relaxed_entry: bool = False
+    relaxed_reasons: tuple[str, ...] = ()
+    quick_trade_mode: bool = False
+    entry_pathway: EntryPathway = EntryPathway.STRICT
+    signal_quality_tier: str = "TIER_LOW"
+    signal_confidence: float = 0.0
+    signal_strength_bonus: float = 0.0
 
 
 @dataclass
