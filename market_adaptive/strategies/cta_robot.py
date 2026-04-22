@@ -1678,7 +1678,7 @@ class CTARobot(BaseStrategyRobot):
             amount=amount,
             order_flow_assessment=order_flow_assessment,
             execution_entry_mode=signal.execution_entry_mode,
-            execution_frame=getattr(mtf_signal, 'execution_frame', None),
+            execution_frame=None,
         )
         fill_result, filled_amount, _fill_ratio = self._finalize_entry_fill(
             entry_order=entry_order,
