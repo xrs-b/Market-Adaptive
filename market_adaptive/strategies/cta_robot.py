@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 
 import logging
 import time
@@ -64,6 +65,7 @@ class TrendSignal:
     execution_trigger_family: str = "waiting"
     execution_trigger_group: str = "waiting"
     execution_trigger_reason: str = ""
+    pullback_near_support: bool = False
     volatility_squeeze_breakout: bool = False
     mtf_aligned: bool = False
     obv_bias: int = 0
@@ -75,6 +77,118 @@ class TrendSignal:
     long_setup_blocked: bool = False
     long_setup_reason: str = ""
     price: float = 0.0
+
+@dataclass
+
+
+
+@dataclass
+class StatisticalPricing:
+    """Volume-Node / VWAP-based statistical execution pricing.
+    Replaces simple breakout-pursuit market orders with limit orders placed
+    at statistically significant pullback levels (high-volume nodes, VWAP ± 1σ).
+    """
+
+    symbol: str
+
+    def resolve_best_limit_price(
+        self,
+        *,
+        side: str,
+        execution_frame,
+        volume_profile,
+        vwap_std_multiplier: float = 1.0,
+        atr_value: float | None = None,
+    ) -> float | None:
+        """Return the best limit order price, or None if market order preferred."""
+        import numpy as np
+
+        if len(execution_frame) < 20:
+            return None
+
+        close_prices = execution_frame['close'].values.astype(float)
+        volumes = execution_frame['volume'].values.astype(float)
+
+        # VWAP + 1σ band
+        typical_price = (
+            execution_frame['high'].values.astype(float) +
+            execution_frame['low'].values.astype(float) +
+            close_prices
+        ) / 3.0
+        vwap = float((typical_price * volumes).sum() / volumes.sum())
+        vol_std = float(np.sqrt(((typical_price - vwap) ** 2 * volumes).sum() / volumes.sum()))
+        vwap_lower = vwap - vwap_std_multiplier * vol_std
+        vwap_upper = vwap + vwap_std_multiplier * vol_std
+
+        current_price = close_prices[-1]
+        is_long = side == 'buy'
+
+        node_prices, node_volumes = self._find_volume_nodes(close_prices, volumes, n_nodes=5)
+
+        if is_long:
+            eligible = [(p, v) for p, v in zip(node_prices, node_volumes) if p < current_price]
+            if not eligible:
+                return None
+            eligible.sort(key=lambda x: (current_price - x[0], -x[1]))
+            best_node_price, _ = eligible[0]
+            vwap_support = vwap_lower if vwap_lower < current_price else None
+            if vwap_support is not None and (current_price - vwap_support) < (current_price - best_node_price) * 0.6:
+                return self._round_to_tick(vwap_support, tick_size=self._atr_based_tick(atr_value, current_price))
+            return self._round_to_tick(best_node_price, tick_size=self._atr_based_tick(atr_value, current_price))
+        else:
+            eligible = [(p, v) for p, v in zip(node_prices, node_volumes) if p > current_price]
+            if not eligible:
+                return None
+            eligible.sort(key=lambda x: (x[0] - current_price, -x[1]))
+            best_node_price, _ = eligible[0]
+            vwap_resistance = vwap_upper if vwap_upper > current_price else None
+            if vwap_resistance is not None and (vwap_resistance - current_price) < (best_node_price - current_price) * 0.6:
+                return self._round_to_tick(vwap_resistance, tick_size=self._atr_based_tick(atr_value, current_price))
+            return self._round_to_tick(best_node_price, tick_size=self._atr_based_tick(atr_value, current_price))
+
+    @staticmethod
+    def _find_volume_nodes(
+        prices, volumes, n_nodes: int = 5
+    ) -> tuple:
+        import numpy as np
+        if len(prices) < 20:
+            return [], []
+        price_min, price_max = float(prices.min()), float(prices.max())
+        if price_max == price_min:
+            return [], []
+        n_bins = max(20, len(prices) // 5)
+        bin_edges = np.linspace(price_min - 1e-8, price_max + 1e-8, n_bins + 1)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+        bin_idx = np.digitize(prices, bin_edges) - 1
+        bin_volumes = np.zeros(n_bins)
+        np.add.at(bin_volumes, bin_idx, volumes.astype(float))
+        bin_volumes = np.maximum(bin_volumes, 0.0)
+        if bin_volumes.sum() <= 0:
+            return [], []
+        vol_pct = bin_volumes / bin_volumes.sum()
+        mean_pct = vol_pct.mean()
+        std_pct = vol_pct.std() if len(vol_pct) > 1 else 0.0
+        threshold = mean_pct + 0.5 * std_pct
+        node_indices = np.where(vol_pct > threshold)[0]
+        if len(node_indices) == 0:
+            return [], []
+        sorted_idx = node_indices[np.argsort(-vol_pct[node_indices])[:n_nodes]]
+        return bin_centers[sorted_idx].tolist(), bin_volumes[sorted_idx].tolist()
+
+    @staticmethod
+    def _round_to_tick(price: float, tick_size: float) -> float:
+        if tick_size <= 0:
+            return price
+        return round(price / tick_size) * tick_size
+
+    @staticmethod
+    def _atr_based_tick(atr_value: float | None, price: float) -> float:
+        if atr_value is not None and atr_value > 0:
+            return max(atr_value * 0.1, 0.01)
+        return max(price * 0.0001, 0.01)
+
+
+
     atr: float = 0.0
     risk_percent: float = 0.0
     blocker_reason: str = ""
@@ -238,6 +352,7 @@ class CTARobot(BaseStrategyRobot):
         self.position: ManagedPosition | None = None
         self.mtf_engine = MultiTimeframeSignalEngine(client, config)
         self.order_flow_sentinel = OrderFlowSentinel(client, config)
+        self.statistical_pricing = StatisticalPricing(config.symbol)
         self._last_signal_heartbeat_at = 0.0
         self._last_major_direction: int | None = None
         self._last_bullish_ready: bool | None = None
@@ -681,7 +796,10 @@ class CTARobot(BaseStrategyRobot):
                     long_setup_blocked = True
                     long_setup_reason = "below_poc"
             elif value_area_decision.blocked:
-                if standard_path:
+                # 如果是 pullback 支撑入场，允许绕过 inside_value_area 限制
+                if bool(getattr(mtf_signal.execution_trigger, 'pullback_near_support', False)) and raw_direction > 0:
+                    pass  # 不 block，允许入场
+                elif standard_path:
                     relaxed_reasons.append("STANDARD_VA_BYPASS")
                 else:
                     long_setup_blocked = True
@@ -804,6 +922,7 @@ class CTARobot(BaseStrategyRobot):
             execution_latch_price=mtf_signal.execution_trigger.latch_low_price,
             execution_frontrun_near_breakout=mtf_signal.execution_trigger.frontrun_near_breakout,
             execution_memory_bars_ago=mtf_signal.execution_trigger.bullish_cross_bars_ago,
+            pullback_near_support=bool(getattr(mtf_signal.execution_trigger, 'pullback_near_support', False)),
             execution_trigger_family=("obv_scalp" if quick_trade_mode else str(getattr(mtf_signal.execution_trigger, "family", "waiting"))),
             execution_trigger_reason=(f"OBV_SCALP|{mtf_signal.execution_trigger.reason}" if quick_trade_mode else mtf_signal.execution_trigger.reason),
             mtf_aligned=mtf_signal.fully_aligned,
@@ -1550,6 +1669,7 @@ class CTARobot(BaseStrategyRobot):
             amount=amount,
             order_flow_assessment=order_flow_assessment,
             execution_entry_mode=signal.execution_entry_mode,
+            execution_frame=getattr(mtf_signal, 'execution_frame', None),
         )
         fill_result, filled_amount, _fill_ratio = self._finalize_entry_fill(
             entry_order=entry_order,
@@ -1665,6 +1785,7 @@ class CTARobot(BaseStrategyRobot):
         amount: float,
         order_flow_assessment: OrderFlowAssessment | None,
         execution_entry_mode: str,
+        execution_frame=None,
     ) -> EntryOrderResult:
         fallback_price = (
             order_flow_assessment.expected_average_price
@@ -1707,38 +1828,114 @@ class CTARobot(BaseStrategyRobot):
             if limit_filled > 0 and unfilled_amount <= max(minimum_amount, 0.0):
                 return EntryOrderResult(limit_response, True, limit_filled, limit_price)
 
-            market_response = self.client.place_market_order(self.symbol, side, max(unfilled_amount, amount if limit_filled <= 0 else unfilled_amount))
-            market_filled = self._normalize_order_amount(
-                self._extract_filled_amount(market_response, unfilled_amount if limit_filled > 0 else amount, used_limit_order=False)
-            )
-            market_price = self._extract_order_price(
-                market_response,
-                fallback=fallback_price or limit_price or aggressive_limit_price,
-            )
-            remaining_unfilled = self._normalize_order_amount(max(0.0, amount - limit_filled - market_filled))
-            self._log_entry_fill(
-                order=market_response,
-                limit_price=response.get("price"),
-                fill_price=market_price,
-                fill_qty=market_filled,
-                unfilled_qty=remaining_unfilled,
-            )
-            combined_filled = self._normalize_order_amount(limit_filled + market_filled)
-            combined_average = None
-            if combined_filled > 0:
-                combined_average = ((limit_filled * limit_price) + (market_filled * market_price)) / combined_filled
-            combined_order = {
-                **limit_response,
-                "filled": combined_filled,
-                "average": combined_average,
-                "amount": amount,
-                "remaining": self._normalize_order_amount(max(0.0, amount - combined_filled)),
-                "info": {
-                    **(limit_response.get("info") or {}),
-                    "marketChaseOrder": market_response,
-                },
-            }
-            return EntryOrderResult(combined_order, True, combined_filled, combined_average)
+            # Statistical pricing: try to place unfilled amount at a
+            # statistically significant support (long) or resistance (short)
+            # instead of chasing with a market order.
+            stat_price = None
+            if hasattr(self, 'statistical_pricing') and self.statistical_pricing is not None:
+                try:
+                    stat_price = self.statistical_pricing.resolve_best_limit_price(
+                        side=side,
+                        execution_frame=execution_frame,
+                        volume_profile=None,
+                        atr_value=float(getattr(self.config, 'atr_period', 14)),
+                    )
+                except Exception:
+                    stat_price = None
+
+            if stat_price is not None and unfilled_amount > 0:
+                stat_params = {"timeInForce": "GTC", "executionMode": "statistical_pricing"}
+                stat_response = self.client.place_limit_order(
+                    self.symbol, side, unfilled_amount, stat_price, params=stat_params
+                )
+                stat_filled = self._normalize_order_amount(
+                    self._extract_filled_amount(stat_response, unfilled_amount, used_limit_order=True)
+                )
+                stat_price_used = self._extract_order_price(stat_response, fallback=stat_price)
+                self._log_entry_fill(
+                    order=stat_response,
+                    limit_price=stat_price,
+                    fill_price=stat_price_used,
+                    fill_qty=stat_filled,
+                    unfilled_qty=max(0.0, unfilled_amount - stat_filled),
+                )
+                remaining_stat = max(0.0, unfilled_amount - stat_filled)
+                # Only chase with market order if statistical limit also didn't fill
+                if stat_filled <= 0:
+                    market_response = self.client.place_market_order(
+                        self.symbol, side, max(unfilled_amount, amount if limit_filled <= 0 else unfilled_amount)
+                    )
+                else:
+                    market_response = None
+                market_filled = self._normalize_order_amount(
+                    self._extract_filled_amount(market_response, unfilled_amount if limit_filled > 0 else amount, used_limit_order=False)
+                    if market_response else 0.0
+                )
+                market_price = self._extract_order_price(
+                    market_response,
+                    fallback=fallback_price or limit_price or aggressive_limit_price,
+                ) if market_response else stat_price_used
+                remaining_unfilled = max(0.0, amount - limit_filled - stat_filled - market_filled)
+                self._log_entry_fill(
+                    order=market_response,
+                    limit_price=response.get("price") if market_response else None,
+                    fill_price=market_price,
+                    fill_qty=market_filled,
+                    unfilled_qty=remaining_unfilled,
+                )
+                combined_filled = self._normalize_order_amount(limit_filled + stat_filled + market_filled)
+                combined_average = None
+                if combined_filled > 0:
+                    total_cost = (limit_filled * limit_price) + (stat_filled * stat_price_used) + (market_filled * market_price)
+                    combined_average = total_cost / combined_filled
+                combined_order = {
+                    **limit_response,
+                    "filled": combined_filled,
+                    "average": combined_average,
+                    "amount": amount,
+                    "remaining": self._normalize_order_amount(max(0.0, amount - combined_filled)),
+                    "info": {
+                        **(limit_response.get("info") or {}),
+                        "statisticalPricingOrder": stat_response,
+                        "marketChaseOrder": market_response,
+                    },
+                }
+                return EntryOrderResult(combined_order, True, combined_filled, combined_average)
+            else:
+                market_response = self.client.place_market_order(
+                    self.symbol, side, max(unfilled_amount, amount if limit_filled <= 0 else unfilled_amount)
+                )
+                market_filled = self._normalize_order_amount(
+                    self._extract_filled_amount(market_response, unfilled_amount if limit_filled > 0 else amount, used_limit_order=False)
+                )
+                market_price = self._extract_order_price(
+                    market_response,
+                    fallback=fallback_price or limit_price or aggressive_limit_price,
+                )
+                remaining_unfilled = self._normalize_order_amount(max(0.0, amount - limit_filled - market_filled))
+                self._log_entry_fill(
+                    order=market_response,
+                    limit_price=response.get("price"),
+                    fill_price=market_price,
+                    fill_qty=market_filled,
+                    unfilled_qty=remaining_unfilled,
+                )
+                combined_filled = self._normalize_order_amount(limit_filled + market_filled)
+                combined_average = None
+                if combined_filled > 0:
+                    combined_average = ((limit_filled * limit_price) + (market_filled * market_price)) / combined_filled
+                combined_order = {
+                    **limit_response,
+                    "filled": combined_filled,
+                    "average": combined_average,
+                    "amount": amount,
+                    "remaining": self._normalize_order_amount(max(0.0, amount - combined_filled)),
+                    "info": {
+                        **(limit_response.get("info") or {}),
+                        "marketChaseOrder": market_response,
+                    },
+                }
+                return EntryOrderResult(combined_order, True, combined_filled, combined_average)
 
         response = self.client.place_market_order(self.symbol, side, amount)
         filled_amount = self._normalize_order_amount(
