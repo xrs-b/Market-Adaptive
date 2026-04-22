@@ -16,6 +16,7 @@ from market_adaptive.indicators import (
     compute_supertrend,
     ohlcv_to_dataframe,
     compute_atr,
+    compute_volume_profile,
 )
 from market_adaptive.timeframe_utils import maybe_use_closed_candles
 
@@ -125,6 +126,8 @@ class ExecutionTriggerSnapshot:
     frontrun_impulse_confirmed: bool = False
     frontrun_obv_confirmed: bool = False
     frontrun_ready: bool = False
+    pullback_near_support: bool = False
+    pullback_depth_ratio: float = 0.0
     state_label: str = "WAITING_SETUP"
     family: str = "waiting"
     group: str = "waiting"
@@ -756,6 +759,12 @@ class MultiTimeframeSignalEngine:
         prior_high = None if pd.isna(prior_high_value) else float(prior_high_value)
         prior_low = None if pd.isna(prior_low_value) else float(prior_low_value)
         current_price = float(execution_frame["close"].iloc[-1])
+        volume_profile = compute_volume_profile(
+            execution_frame,
+            lookback_hours=self.config.volume_profile_lookback_hours,
+            value_area_pct=self.config.volume_profile_value_area_pct,
+            bin_count=self.config.volume_profile_bin_count,
+        )
         prior_high_break = prior_high is not None and current_price > prior_high + 1e-12
         prior_low_break = prior_low is not None and current_price < prior_low - 1e-12
         frontrun_gap_ratio = 0.0
@@ -768,6 +777,34 @@ class MultiTimeframeSignalEngine:
         if prior_low is not None and prior_low > 0 and current_price > prior_low:
             short_frontrun_gap_ratio = max(0.0, (current_price - prior_low) / prior_low)
             short_frontrun_near_breakout = short_frontrun_gap_ratio <= float(getattr(self.config, "starter_frontrun_breakout_buffer_ratio", 0.002))
+
+        # 回踩支撑检测（多头）：价格回撤至VAL附近时视为入场机会
+        pullback_near_support = False
+        pullback_depth_ratio = 0.0
+        if prior_high is not None and prior_high > 0 and major_direction > 0:
+            pullback_depth_ratio = max(0.0, (prior_high - current_price) / prior_high)
+            pullback_threshold = float(getattr(self.config, "pullback_entry_depth_ratio", 0.015))
+            if pullback_depth_ratio >= pullback_threshold:
+                if volume_profile is not None:
+                    val = float(volume_profile.value_area_low)
+                    atr_val = float(compute_atr(execution_frame, length=self.config.atr_period).iloc[-1])
+                    support_tolerance = max(atr_val, current_price * 0.002)
+                    if current_price <= val + support_tolerance:
+                        pullback_near_support = True
+
+        # 回踩阻力检测（空头）：价格回涨至VAH附近时视为做空机会
+        pullback_near_resistance = False
+        pullback_resistance_depth_ratio = 0.0
+        if prior_low is not None and prior_low > 0 and major_direction < 0:
+            pullback_resistance_depth_ratio = max(0.0, (current_price - prior_low) / prior_low)
+            pullback_threshold = float(getattr(self.config, "pullback_entry_depth_ratio", 0.015))
+            if pullback_resistance_depth_ratio >= pullback_threshold:
+                if volume_profile is not None:
+                    vah = float(volume_profile.value_area_high)
+                    atr_val = float(compute_atr(execution_frame, length=self.config.atr_period).iloc[-1])
+                    resistance_tolerance = max(atr_val, current_price * 0.002)
+                    if current_price >= vah - resistance_tolerance:
+                        pullback_near_resistance = True
 
         relevant_rail = float(major_supertrend["upper_band"].iloc[-1] if major_direction <= 0 else major_supertrend["lower_band"].iloc[-1])
         rail_distance = abs(current_price - relevant_rail)
@@ -1011,9 +1048,15 @@ class MultiTimeframeSignalEngine:
         elif starter_short_frontrun_ready:
             trigger_family = "starter_short_frontrun"
             reason = f"starter_short_frontrun: gap={short_frontrun_gap_ratio * 100:.3f}% + 1m {int(getattr(self.config, 'starter_frontrun_impulse_bars', 3))} bearish bars + OBV confirmed"
+        elif pullback_near_resistance and major_direction < 0 and bearish_ready:
+            trigger_family = "pullback_resistance_entry"
+            reason = f"pullback_resistance_entry: depth={pullback_resistance_depth_ratio*100:.2f}% near VAH resistance"
         elif starter_frontrun_ready:
             trigger_family = "starter_frontrun"
             reason = f"starter_frontrun: gap={frontrun_gap_ratio * 100:.3f}% + 1m {int(getattr(self.config, 'starter_frontrun_impulse_bars', 3))} bullish bars + OBV confirmed"
+        elif pullback_near_support and major_direction > 0 and bullish_ready:
+            trigger_family = "pullback_support_entry"
+            reason = f"pullback_support_entry: depth={pullback_depth_ratio*100:.2f}% near VAL support"
         elif near_breakout_release_ready:
             trigger_family = "near_breakout_release"
             reason = f"near_breakout_release: bullish_score={bullish_score:.0f} + gap={frontrun_gap_ratio * 100:.3f}% + latch_or_memory_active"
@@ -1090,6 +1133,8 @@ class MultiTimeframeSignalEngine:
             frontrun_impulse_confirmed=frontrun_impulse_confirmed,
             frontrun_obv_confirmed=execution_obv_ready,
             frontrun_ready=bool(starter_frontrun_ready or starter_short_frontrun_ready),
+            pullback_near_support=pullback_near_support,
+            pullback_depth_ratio=pullback_depth_ratio,
             state_label=state_label,
             family=trigger_family,
             group=classify_trigger_group(trigger_family),
@@ -1101,9 +1146,12 @@ class MultiTimeframeSignalEngine:
                 or (weak_bull_bias and bullish_memory_active)
                 or rail_momentum_ready
                 or (not weak_bull_bias and prior_high_break and (bullish_memory_active or bullish_urgency_active or kdj_golden_cross))
+                or (pullback_near_support and major_direction > 0 and bullish_ready)
             )
         )
-        bearish_fully_aligned = early_bearish or starter_short_frontrun_ready or bearish_breakout_ready or bearish_retest_ready
+        bearish_fully_aligned = early_bearish or starter_short_frontrun_ready or bearish_breakout_ready or bearish_retest_ready or (
+            pullback_near_resistance and major_direction < 0 and bearish_ready
+        )
         fully_aligned = bullish_fully_aligned or bearish_fully_aligned
         if not alignment.valid:
             bullish_ready = False
