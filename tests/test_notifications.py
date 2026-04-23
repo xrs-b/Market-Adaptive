@@ -493,6 +493,8 @@ class NotificationTests(unittest.TestCase):
                 CTANearMissSample(
                     symbol='BTC/USDT',
                     captured_at=1_700_000_000.0,
+                    candidate_state='trigger_ready',
+                    candidate_reason='Triggered via Memory Window: KDJ crossed 1 bars ago + Price Breakout NOW',
                     execution_trigger_reason='Triggered via Memory Window: KDJ crossed 1 bars ago + Price Breakout NOW',
                     execution_memory_active=True,
                     execution_memory_bars_ago=1,
@@ -513,6 +515,7 @@ class NotificationTests(unittest.TestCase):
         field_map = {field['name']: field['value'] for field in embed['fields']}
         self.assertEqual(field_map['统计窗口'], '1 小时')
         self.assertIn('OBV Z-Score 0.85 / 阈值 1.00 / 差距 0.15', field_map['最接近样本'])
+        self.assertIn('[trigger_ready]', field_map['样本详情'])
         self.assertIn('Triggered via Memory Window', field_map['样本详情'])
 
     def test_signal_profiler_skips_summary_when_window_is_fully_passed(self) -> None:

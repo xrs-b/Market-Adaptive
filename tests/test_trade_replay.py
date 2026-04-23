@@ -87,6 +87,73 @@ class ReplayExecutionCandlePreferenceTests(unittest.TestCase):
 
 
 class ReplayBearishPathTests(unittest.TestCase):
+    def test_replay_candidate_watch_is_advisory_and_can_become_trigger_ready(self) -> None:
+        row_watch = analyze_trade_opportunities.CTAAuditRow(
+            ts=pd.Timestamp("2026-04-14T00:00:00Z"),
+            market_regime="trend",
+            blocker="PASSED",
+            passed_market_regime=True,
+            passed_mtf_regime=True,
+            passed_bullish_ready=False,
+            passed_trigger=True,
+            passed_obv=True,
+            passed_volume_profile=True,
+            sentiment_blocked=False,
+            risk_blocked=False,
+            trigger_reason="watching_breakdown",
+            candidate_state="watch",
+            candidate_reason="weak_edge",
+            watch_sample_promoted=False,
+            watch_sample_origin_reason="weak_edge",
+            watch_sample_age_bars=0,
+            entry_decider_decision="watch",
+            entry_decider_score=61.0,
+            swing_rsi=45.0,
+            bullish_score=20.0,
+            bearish_score=68.0,
+            bearish_ready=True,
+            raw_direction=-1,
+            direction=-1,
+            execution_entry_mode="early_bearish_starter_limit",
+            major_direction=-1,
+            obv_zscore=-0.8,
+            current_price=100.0,
+        )
+        row_ready = analyze_trade_opportunities.CTAAuditRow(
+            ts=pd.Timestamp("2026-04-14T00:15:00Z"),
+            market_regime="trend",
+            blocker="PASSED",
+            passed_market_regime=True,
+            passed_mtf_regime=True,
+            passed_bullish_ready=False,
+            passed_trigger=True,
+            passed_obv=True,
+            passed_volume_profile=True,
+            sentiment_blocked=False,
+            risk_blocked=False,
+            trigger_reason="triggered_breakdown",
+            candidate_state="trigger_ready",
+            candidate_reason="triggered_breakdown",
+            watch_sample_promoted=True,
+            watch_sample_origin_reason="weak_edge",
+            watch_sample_age_bars=1,
+            entry_decider_decision="allow",
+            entry_decider_score=80.0,
+            swing_rsi=40.0,
+            bullish_score=15.0,
+            bearish_score=82.0,
+            bearish_ready=True,
+            raw_direction=-1,
+            direction=-1,
+            execution_entry_mode="early_bearish_starter_limit",
+            major_direction=-1,
+            obv_zscore=-1.2,
+            current_price=99.0,
+        )
+        self.assertEqual(row_watch.direction, -1)
+        self.assertTrue(row_ready.watch_sample_promoted)
+        self.assertEqual(row_ready.watch_sample_origin_reason, "weak_edge")
+
     def test_replay_cta_handles_bearish_breakdown_path_without_prior_low_nameerror(self) -> None:
         timestamps = pd.date_range("2026-04-14", periods=130, freq="15min", tz="UTC")
         execution = pd.DataFrame({

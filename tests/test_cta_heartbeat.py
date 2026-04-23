@@ -657,6 +657,8 @@ class CTAHeartbeatTests(unittest.TestCase):
         payload = robot._build_signal_heartbeat_payload(signal)
 
         self.assertEqual(payload["symbol"], "BTC/USDT")
+        self.assertEqual(payload["candidate_state"], "trigger_ready")
+        self.assertEqual(payload["candidate_reason"], "Triggered via Memory Window: KDJ crossed 3 bars ago + Price Breakout NOW")
         self.assertTrue(payload["bullish_ready"])
         self.assertAlmostEqual(payload["obv_zscore_gap"], -0.3)
         self.assertFalse(payload["obv_confirmation_passed"])
@@ -723,6 +725,7 @@ class CTAHeartbeatTests(unittest.TestCase):
         )
         robot._collect_near_miss_sample(signal)
         self.assertEqual(len(robot._near_miss_samples), 1)
+        self.assertEqual(robot._near_miss_samples[0].candidate_state, "trigger_ready")
 
         robot._maybe_flush_near_miss_report()
         self.assertEqual(len(notifier.calls), 0)
@@ -743,6 +746,35 @@ class CTAHeartbeatTests(unittest.TestCase):
         self.assertAlmostEqual(report["samples"][0].obv_threshold, 1.0)
         self.assertAlmostEqual(report["samples"][0].obv_gap, 0.15)
         self.assertEqual(robot._near_miss_samples, [])
+
+
+    def test_candidate_state_progresses_from_setup_to_armed_to_trigger_ready(self) -> None:
+        robot = CTARobot(
+            client=DummyClient(),
+            database=DummyDatabase(),
+            config=CTAConfig(symbol="BTC/USDT"),
+            execution_config=ExecutionConfig(),
+            notifier=None,
+            risk_manager=None,
+            sentiment_analyst=None,
+        )
+        base_signal = TrendSignal(
+            direction=0,
+            raw_direction=0,
+            major_direction=1,
+            bullish_ready=True,
+            execution_trigger_reason="waiting_execution_trigger",
+            obv_confirmation=OBVConfirmationSnapshot(0.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+            price=100.0,
+            atr=1.0,
+            risk_percent=0.02,
+        )
+
+        self.assertEqual(robot._derive_candidate_state(base_signal)[0], "setup")
+        armed_signal = TrendSignal(**{**base_signal.__dict__, "execution_memory_active": True, "long_setup_reason": "obv_strength_not_confirmed"})
+        self.assertEqual(robot._derive_candidate_state(armed_signal)[0], "armed")
+        ready_signal = TrendSignal(**{**armed_signal.__dict__, "raw_direction": 1, "execution_breakout": True, "execution_trigger_reason": "Triggered via Memory Window"})
+        self.assertEqual(robot._derive_candidate_state(ready_signal)[0], "trigger_ready")
 
     def test_requests_urgent_wakeup_on_major_direction_and_bullish_ready_transition(self) -> None:
         runtime_context = StrategyRuntimeContext()

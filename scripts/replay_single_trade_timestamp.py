@@ -21,6 +21,7 @@ from market_adaptive.oracles.market_oracle import (
     snapshot_supports_short_regime_thaw,
 )
 from market_adaptive.strategies.cta_robot import CTARobot
+from market_adaptive.strategies.intrabar_replay import build_execution_replay_frame
 from market_adaptive.strategies.mtf_engine import MultiTimeframeSignalEngine
 from market_adaptive.timeframe_utils import maybe_use_closed_candles
 
@@ -66,39 +67,13 @@ def historical_fetch_df(client: OKXClient, symbol: str, timeframe: str, *, start
 
 
 def build_partial_execution_frame(one_min: pd.DataFrame, execution_timeframe: str, target_ts: pd.Timestamp, lookback_limit: int) -> pd.DataFrame:
-    if one_min.empty:
-        return one_min.copy()
-    bucket_minutes = timeframe_to_minutes(execution_timeframe)
-    freq = timeframe_to_pandas_freq(execution_timeframe)
-    bucket_start = target_ts.floor(freq)
-    completed_minute_cutoff = target_ts.floor("1min")
-    completed = one_min[one_min["timestamp"] < completed_minute_cutoff].copy()
-    if completed.empty:
-        return pd.DataFrame(columns=one_min.columns)
-    completed["bucket"] = completed["timestamp"].dt.floor(freq)
-    grouped = completed.groupby("bucket", sort=True).agg(
-        open=("open", "first"),
-        high=("high", "max"),
-        low=("low", "min"),
-        close=("close", "last"),
-        volume=("volume", "sum"),
-    ).reset_index().rename(columns={"bucket": "timestamp"})
-
-    partial_minutes = completed[completed["timestamp"] >= bucket_start].copy()
-    if not partial_minutes.empty:
-        partial = pd.DataFrame([
-            {
-                "timestamp": bucket_start,
-                "open": float(partial_minutes["open"].iloc[0]),
-                "high": float(partial_minutes["high"].max()),
-                "low": float(partial_minutes["low"].min()),
-                "close": float(partial_minutes["close"].iloc[-1]),
-                "volume": float(partial_minutes["volume"].sum()),
-            }
-        ])
-        grouped = grouped[grouped["timestamp"] < bucket_start]
-        grouped = pd.concat([grouped, partial], ignore_index=True)
-    return grouped.tail(lookback_limit).reset_index(drop=True)
+    replay = build_execution_replay_frame(
+        execution_frame=one_min.iloc[0:0].copy(),
+        intrabar_frame=one_min,
+        evaluation_ts=target_ts,
+        execution_timeframe=execution_timeframe,
+    )
+    return replay.tail(lookback_limit).reset_index(drop=True)
 
 
 class StaticReplayClient:

@@ -93,6 +93,14 @@ class TrendSignal:
     signal_quality_tier: str = "TIER_LOW"
     signal_confidence: float = 0.0
     signal_strength_bonus: float = 0.0
+    entry_decider_decision: str = "unevaluated"
+    entry_decider_score: float = 0.0
+    entry_decider_reasons: tuple[str, ...] = ()
+    candidate_state: str = "idle"
+    candidate_reason: str = ""
+    watch_sample_promoted: bool = False
+    watch_sample_age_seconds: float | None = None
+    watch_sample_origin_reason: str = ""
 
 
 @dataclass
@@ -236,10 +244,12 @@ class StatisticalPricing:
 class CTANearMissSample:
     symbol: str
     captured_at: float
+    candidate_state: str = "idle"
+    candidate_reason: str = ""
     execution_trigger_family: str = "waiting"
     execution_trigger_group: str = "waiting"
-    execution_trigger_reason: str = ""
     execution_memory_active: bool = False
+    execution_trigger_reason: str = ""
     execution_memory_bars_ago: int | None = None
     execution_breakout: bool = False
     execution_golden_cross: bool = False
@@ -378,6 +388,7 @@ class CTARobot(BaseStrategyRobot):
         self._same_direction_stop_events: dict[str, deque[float]] = {"long": deque(), "short": deque()}
         self._fast_track_reuse_until: dict[str, float] = {"long": 0.0, "short": 0.0}
         self._fast_track_reuse_signature: dict[str, tuple | None] = {"long": None, "short": None}
+        self._recent_watch_samples: dict[str, dict[str, float | str]] = {}
 
     def _resolve_obv_gate(self, signal: MTFSignal):
         return resolve_dynamic_obv_gate_for_signal(
@@ -908,6 +919,17 @@ class CTARobot(BaseStrategyRobot):
                 execution_obv_threshold=float(obv_threshold),
             )
 
+        candidate_state, candidate_reason = self._derive_candidate_state(type("_PreSignal", (), {
+            "bullish_ready": bool(getattr(mtf_signal, "bullish_ready", False)),
+            "raw_direction": int(raw_direction),
+            "execution_memory_active": bool(getattr(mtf_signal, "execution_trigger", None) and getattr(mtf_signal.execution_trigger, "bullish_memory_active", False)),
+            "execution_latch_active": bool(getattr(mtf_signal, "execution_trigger", None) and getattr(mtf_signal.execution_trigger, "bullish_latch_active", False)),
+            "execution_frontrun_near_breakout": bool(getattr(mtf_signal, "execution_trigger", None) and getattr(mtf_signal.execution_trigger, "frontrun_near_breakout", False)),
+            "execution_breakout": bool(getattr(mtf_signal, "execution_trigger", None) and getattr(mtf_signal.execution_trigger, "prior_high_break", False)),
+            "execution_trigger_reason": str(getattr(getattr(mtf_signal, "execution_trigger", None), "reason", "")),
+            "long_setup_reason": str(long_setup_reason),
+            "blocker_reason": str(blocker_reason),
+        })())
         signal = TrendSignal(
             direction=final_direction,
             raw_direction=raw_direction,
@@ -966,8 +988,14 @@ class CTARobot(BaseStrategyRobot):
             signal_quality_tier=signal_quality_tier,
             signal_confidence=signal_confidence,
             signal_strength_bonus=signal_strength_bonus,
+            candidate_state=candidate_state,
+            candidate_reason=candidate_reason,
         )
         signal = self._quality_filter_short_signal(signal)
+        candidate_state, candidate_reason = self._derive_candidate_state(signal)
+        signal.candidate_state = candidate_state
+        signal.candidate_reason = candidate_reason
+        signal = self._annotate_watch_sample_persistence(signal)
         logger.info(
             "CTA Signal | symbol=%s quality=%s pathway=%s direction=%s raw_direction=%s score=%.1f confidence=%.2f strength_bonus=%.1f aligned=%s trigger=%s",
             self.symbol,
@@ -988,11 +1016,105 @@ class CTARobot(BaseStrategyRobot):
             return float(signal.obv_threshold)
         return float(self.config.obv_zscore_threshold)
 
-    def _build_signal_heartbeat_payload(self, signal: TrendSignal) -> dict[str, float | str | bool]:
+    def _candidate_ready_side(self, signal: TrendSignal) -> int:
+        raw_direction = int(getattr(signal, "raw_direction", 0) or 0)
+        if raw_direction > 0:
+            return 1
+        if raw_direction < 0:
+            return -1
+        if bool(getattr(signal, "bullish_ready", False)) and not bool(getattr(signal, "bearish_ready", False)):
+            return 1
+        if bool(getattr(signal, "bearish_ready", False)) and not bool(getattr(signal, "bullish_ready", False)):
+            return -1
+        if bool(getattr(signal, "early_bearish", False)) or bool(getattr(signal, "weak_bear_bias", False)):
+            return -1
+        return 1 if bool(getattr(signal, "bullish_ready", False)) else 0
+
+    def _candidate_not_ready_reason(self, signal: TrendSignal, ready_side: int) -> str:
+        if ready_side < 0:
+            return str(getattr(signal, "blocker_reason", "") or getattr(signal, "long_setup_reason", "") or "bearish_not_ready")
+        return str(getattr(signal, "blocker_reason", "") or getattr(signal, "long_setup_reason", "") or "bullish_not_ready")
+
+    def _is_execution_near_ready(self, signal: TrendSignal) -> bool:
+        ready_side = self._candidate_ready_side(signal)
+        if ready_side == 0:
+            return False
+        breakout_flag = bool(signal.execution_breakout) if ready_side > 0 else bool(getattr(signal, "execution_breakdown", False))
+        return bool(
+            (bool(signal.bullish_ready) if ready_side > 0 else bool(getattr(signal, "bearish_ready", False)))
+            and (
+                int(signal.raw_direction) == ready_side
+                or signal.execution_memory_active
+                or signal.execution_latch_active
+                or signal.execution_frontrun_near_breakout
+                or breakout_flag
+            )
+        )
+
+    def _derive_candidate_state(self, signal: TrendSignal) -> tuple[str, str]:
+        ready_side = self._candidate_ready_side(signal)
+        if ready_side == 0:
+            return "idle", self._candidate_not_ready_reason(signal, ready_side)
+        decision = str(getattr(signal, "entry_decider_decision", "") or "")
+        decision_reasons = tuple(getattr(signal, "entry_decider_reasons", ()) or ())
+        if decision == "watch":
+            return "watch", str(
+                getattr(signal, "long_setup_reason", "")
+                or (decision_reasons[0] if decision_reasons else "")
+                or getattr(signal, "execution_trigger_reason", "")
+                or getattr(signal, "blocker_reason", "")
+                or "watch"
+            )
+        if int(signal.raw_direction) == ready_side:
+            return "trigger_ready", str(signal.execution_trigger_reason or signal.long_setup_reason or signal.blocker_reason or "trigger_ready")
+        if self._is_execution_near_ready(signal):
+            return "armed", str(signal.long_setup_reason or signal.execution_trigger_reason or signal.blocker_reason or "armed")
+        return "setup", str(signal.long_setup_reason or signal.execution_trigger_reason or signal.blocker_reason or "setup")
+
+    def _annotate_watch_sample_persistence(self, signal: TrendSignal) -> TrendSignal:
+        ready_side = self._candidate_ready_side(signal)
+        if ready_side == 0:
+            return signal
+        side = "long" if ready_side > 0 else "short"
+        now_ts = float(self._time_provider())
+        existing = self._recent_watch_samples.get(side)
+        promoted = False
+        age_seconds: float | None = None
+        origin_reason = ""
+        if existing is not None:
+            origin_reason = str(existing.get("candidate_reason", "") or existing.get("execution_trigger_reason", "") or "")
+            try:
+                age_seconds = max(0.0, now_ts - float(existing.get("captured_at", now_ts)))
+            except Exception:
+                age_seconds = None
+            promoted = bool(signal.candidate_state == "trigger_ready")
+        if signal.candidate_state == "watch":
+            self._recent_watch_samples[side] = {
+                "captured_at": now_ts,
+                "candidate_reason": str(signal.candidate_reason or signal.long_setup_reason or signal.execution_trigger_reason or "watch"),
+                "execution_trigger_reason": str(signal.execution_trigger_reason or ""),
+            }
+            promoted = False
+            age_seconds = 0.0
+            origin_reason = str(signal.candidate_reason or signal.long_setup_reason or signal.execution_trigger_reason or "watch")
+        elif signal.candidate_state == "trigger_ready" and promoted:
+            self._recent_watch_samples.pop(side, None)
+        elif signal.candidate_state not in {"setup", "armed"} and existing is None:
+            age_seconds = None
+            origin_reason = ""
+        signal.watch_sample_promoted = promoted
+        signal.watch_sample_age_seconds = age_seconds
+        signal.watch_sample_origin_reason = origin_reason
+        return signal
+
+    def _build_signal_heartbeat_payload(self, signal: TrendSignal) -> dict[str, float | str | bool | None]:
         obv = signal.obv_confirmation
         threshold = self._effective_signal_obv_threshold(signal)
+        candidate_state, candidate_reason = self._derive_candidate_state(signal)
         return {
             "symbol": self.symbol,
+            "candidate_state": candidate_state,
+            "candidate_reason": candidate_reason,
             "bullish_ready": bool(signal.bullish_ready),
             "bullish_score": float(signal.bullish_score),
             "bearish_score": float(signal.bearish_score),
@@ -1013,6 +1135,12 @@ class CTARobot(BaseStrategyRobot):
             "signal_quality_tier": str(signal.signal_quality_tier),
             "signal_confidence": float(signal.signal_confidence),
             "signal_strength_bonus": float(signal.signal_strength_bonus),
+            "entry_decider_decision": str(signal.entry_decider_decision),
+            "entry_decider_score": float(signal.entry_decider_score),
+            "entry_decider_reasons": list(signal.entry_decider_reasons),
+            "watch_sample_promoted": bool(getattr(signal, "watch_sample_promoted", False)),
+            "watch_sample_age_seconds": getattr(signal, "watch_sample_age_seconds", None),
+            "watch_sample_origin_reason": str(getattr(signal, "watch_sample_origin_reason", "") or ""),
             "execution_trigger_reason": str(signal.execution_trigger_reason),
             "execution_memory_active": bool(signal.execution_memory_active),
             "execution_latch_active": bool(signal.execution_latch_active),
@@ -1052,18 +1180,6 @@ class CTARobot(BaseStrategyRobot):
         self._last_signal_heartbeat_at = now
         logger.info("CTA signal heartbeat | %s", self._build_signal_heartbeat_payload(signal))
 
-    def _is_execution_near_ready(self, signal: TrendSignal) -> bool:
-        return bool(
-            signal.bullish_ready
-            and (
-                signal.raw_direction > 0
-                or signal.execution_memory_active
-                or signal.execution_latch_active
-                or signal.execution_frontrun_near_breakout
-                or signal.execution_breakout
-            )
-        )
-
     def _request_urgent_wakeup_on_signal_transition(self, signal: TrendSignal) -> None:
         if self.runtime_context is None:
             self._last_major_direction = int(signal.major_direction)
@@ -1088,9 +1204,12 @@ class CTARobot(BaseStrategyRobot):
         if not self._is_execution_near_ready(signal):
             return
         threshold = self._effective_signal_obv_threshold(signal)
+        candidate_state, candidate_reason = self._derive_candidate_state(signal)
         sample = CTANearMissSample(
             symbol=self.symbol,
             captured_at=float(self._time_provider()),
+            candidate_state=candidate_state,
+            candidate_reason=candidate_reason,
             execution_trigger_family=str(signal.execution_trigger_family or "waiting"),
             execution_trigger_group=str(signal.execution_trigger_group or "waiting"),
             execution_trigger_reason=str(signal.execution_trigger_reason),
@@ -1275,16 +1394,33 @@ class CTARobot(BaseStrategyRobot):
         pathway = signal.entry_pathway
         confidence = float(getattr(signal, "signal_confidence", 0.0) or 0.0)
         relaxed_reasons = {str(reason or "").upper() for reason in getattr(signal, "relaxed_reasons", ())}
+        quality_tier = str(getattr(signal, "signal_quality_tier", "TIER_LOW") or "TIER_LOW")
+        execution_entry_mode = str(getattr(signal, "execution_entry_mode", "") or "")
+
+        if bool(getattr(self.config, "disable_weak_scale_in_entries", True)) and execution_entry_mode in {
+            "weak_bull_scale_in_limit",
+            "weak_bear_scale_in_limit",
+        }:
+            return f"{execution_entry_mode}_disabled"
 
         if signal.direction > 0:
             disabled_long_families = {
                 "near_breakout_release": bool(getattr(self.config, "disable_near_breakout_release_long", True)),
                 "price_led_override": bool(getattr(self.config, "disable_price_led_override_long", True)),
+                "trend_continuation_near_breakout": bool(getattr(self.config, "disable_trend_continuation_long", True)),
+                "bullish_memory_breakout": bool(getattr(self.config, "disable_bullish_memory_breakout_long", True)),
             }
             if disabled_long_families.get(trigger_family, False):
                 return f"{trigger_family}_disabled"
 
-        if trigger_family == "trend_continuation_near_breakout_ready":
+        if signal.direction < 0:
+            disabled_short_families = {
+                "bearish_retest": bool(getattr(self.config, "disable_bearish_retest_short", True)),
+            }
+            if disabled_short_families.get(trigger_family, False):
+                return f"{trigger_family}_disabled"
+
+        if trigger_family == "trend_continuation_near_breakout":
             minimum_pathway = str(getattr(self.config, "trend_continuation_minimum_entry_pathway", "FAST_TRACK") or "FAST_TRACK").upper()
             try:
                 pathway_rank = {EntryPathway.STRICT: 0, EntryPathway.STANDARD: 1, EntryPathway.FAST_TRACK: 2}[pathway]
@@ -1294,6 +1430,25 @@ class CTARobot(BaseStrategyRobot):
                 minimum_rank = 2
             if pathway_rank < minimum_rank:
                 return "trend_continuation_pathway_too_weak"
+            if quality_tier != "TIER_HIGH":
+                return "trend_continuation_requires_high_quality"
+
+        if trigger_family == "bullish_memory_breakout" and pathway is EntryPathway.STANDARD:
+            minimum_confidence = float(getattr(self.config, "bullish_memory_breakout_standard_min_confidence", 0.70))
+            if confidence < minimum_confidence:
+                return "bullish_memory_breakout_low_confidence"
+            if signal.relaxed_entry and "STANDARD_VA_BYPASS" in relaxed_reasons:
+                minimum_confidence = float(getattr(self.config, "bullish_memory_breakout_standard_va_bypass_min_confidence", 0.74))
+                if confidence < minimum_confidence:
+                    return "bullish_memory_breakout_va_bypass_low_confidence"
+            if signal.relaxed_entry and any(reason.startswith("STANDARD_POC_RECLAIM_OK") for reason in relaxed_reasons):
+                minimum_confidence = float(getattr(self.config, "bullish_memory_breakout_poc_reclaim_min_confidence", 0.75))
+                if confidence < minimum_confidence:
+                    return "bullish_memory_breakout_poc_reclaim_low_confidence"
+            if signal.relaxed_entry and any(reason.startswith("OBV(") for reason in relaxed_reasons):
+                minimum_confidence = float(getattr(self.config, "bullish_memory_breakout_obv_floor_min_confidence", 0.70))
+                if confidence < minimum_confidence:
+                    return "bullish_memory_breakout_obv_floor_low_confidence"
 
         if trigger_family == "near_breakout_release" and pathway is EntryPathway.STANDARD and signal.relaxed_entry:
             minimum_confidence = float(getattr(self.config, "near_breakout_release_standard_min_confidence", 0.70))
