@@ -268,9 +268,28 @@ class CTAConfig:
     near_breakout_release_fraction: float = 0.12
     near_breakout_release_minimum_score: float = 70.0
     near_breakout_release_obv_zscore_floor: float = -0.25
+    disable_near_breakout_release_long: bool = True
+    disable_price_led_override_long: bool = True
+    trend_continuation_minimum_entry_pathway: str = "FAST_TRACK"
+    near_breakout_release_standard_min_confidence: float = 0.70
     starter_frontrun_impulse_bars: int = 3
     starter_frontrun_volume_window: int = 12
     starter_frontrun_volume_multiplier: float = 1.15
+    stretch_ema_period: int = 20
+    stretch_block_min_score: float = 75.0
+    stretch_retest_release_min_score: float = 60.0
+    stretch_block_atr_threshold: float = 5.0
+    stretch_retest_release_threshold: float = 1.5
+    exhaustion_lookback_bars: int = 5
+    exhaustion_min_trend_bars: int = 4
+    exhaustion_rsi_bars: int = 3
+    exhaustion_rsi_long_threshold: float = 70.0
+    exhaustion_rsi_short_threshold: float = 30.0
+    exhaustion_penalty_score: float = 0.0
+    smart_retest_limit_enabled: bool = True
+    smart_retest_only_for_non_fast_track: bool = True
+    smart_retest_min_confidence: float = 0.55
+    smart_retest_price_buffer_ratio: float = 0.0015
     signal_flip_reduce_ratio: float = 0.50
     fast_ema: int = 7  # legacy compatibility
     slow_ema: int = 21  # legacy compatibility
@@ -403,6 +422,8 @@ class CTAConfig:
         self.starter_quality_minimum_score = max(0.0, float(self.starter_quality_minimum_score))
         self.scale_in_quality_minimum_score = max(0.0, float(self.scale_in_quality_minimum_score))
         self.starter_countertrend_max_score_gap = max(0.0, float(self.starter_countertrend_max_score_gap))
+        self.trend_continuation_minimum_entry_pathway = str(self.trend_continuation_minimum_entry_pathway or "FAST_TRACK").upper()
+        self.near_breakout_release_standard_min_confidence = min(1.0, max(0.0, float(self.near_breakout_release_standard_min_confidence)))
         self.tier_medium_minimum_score = max(0.0, float(self.tier_medium_minimum_score))
         self.tier_high_minimum_score = max(self.tier_medium_minimum_score, float(self.tier_high_minimum_score))
         self.tier_high_confidence_threshold = min(1.0, max(0.0, float(self.tier_high_confidence_threshold)))
@@ -411,6 +432,22 @@ class CTAConfig:
         self.signal_strength_volatility_bonus_cap = max(0.0, float(self.signal_strength_volatility_bonus_cap))
         self.signal_strength_obv_bonus_cap = max(0.0, float(self.signal_strength_obv_bonus_cap))
         self.fast_track_reuse_cooldown_seconds = max(0, int(self.fast_track_reuse_cooldown_seconds))
+        self.stretch_ema_period = max(2, int(self.stretch_ema_period))
+        self.stretch_block_min_score = max(0.0, float(self.stretch_block_min_score))
+        self.stretch_retest_release_min_score = max(0.0, float(self.stretch_retest_release_min_score))
+        self.stretch_block_atr_threshold = max(0.0, float(self.stretch_block_atr_threshold))
+        self.stretch_retest_release_threshold = min(
+            self.stretch_block_atr_threshold,
+            max(0.0, float(self.stretch_retest_release_threshold)),
+        )
+        self.exhaustion_lookback_bars = max(3, int(self.exhaustion_lookback_bars))
+        self.exhaustion_min_trend_bars = max(2, min(int(self.exhaustion_min_trend_bars), self.exhaustion_lookback_bars))
+        self.exhaustion_rsi_bars = max(2, int(self.exhaustion_rsi_bars))
+        self.exhaustion_rsi_long_threshold = float(self.exhaustion_rsi_long_threshold)
+        self.exhaustion_rsi_short_threshold = float(self.exhaustion_rsi_short_threshold)
+        self.exhaustion_penalty_score = max(0.0, float(self.exhaustion_penalty_score))
+        self.smart_retest_min_confidence = min(1.0, max(0.0, float(self.smart_retest_min_confidence)))
+        self.smart_retest_price_buffer_ratio = max(0.0, float(self.smart_retest_price_buffer_ratio))
         self.early_entry_minimum_score = max(0.0, float(self.early_entry_minimum_score))
         self.starter_frontrun_minimum_score = max(self.early_entry_minimum_score, float(self.starter_frontrun_minimum_score))
         self.early_entry_direction_confirmation_bars = max(1, int(self.early_entry_direction_confirmation_bars))
@@ -843,6 +880,10 @@ def load_config(config_path: str | Path) -> AppConfig:
         near_breakout_release_fraction=float(cta_payload.get("near_breakout_release_fraction", 0.12)),
         near_breakout_release_minimum_score=float(cta_payload.get("near_breakout_release_minimum_score", 70.0)),
         near_breakout_release_obv_zscore_floor=float(cta_payload.get("near_breakout_release_obv_zscore_floor", -0.25)),
+        disable_near_breakout_release_long=bool(cta_payload.get("disable_near_breakout_release_long", True)),
+        disable_price_led_override_long=bool(cta_payload.get("disable_price_led_override_long", True)),
+        trend_continuation_minimum_entry_pathway=str(cta_payload.get("trend_continuation_minimum_entry_pathway", "FAST_TRACK")),
+        near_breakout_release_standard_min_confidence=float(cta_payload.get("near_breakout_release_standard_min_confidence", 0.70)),
         starter_frontrun_impulse_bars=int(cta_payload.get("starter_frontrun_impulse_bars", 3)),
         starter_frontrun_volume_window=int(cta_payload.get("starter_frontrun_volume_window", 12)),
         starter_frontrun_volume_multiplier=float(cta_payload.get("starter_frontrun_volume_multiplier", 1.15)),

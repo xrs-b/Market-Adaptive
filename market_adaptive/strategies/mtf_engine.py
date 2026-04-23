@@ -128,6 +128,10 @@ class ExecutionTriggerSnapshot:
     frontrun_ready: bool = False
     pullback_near_support: bool = False
     pullback_depth_ratio: float = 0.0
+    stretch_value: float = 0.0
+    stretch_blocked: bool = False
+    pending_retest: bool = False
+    exhaustion_penalty_applied: bool = False
     state_label: str = "WAITING_SETUP"
     family: str = "waiting"
     group: str = "waiting"
@@ -178,6 +182,10 @@ class MTFSignal:
     signal_quality_tier: SignalQualityTier = SignalQualityTier.TIER_LOW
     signal_confidence: float = 0.0
     signal_strength_bonus: float = 0.0
+    stretch_value: float = 0.0
+    stretch_blocked: bool = False
+    pending_retest: bool = False
+    exhaustion_penalty_applied: bool = False
 
 
 class MultiTimeframeSignalEngine:
@@ -246,6 +254,51 @@ class MultiTimeframeSignalEngine:
         if not frontrun_near_breakout or prior_high_break or kdj_dead_cross:
             return False
         return bool(execution_obv_ready or float(execution_obv_zscore) > 0.0)
+
+    @staticmethod
+    def _compute_price_stretch(*, current_price: float, anchor_price: float, atr_value: float, bullish: bool) -> float:
+        if atr_value <= 1e-12 or anchor_price <= 1e-12:
+            return 0.0
+        if bullish:
+            return float((current_price - anchor_price) / atr_value)
+        return float((anchor_price - current_price) / atr_value)
+
+    def _compute_exhaustion_penalty(
+        self,
+        *,
+        execution_frame: pd.DataFrame,
+        swing_rsi: pd.Series,
+        bullish: bool,
+        volatility_squeeze_breakout: bool,
+    ) -> tuple[float, str, bool]:
+        penalty = float(getattr(self.config, "exhaustion_penalty_score", 0.0))
+        if volatility_squeeze_breakout or penalty <= 0.0:
+            return 0.0, "", False
+        lookback = max(3, int(getattr(self.config, "exhaustion_lookback_bars", 5)))
+        min_trend_bars = max(2, int(getattr(self.config, "exhaustion_min_trend_bars", 4)))
+        rsi_bars = max(2, int(getattr(self.config, "exhaustion_rsi_bars", 3)))
+        if len(execution_frame) < lookback or len(swing_rsi) < rsi_bars:
+            return 0.0, "", False
+
+        recent = execution_frame.tail(lookback)
+        close_diff = recent["close"].diff()
+        trend_bars = int((close_diff > 0).sum()) if bullish else int((close_diff < 0).sum())
+        if trend_bars < min_trend_bars:
+            return 0.0, "", False
+
+        recent_rsi = swing_rsi.tail(rsi_bars)
+        rsi_extreme = bool(
+            (recent_rsi > float(getattr(self.config, "exhaustion_rsi_long_threshold", 70.0))).all()
+            if bullish
+            else (recent_rsi < float(getattr(self.config, "exhaustion_rsi_short_threshold", 30.0))).all()
+        )
+        if not rsi_extreme:
+            return 0.0, "", False
+
+        reason = (
+            f"Exhaustion_Risk: trend_bars={trend_bars}/{lookback} rsi_extreme={rsi_bars}"
+        )
+        return penalty, reason, True
 
     @staticmethod
     def _resolve_directional_latch(
@@ -717,6 +770,8 @@ class MultiTimeframeSignalEngine:
             violation_column="high",
             bullish=False,
         )
+        current_price = float(execution_frame["close"].iloc[-1])
+        execution_atr = float(compute_atr(execution_frame, length=self.config.atr_period).iloc[-1])
 
         score_4h = float(self.config.strong_bull_bias_score) if major_direction > 0 else 0.0
         score_1h = 0.0
@@ -729,6 +784,12 @@ class MultiTimeframeSignalEngine:
         score_early_recovery = self._resolve_early_bullish_recovery_bonus(early_bullish=early_bullish, swing_rsi=swing_rsi)
         score_kdj = float(getattr(self.config, "kdj_memory_score_bonus", 0.0)) if bullish_memory_active else 0.0
         score_magnet = 0.0
+        volatility_squeeze_breakout = bool(
+            len(execution_frame) >= 20
+            and execution_atr > 0.0
+            and (float(execution_frame["high"].iloc[-1]) - float(execution_frame["low"].iloc[-1])) >= execution_atr * 1.2
+            and execution_frame["close"].tail(20).pct_change().std(ddof=0) <= max(1e-9, execution_atr / max(current_price, 1e-12)) * 0.75
+        )
         base_bullish_score = score_4h + score_1h + score_rsi + score_early_recovery + score_kdj
         bullish_score = base_bullish_score
 
@@ -758,7 +819,8 @@ class MultiTimeframeSignalEngine:
         prior_low_value = prior_low_series.iloc[-1]
         prior_high = None if pd.isna(prior_high_value) else float(prior_high_value)
         prior_low = None if pd.isna(prior_low_value) else float(prior_low_value)
-        current_price = float(execution_frame["close"].iloc[-1])
+        stretch_ema = execution_frame["close"].ewm(span=max(2, int(getattr(self.config, "stretch_ema_period", 20))), adjust=False).mean()
+        current_stretch_ema = float(stretch_ema.iloc[-1])
         volume_profile = compute_volume_profile(
             execution_frame,
             lookback_hours=self.config.volume_profile_lookback_hours,
@@ -838,6 +900,23 @@ class MultiTimeframeSignalEngine:
                 float(execution_obv_confirmation.zscore),
             )
 
+        bullish_exhaustion_penalty, bullish_exhaustion_reason, bullish_exhaustion_applied = self._compute_exhaustion_penalty(
+            execution_frame=execution_frame,
+            swing_rsi=swing_rsi,
+            bullish=True,
+            volatility_squeeze_breakout=volatility_squeeze_breakout,
+        )
+        bearish_exhaustion_penalty, bearish_exhaustion_reason, bearish_exhaustion_applied = self._compute_exhaustion_penalty(
+            execution_frame=execution_frame,
+            swing_rsi=swing_rsi,
+            bullish=False,
+            volatility_squeeze_breakout=volatility_squeeze_breakout,
+        )
+        if bullish_exhaustion_applied:
+            bullish_score -= bullish_exhaustion_penalty
+        if bearish_exhaustion_applied:
+            bearish_score -= bearish_exhaustion_penalty
+
         trend_strength_bars = min(20, self._count_bars_since_direction_change(major_supertrend["direction"]))
         trend_strength_bonus = min(
             float(getattr(self.config, "signal_strength_trend_bonus_cap", 5.0)),
@@ -889,8 +968,46 @@ class MultiTimeframeSignalEngine:
             and swing_rsi_slope < 0.0
             and current_swing_rsi < current_rsi_sma
         )
+        bullish_stretch = self._compute_price_stretch(
+            current_price=current_price,
+            anchor_price=current_stretch_ema,
+            atr_value=execution_atr,
+            bullish=True,
+        )
+        bearish_stretch = self._compute_price_stretch(
+            current_price=current_price,
+            anchor_price=current_stretch_ema,
+            atr_value=execution_atr,
+            bullish=False,
+        )
+        stretch_blocked_bullish = bool(
+            major_direction > 0
+            and not early_bullish
+            and bullish_score >= float(getattr(self.config, "stretch_block_min_score", 75.0))
+            and bullish_stretch > float(getattr(self.config, "stretch_block_atr_threshold", 1.5))
+        )
+        stretch_blocked_bearish = bool(
+            major_direction < 0
+            and not early_bearish
+            and bearish_score >= float(getattr(self.config, "stretch_block_min_score", 75.0))
+            and bearish_stretch > float(getattr(self.config, "stretch_block_atr_threshold", 1.5))
+        )
+        pending_retest_bullish = bool(stretch_blocked_bullish)
+        pending_retest_bearish = bool(stretch_blocked_bearish)
+        bullish_retest_release_ready = bool(
+            major_direction > 0
+            and bullish_score >= float(getattr(self.config, "stretch_retest_release_min_score", 60.0))
+            and bullish_stretch <= float(getattr(self.config, "stretch_retest_release_threshold", 0.5))
+            and pullback_near_support
+        )
+        bearish_retest_release_ready = bool(
+            major_direction < 0
+            and bearish_score >= float(getattr(self.config, "stretch_retest_release_min_score", 60.0))
+            and bearish_stretch <= float(getattr(self.config, "stretch_retest_release_threshold", 0.5))
+            and pullback_near_resistance
+        )
         logger.info(
-            "Bullish Score: %.0f/%.0f [base=%.0f strength=%.1f 4H: %.0f, 1H: %.0f, Magnet: %.0f, RSI: %.0f, Early: %.0f, KDJ: %.0f] | symbol=%s major_dir=%s swing_dir=%s weak_bull=%s early_bullish=%s",
+            "Bullish Score: %.0f/%.0f [base=%.0f strength=%.1f 4H: %.0f, 1H: %.0f, Magnet: %.0f, RSI: %.0f, Early: %.0f, KDJ: %.0f] | symbol=%s major_dir=%s swing_dir=%s weak_bull=%s early_bullish=%s stretch=%.2f exhaustion=%s",
             bullish_score,
             bullish_threshold,
             base_bullish_score,
@@ -906,6 +1023,8 @@ class MultiTimeframeSignalEngine:
             swing_direction,
             weak_bull_bias,
             early_bullish,
+            bullish_stretch,
+            bullish_exhaustion_reason or "none",
         )
         bullish_ready = bullish_score >= bullish_threshold
         bearish_ready = bearish_score >= bearish_threshold
@@ -925,6 +1044,7 @@ class MultiTimeframeSignalEngine:
         starter_frontrun_ready = bool(
             getattr(self.config, "starter_frontrun_enabled", True)
             and bullish_ready
+            and not stretch_blocked_bullish
             and base_bullish_score >= starter_frontrun_minimum_score
             and execution_obv_ready
             and frontrun_near_breakout
@@ -935,6 +1055,7 @@ class MultiTimeframeSignalEngine:
         starter_short_frontrun_ready = bool(
             getattr(self.config, "starter_frontrun_enabled", True)
             and bearish_ready
+            and not stretch_blocked_bearish
             and base_bearish_score >= starter_frontrun_minimum_score
             and execution_obv_sell_ready
             and short_frontrun_near_breakout
@@ -945,6 +1066,7 @@ class MultiTimeframeSignalEngine:
         near_breakout_release_ready = bool(
             getattr(self.config, "near_breakout_release_enabled", True)
             and bullish_ready
+            and not stretch_blocked_bullish
             and bullish_score >= float(getattr(self.config, "near_breakout_release_minimum_score", 70.0))
             and frontrun_near_breakout
             and not prior_high_break
@@ -952,15 +1074,18 @@ class MultiTimeframeSignalEngine:
             and self._has_direction_confirmation(swing_supertrend["direction"], 1)
             and (bullish_memory_active or bullish_latch_active)
         )
-        high_confidence_price_override = bool(bullish_score >= 75.0 and frontrun_near_breakout and not kdj_dead_cross)
-        trend_continuation_near_breakout_ready = self._trend_continuation_near_breakout_ready(
-            major_direction=major_direction,
-            bullish_score=bullish_score,
-            frontrun_near_breakout=frontrun_near_breakout,
-            prior_high_break=prior_high_break,
-            kdj_dead_cross=kdj_dead_cross,
-            execution_obv_ready=execution_obv_ready,
-            execution_obv_zscore=float(execution_obv_confirmation.zscore),
+        high_confidence_price_override = bool(bullish_score >= 75.0 and frontrun_near_breakout and not kdj_dead_cross and not stretch_blocked_bullish)
+        trend_continuation_near_breakout_ready = (
+            not stretch_blocked_bullish
+            and self._trend_continuation_near_breakout_ready(
+                major_direction=major_direction,
+                bullish_score=bullish_score,
+                frontrun_near_breakout=frontrun_near_breakout,
+                prior_high_break=prior_high_break,
+                kdj_dead_cross=kdj_dead_cross,
+                execution_obv_ready=execution_obv_ready,
+                execution_obv_zscore=float(execution_obv_confirmation.zscore),
+            )
         )
         medium_confidence_latch_breakout_ready = bool(
             major_direction > 0
@@ -1027,12 +1152,23 @@ class MultiTimeframeSignalEngine:
         if early_bearish:
             execution_entry_mode = "early_bearish_starter_limit"
             entry_size_multiplier = max(0.0, min(1.0, float(self.config.early_bullish_starter_fraction)))
+        if not (early_bullish or early_bearish):
+            if bullish_retest_release_ready:
+                execution_entry_mode = "bullish_retest_limit"
+            elif bearish_retest_release_ready:
+                execution_entry_mode = "bearish_retest_limit"
 
         state_label = "WAITING_SETUP"
         trigger_family = "waiting"
         if early_bearish:
             trigger_family = "early_bearish"
             reason = "early_bearish: 1h supertrend bearish + price below 4h upper band + 4h upper band flattening"
+        elif pending_retest_bearish and not bearish_retest_release_ready:
+            trigger_family = "pending_retest_bearish"
+            reason = f"Pending_Retest_Bearish: stretch={bearish_stretch:.2f} > release={float(getattr(self.config, 'stretch_retest_release_threshold', 0.5)):.2f}"
+        elif bearish_retest_release_ready:
+            trigger_family = "bearish_retest_entry"
+            reason = f"bearish_retest_entry: stretch={bearish_stretch:.2f} + score={bearish_score:.0f}"
         elif bearish_memory_active and prior_low_break and major_direction < 0 and bearish_ready:
             trigger_family = "bearish_memory_breakdown"
             reason = f"Triggered via Bearish Memory Window: KDJ crossed {bearish_cross_bars_ago} bars ago + Price Breakdown NOW"
@@ -1042,6 +1178,12 @@ class MultiTimeframeSignalEngine:
         elif early_bullish:
             trigger_family = "early_bullish"
             reason = "early_bullish: 1h supertrend bullish + price above 4h lower band + 4h lower band slope flattening"
+        elif pending_retest_bullish and not bullish_retest_release_ready:
+            trigger_family = "pending_retest_bullish"
+            reason = f"Pending_Retest_Bullish: stretch={bullish_stretch:.2f} > release={float(getattr(self.config, 'stretch_retest_release_threshold', 0.5)):.2f}"
+        elif bullish_retest_release_ready:
+            trigger_family = "bullish_retest_entry"
+            reason = f"bullish_retest_entry: stretch={bullish_stretch:.2f} + score={bullish_score:.0f}"
         elif bullish_memory_active and prior_high_break:
             trigger_family = "bullish_memory_breakout"
             reason = f"Triggered via Memory Window: KDJ crossed {bullish_cross_bars_ago} bars ago + Price Breakout NOW"
@@ -1066,9 +1208,6 @@ class MultiTimeframeSignalEngine:
         elif high_confidence_price_override:
             trigger_family = "price_led_override"
             reason = f"price_led_override: bullish_score={bullish_score:.0f} + near_breakout_gap={frontrun_gap_ratio * 100:.3f}%"
-        elif medium_confidence_latch_breakout_ready:
-            trigger_family = "soft_latch_breakout"
-            reason = f"soft_latch_breakout: bullish_score={bullish_score:.0f} + latch_low={latch_low_price:.4f} + breakout confirmed"
         elif major_bull_retest_ready:
             trigger_family = "major_bull_retest"
             if bullish_urgency_active and not bullish_memory_active:
@@ -1078,6 +1217,9 @@ class MultiTimeframeSignalEngine:
                     reason = f"major_bull_retest_ready: decaying urgency window step={bullish_urgency_decay_step}/{max(1, int(getattr(self.config, 'kdj_urgency_decay_bars', 0)))} + near-breakout hold after KDJ memory expiry ({bullish_cross_bars_ago} bars ago)"
             else:
                 reason = f"major_bull_retest_ready: gap={frontrun_gap_ratio * 100:.3f}% + KDJ memory {bullish_cross_bars_ago} bars ago"
+        elif medium_confidence_latch_breakout_ready:
+            trigger_family = "soft_latch_breakout"
+            reason = f"soft_latch_breakout: bullish_score={bullish_score:.0f} + latch_low={latch_low_price:.4f} + breakout confirmed"
         elif major_bull_impulse_reclaim_ready:
             trigger_family = "major_bull_impulse_reclaim"
             if prior_high_break:
@@ -1094,7 +1236,9 @@ class MultiTimeframeSignalEngine:
             trigger_family = "magnetism"
             reason = f"磁吸力预判：距离轨道 {magnetism_distance_pct:.3f}%，OBV 已确认"
         else:
-            if bullish_ready and (high_confidence_price_override or bullish_latch_active or kdj_golden_cross or frontrun_near_breakout):
+            if pending_retest_bullish or pending_retest_bearish:
+                state_label = "PENDING_RETEST"
+            elif bullish_ready and (high_confidence_price_override or bullish_latch_active or kdj_golden_cross or frontrun_near_breakout):
                 state_label = "ARMED_READY"
             elif bearish_ready and (bearish_latch_active or kdj_dead_cross or short_frontrun_near_breakout or prior_low_break):
                 state_label = "ARMED_READY"
@@ -1135,22 +1279,26 @@ class MultiTimeframeSignalEngine:
             frontrun_ready=bool(starter_frontrun_ready or starter_short_frontrun_ready),
             pullback_near_support=pullback_near_support,
             pullback_depth_ratio=pullback_depth_ratio,
+            stretch_value=bullish_stretch if bullish_score >= bearish_score else bearish_stretch,
+            stretch_blocked=bool(stretch_blocked_bullish or stretch_blocked_bearish),
+            pending_retest=bool(pending_retest_bullish or pending_retest_bearish),
+            exhaustion_penalty_applied=bool(bullish_exhaustion_applied or bearish_exhaustion_applied),
             state_label=state_label,
             family=trigger_family,
             group=classify_trigger_group(trigger_family),
             reason=reason,
         )
-        bullish_fully_aligned = early_bullish or starter_frontrun_ready or high_confidence_price_override or medium_confidence_latch_breakout_ready or trend_continuation_near_breakout_ready or major_bull_retest_ready or major_bull_impulse_reclaim_ready or (
-            bullish_ready and (
+        bullish_fully_aligned = early_bullish or bullish_retest_release_ready or starter_frontrun_ready or high_confidence_price_override or medium_confidence_latch_breakout_ready or trend_continuation_near_breakout_ready or major_bull_retest_ready or major_bull_impulse_reclaim_ready or (
+            major_direction > 0
+            and bullish_ready
+            and (
                 ((swing_direction > 0) and prior_high_break and (bullish_memory_active or bullish_urgency_active or kdj_golden_cross))
-                or (weak_bull_bias and bullish_memory_active)
-                or rail_momentum_ready
                 or (not weak_bull_bias and prior_high_break and (bullish_memory_active or bullish_urgency_active or kdj_golden_cross))
-                or (pullback_near_support and major_direction > 0 and bullish_ready)
+                or pullback_near_support
             )
         )
-        bearish_fully_aligned = early_bearish or starter_short_frontrun_ready or bearish_breakout_ready or bearish_retest_ready or (
-            pullback_near_resistance and major_direction < 0 and bearish_ready
+        bearish_fully_aligned = early_bearish or bearish_retest_release_ready or starter_short_frontrun_ready or bearish_breakout_ready or bearish_retest_ready or (
+            major_direction < 0 and pullback_near_resistance and bearish_ready
         )
         fully_aligned = bullish_fully_aligned or bearish_fully_aligned
         if not alignment.valid:
@@ -1248,4 +1396,8 @@ class MultiTimeframeSignalEngine:
             signal_quality_tier=enhanced_signal_score.quality_tier,
             signal_confidence=enhanced_signal_score.confidence,
             signal_strength_bonus=enhanced_signal_score.strength_bonus,
+            stretch_value=bullish_stretch if bullish_score >= bearish_score else bearish_stretch,
+            stretch_blocked=bool(stretch_blocked_bullish or stretch_blocked_bearish),
+            pending_retest=bool(pending_retest_bullish or pending_retest_bearish),
+            exhaustion_penalty_applied=bool(bullish_exhaustion_applied or bearish_exhaustion_applied),
         )

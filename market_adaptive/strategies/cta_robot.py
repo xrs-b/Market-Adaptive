@@ -67,6 +67,10 @@ class TrendSignal:
     execution_trigger_reason: str = ""
     pullback_near_support: bool = False
     volatility_squeeze_breakout: bool = False
+    stretch_value: float = 0.0
+    stretch_blocked: bool = False
+    pending_retest: bool = False
+    exhaustion_penalty_applied: bool = False
     mtf_aligned: bool = False
     obv_bias: int = 0
     obv_confirmation: OBVConfirmationSnapshot = field(default_factory=lambda: OBVConfirmationSnapshot(0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
@@ -931,9 +935,15 @@ class CTARobot(BaseStrategyRobot):
             execution_latch_price=mtf_signal.execution_trigger.latch_low_price,
             execution_frontrun_near_breakout=mtf_signal.execution_trigger.frontrun_near_breakout,
             execution_memory_bars_ago=mtf_signal.execution_trigger.bullish_cross_bars_ago,
-            pullback_near_support=bool(getattr(mtf_signal.execution_trigger, 'pullback_near_support', False)),
             execution_trigger_family=("obv_scalp" if quick_trade_mode else str(getattr(mtf_signal.execution_trigger, "family", "waiting"))),
+            execution_trigger_group=str(getattr(mtf_signal.execution_trigger, "group", "waiting")),
             execution_trigger_reason=(f"OBV_SCALP|{mtf_signal.execution_trigger.reason}" if quick_trade_mode else mtf_signal.execution_trigger.reason),
+            pullback_near_support=bool(getattr(mtf_signal.execution_trigger, 'pullback_near_support', False)),
+            volatility_squeeze_breakout=bool(getattr(mtf_signal, "execution_trigger", None) and getattr(mtf_signal.execution_trigger, "family", "") in {"starter_frontrun", "bullish_memory_breakout"} and not bool(getattr(mtf_signal.execution_trigger, "pending_retest", False))),
+            stretch_value=float(getattr(mtf_signal, "stretch_value", 0.0) or 0.0),
+            stretch_blocked=bool(getattr(mtf_signal, "stretch_blocked", False)),
+            pending_retest=bool(getattr(mtf_signal, "pending_retest", False)),
+            exhaustion_penalty_applied=bool(getattr(mtf_signal, "exhaustion_penalty_applied", False)),
             mtf_aligned=mtf_signal.fully_aligned,
             obv_bias=obv_bias,
             obv_confirmation=obv_confirmation,
@@ -1260,7 +1270,58 @@ class CTARobot(BaseStrategyRobot):
             return "cta:fast_track_blocked"
         return None
 
+    def _resolve_trigger_family_gate_reason(self, signal: TrendSignal) -> str | None:
+        trigger_family = str(signal.execution_trigger_family or "waiting")
+        pathway = signal.entry_pathway
+        confidence = float(getattr(signal, "signal_confidence", 0.0) or 0.0)
+        relaxed_reasons = {str(reason or "").upper() for reason in getattr(signal, "relaxed_reasons", ())}
+
+        if signal.direction > 0:
+            disabled_long_families = {
+                "near_breakout_release": bool(getattr(self.config, "disable_near_breakout_release_long", True)),
+                "price_led_override": bool(getattr(self.config, "disable_price_led_override_long", True)),
+            }
+            if disabled_long_families.get(trigger_family, False):
+                return f"{trigger_family}_disabled"
+
+        if trigger_family == "trend_continuation_near_breakout_ready":
+            minimum_pathway = str(getattr(self.config, "trend_continuation_minimum_entry_pathway", "FAST_TRACK") or "FAST_TRACK").upper()
+            try:
+                pathway_rank = {EntryPathway.STRICT: 0, EntryPathway.STANDARD: 1, EntryPathway.FAST_TRACK: 2}[pathway]
+                minimum_rank = {"STRICT": 0, "STANDARD": 1, "FAST_TRACK": 2}[minimum_pathway]
+            except KeyError:
+                pathway_rank = {EntryPathway.STRICT: 0, EntryPathway.STANDARD: 1, EntryPathway.FAST_TRACK: 2}[pathway]
+                minimum_rank = 2
+            if pathway_rank < minimum_rank:
+                return "trend_continuation_pathway_too_weak"
+
+        if trigger_family == "near_breakout_release" and pathway is EntryPathway.STANDARD and signal.relaxed_entry:
+            minimum_confidence = float(getattr(self.config, "near_breakout_release_standard_min_confidence", 0.70))
+            if confidence < minimum_confidence:
+                return "near_breakout_release_low_confidence"
+            if "STANDARD_VA_BYPASS" in relaxed_reasons:
+                return "near_breakout_release_value_area_bypass"
+            if any(reason.startswith("STANDARD_POC_RECLAIM_OK") for reason in relaxed_reasons):
+                return "near_breakout_release_poc_bypass"
+            if any(reason.startswith("OBV(") for reason in relaxed_reasons):
+                return "near_breakout_release_obv_relaxed"
+        return None
+
     def _apply_standard_checks(self, signal: TrendSignal) -> str | None:
+        trigger_family_gate_reason = self._resolve_trigger_family_gate_reason(signal)
+        if trigger_family_gate_reason is not None:
+            logger.info(
+                "CTA trigger family blocked | symbol=%s side=%s trigger_family=%s mode=%s pathway=%s confidence=%.2f reason=%s",
+                self.symbol,
+                "buy" if signal.direction > 0 else "sell",
+                signal.execution_trigger_family,
+                signal.execution_entry_mode,
+                signal.entry_pathway.name,
+                float(signal.signal_confidence),
+                trigger_family_gate_reason,
+            )
+            return "cta:entry_quality_blocked"
+
         entry_location_block_reason = self._resolve_entry_location_block_reason(signal)
         if entry_location_block_reason is not None:
             logger.info(
@@ -1805,11 +1866,14 @@ class CTARobot(BaseStrategyRobot):
         if hasattr(self.client, "get_min_order_amount"):
             minimum_amount = float(self.client.get_min_order_amount(self.symbol))
 
+        smart_retest_mode = execution_entry_mode in {"bullish_retest_limit", "bearish_retest_limit"}
         aggressive_limit_price = self._resolve_aggressive_entry_price(
             side=side,
             order_flow_assessment=order_flow_assessment,
             execution_entry_mode=execution_entry_mode,
         )
+        if smart_retest_mode:
+            aggressive_limit_price = None
         if aggressive_limit_price is not None:
             params = {"timeInForce": "IOC", "executionMode": "aggressive_limit"}
             if execution_entry_mode == "weak_bull_scale_in_limit":
@@ -1818,6 +1882,8 @@ class CTARobot(BaseStrategyRobot):
                 params["executionMode"] = "early_bullish_starter"
             elif execution_entry_mode == "starter_frontrun_limit":
                 params["executionMode"] = "starter_frontrun"
+            elif execution_entry_mode in {"bullish_retest_limit", "bearish_retest_limit"}:
+                params["executionMode"] = execution_entry_mode
             elif order_flow_assessment is not None:
                 params["orderFlowImbalance"] = round(order_flow_assessment.imbalance_ratio, 4)
             response = self.client.place_limit_order(self.symbol, side, amount, aggressive_limit_price, params=params)
@@ -1847,7 +1913,11 @@ class CTARobot(BaseStrategyRobot):
                         side=side,
                         execution_frame=execution_frame,
                         volume_profile=None,
-                        atr_value=float(getattr(self.config, 'atr_period', 14)),
+                        atr_value=(
+                            float(compute_atr(execution_frame, length=self.config.atr_period).iloc[-1])
+                            if execution_frame is not None and len(execution_frame) > 0
+                            else None
+                        ),
                     )
                 except Exception:
                     stat_price = None
@@ -1945,6 +2015,46 @@ class CTARobot(BaseStrategyRobot):
                     },
                 }
                 return EntryOrderResult(combined_order, True, combined_filled, combined_average)
+
+        if smart_retest_mode and bool(getattr(self.config, "smart_retest_limit_enabled", True)):
+            stat_price = None
+            atr_value = None
+            if execution_frame is not None and len(execution_frame) > 0:
+                try:
+                    atr_value = float(compute_atr(execution_frame, length=self.config.atr_period).iloc[-1])
+                except Exception:
+                    atr_value = None
+            if hasattr(self, "statistical_pricing") and self.statistical_pricing is not None:
+                try:
+                    stat_price = self.statistical_pricing.resolve_best_limit_price(
+                        side=side,
+                        execution_frame=execution_frame,
+                        volume_profile=None,
+                        atr_value=atr_value,
+                    )
+                except Exception:
+                    stat_price = None
+            if stat_price is not None:
+                current_price = float(execution_frame["close"].iloc[-1]) if execution_frame is not None and len(execution_frame) > 0 else stat_price
+                buffer_ratio = float(getattr(self.config, "smart_retest_price_buffer_ratio", 0.0015))
+                if side == "buy":
+                    stat_price = min(stat_price, current_price * (1.0 - buffer_ratio))
+                else:
+                    stat_price = max(stat_price, current_price * (1.0 + buffer_ratio))
+                stat_params = {"timeInForce": "GTC", "executionMode": execution_entry_mode}
+                stat_response = self.client.place_limit_order(self.symbol, side, amount, stat_price, params=stat_params)
+                stat_filled = self._normalize_order_amount(
+                    self._extract_filled_amount(stat_response, 0.0, used_limit_order=True)
+                )
+                stat_price_used = self._extract_order_price(stat_response, fallback=stat_price)
+                self._log_entry_fill(
+                    order=stat_response,
+                    limit_price=stat_price,
+                    fill_price=stat_price_used,
+                    fill_qty=stat_filled,
+                    unfilled_qty=max(0.0, amount - stat_filled),
+                )
+                return EntryOrderResult(stat_response, True, stat_filled, stat_price_used)
 
         response = self.client.place_market_order(self.symbol, side, amount)
         filled_amount = self._normalize_order_amount(
