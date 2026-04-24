@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,7 @@ from market_adaptive.oracles.market_oracle import (
     indicator_confirms_trend,
     snapshot_supports_short_regime_thaw,
 )
+from market_adaptive.strategies.entry_decider_lite import EntryDeciderLite
 from market_adaptive.strategies.mtf_engine import (
     classify_waiting_execution_trigger,
     resolve_execution_trigger_proximity_budget_ratio,
@@ -75,6 +77,13 @@ class CTAAuditRow:
     sentiment_blocked: bool
     risk_blocked: bool
     trigger_reason: str
+    candidate_state: str
+    candidate_reason: str
+    watch_sample_promoted: bool
+    watch_sample_origin_reason: str
+    watch_sample_age_bars: int | None
+    entry_decider_decision: str
+    entry_decider_score: float
     swing_rsi: float
     bullish_score: float
     bearish_score: float
@@ -85,6 +94,59 @@ class CTAAuditRow:
     major_direction: int
     obv_zscore: float
     current_price: float
+
+
+def _replay_candidate_ready_side(signal: SimpleNamespace) -> int:
+    raw_direction = int(getattr(signal, "raw_direction", 0) or 0)
+    if raw_direction > 0:
+        return 1
+    if raw_direction < 0:
+        return -1
+    if bool(getattr(signal, "bullish_ready", False)) and not bool(getattr(signal, "bearish_ready", False)):
+        return 1
+    if bool(getattr(signal, "bearish_ready", False)) and not bool(getattr(signal, "bullish_ready", False)):
+        return -1
+    if bool(getattr(signal, "early_bearish", False)) or bool(getattr(signal, "weak_bear_bias", False)):
+        return -1
+    return 1 if bool(getattr(signal, "bullish_ready", False)) else 0
+
+
+def _replay_is_execution_near_ready(signal: SimpleNamespace) -> bool:
+    ready_side = _replay_candidate_ready_side(signal)
+    if ready_side == 0:
+        return False
+    breakout_flag = bool(getattr(signal, "execution_breakout", False)) if ready_side > 0 else bool(getattr(signal, "execution_breakdown", False))
+    return bool(
+        (bool(getattr(signal, "bullish_ready", False)) if ready_side > 0 else bool(getattr(signal, "bearish_ready", False)))
+        and (
+            int(getattr(signal, "raw_direction", 0) or 0) == ready_side
+            or bool(getattr(signal, "execution_memory_active", False))
+            or bool(getattr(signal, "execution_latch_active", False))
+            or bool(getattr(signal, "execution_frontrun_near_breakout", False))
+            or breakout_flag
+        )
+    )
+
+
+def _derive_replay_candidate_state(signal: SimpleNamespace) -> tuple[str, str]:
+    ready_side = _replay_candidate_ready_side(signal)
+    if ready_side == 0:
+        return "idle", str(getattr(signal, "blocker_reason", "") or getattr(signal, "long_setup_reason", "") or ("bearish_not_ready" if bool(getattr(signal, "early_bearish", False)) else "bullish_not_ready"))
+    decision = str(getattr(signal, "entry_decider_decision", "") or "")
+    decision_reasons = tuple(getattr(signal, "entry_decider_reasons", ()) or ())
+    if decision == "watch":
+        return "watch", str(
+            getattr(signal, "long_setup_reason", "")
+            or (decision_reasons[0] if decision_reasons else "")
+            or getattr(signal, "execution_trigger_reason", "")
+            or getattr(signal, "blocker_reason", "")
+            or "watch"
+        )
+    if int(getattr(signal, "raw_direction", 0) or 0) == ready_side:
+        return "trigger_ready", str(getattr(signal, "execution_trigger_reason", "") or getattr(signal, "long_setup_reason", "") or getattr(signal, "blocker_reason", "") or "trigger_ready")
+    if _replay_is_execution_near_ready(signal):
+        return "armed", str(getattr(signal, "long_setup_reason", "") or getattr(signal, "execution_trigger_reason", "") or getattr(signal, "blocker_reason", "") or "armed")
+    return "setup", str(getattr(signal, "long_setup_reason", "") or getattr(signal, "execution_trigger_reason", "") or getattr(signal, "blocker_reason", "") or "setup")
 
 
 def _timeframe_to_ms(raw: str) -> int:
@@ -202,6 +264,7 @@ def replay_cta(config_path: Path, hours: int) -> dict:
 
     execution_window = execution.copy()
     sentinel = OrderFlowSentinel(client, cta)
+    entry_decider = EntryDeciderLite(cta)
 
     try:
         ratio_history = client.fetch_long_short_account_ratio_history(symbol, timeframe=cfg.sentiment.timeframe, limit=min(hours * 12 + 50, 1000))
@@ -218,6 +281,7 @@ def replay_cta(config_path: Path, hours: int) -> dict:
 
     rows: list[CTAAuditRow] = []
     order_flow_samples: list[dict] = []
+    recent_watch_rows_by_side: dict[str, pd.Timestamp] = {}
     for idx, row in execution_window.iterrows():
         ts = row["timestamp"]
         major_slice = _slice_until(major, ts)
@@ -617,6 +681,81 @@ def replay_cta(config_path: Path, hours: int) -> dict:
         elif replay_side == "short" and not value_area_decision.reason and float(current_price) > float(volume_profile.value_area_low):
             blocker = "Blocked_By_ABOVE_VALUE_AREA_LOW"
 
+        entry_decider_decision = "unevaluated"
+        entry_decider_score = 0.0
+        entry_decider_reasons: tuple[str, ...] = ()
+        if direction != 0:
+            replay_signal = SimpleNamespace(
+                direction=direction,
+                raw_direction=raw_direction,
+                major_direction=major_direction,
+                bullish_score=bullish_score,
+                bearish_score=bearish_score,
+                weak_bull_bias=weak_bull_bias,
+                weak_bear_bias=weak_bear_bias,
+                early_bullish=early_bullish,
+                early_bearish=early_bearish,
+                bullish_ready=bullish_ready,
+                bearish_ready=bearish_ready,
+                obv_confirmation_passed=passed_obv,
+                volume_filter_passed=passed_volume_profile,
+                mtf_aligned=passed_trigger,
+                relaxed_entry=execution_entry_mode in {"weak_bull_scale_in_limit", "weak_bear_scale_in_limit", "early_bearish_starter_limit", "early_bullish_starter_limit"},
+                ml_model_used=False,
+                ml_gate_passed=True,
+                ml_aligned_confidence=0.5,
+                execution_trigger_reason=trigger_reason,
+                execution_entry_mode=execution_entry_mode,
+                signal_confidence=1.0 if passed_trigger else 0.0,
+                signal_strength_bonus=0.0,
+                entry_pathway="STANDARD",
+            )
+            entry_decision = entry_decider.evaluate(replay_signal)
+            entry_decider_decision = str(entry_decision.decision)
+            entry_decider_score = float(entry_decision.score)
+            entry_decider_reasons = tuple(entry_decision.reasons)
+            if entry_decider_decision == "block":
+                direction = 0
+
+        candidate_state, candidate_reason = _derive_replay_candidate_state(
+            SimpleNamespace(
+                raw_direction=raw_direction,
+                bullish_ready=bullish_ready,
+                bearish_ready=bearish_ready,
+                weak_bear_bias=weak_bear_bias,
+                early_bearish=early_bearish,
+                execution_memory_active=bullish_memory_active if replay_side == "long" else bearish_memory_active,
+                execution_latch_active=False,
+                execution_frontrun_near_breakout=replay_near_breakout,
+                execution_breakout=prior_high_break,
+                execution_breakdown=prior_low_break,
+                execution_trigger_reason=trigger_reason,
+                long_setup_reason=(entry_decider_reasons[0] if entry_decider_reasons else ("obv_strength_not_confirmed" if blocker == "Blocked_By_OBV_STRENGTH_NOT_CONFIRMED" else "")),
+                blocker_reason=blocker,
+                entry_decider_decision=entry_decider_decision,
+                entry_decider_reasons=entry_decider_reasons,
+            )
+        )
+
+        replay_side = "long" if _replay_candidate_ready_side(SimpleNamespace(raw_direction=raw_direction, bullish_ready=bullish_ready, bearish_ready=bearish_ready, weak_bear_bias=weak_bear_bias, early_bearish=early_bearish)) > 0 else "short"
+        watch_sample_origin_reason = ""
+        watch_sample_age_bars = None
+        watch_sample_promoted = False
+        if candidate_state == "watch":
+            recent_watch_rows_by_side[replay_side] = ts
+            watch_sample_origin_reason = candidate_reason
+            watch_sample_age_bars = 0
+        else:
+            prior_watch_ts = recent_watch_rows_by_side.get(replay_side)
+            if prior_watch_ts is not None:
+                prior_matches = [row for row in reversed(rows) if row.ts == prior_watch_ts and ((row.raw_direction > 0 and replay_side == "long") or (row.raw_direction < 0 and replay_side == "short") or (row.bearish_ready and replay_side == "short" and row.raw_direction == 0))]
+                if prior_matches:
+                    watch_sample_origin_reason = str(prior_matches[0].candidate_reason or "")
+                watch_sample_age_bars = max(0, len([row for row in rows if row.ts >= prior_watch_ts]))
+                watch_sample_promoted = candidate_state == "trigger_ready"
+                if watch_sample_promoted:
+                    recent_watch_rows_by_side.pop(replay_side, None)
+
         sentiment_blocked = False
         if blocker == "PASSED" and not ratio_frame.empty:
             current_ratio_rows = ratio_frame[ratio_frame["timestamp"] <= ts]
@@ -645,7 +784,7 @@ def replay_cta(config_path: Path, hours: int) -> dict:
                     except Exception as exc:
                         order_flow_samples.append({"ts": ts.isoformat(), "error": type(exc).__name__})
 
-        rows.append(CTAAuditRow(ts=ts, market_regime=market_regime, blocker=blocker, passed_market_regime=passed_market_regime, passed_mtf_regime=passed_mtf_regime, passed_bullish_ready=passed_bullish_ready, passed_trigger=passed_trigger, passed_obv=passed_obv, passed_volume_profile=passed_volume_profile, sentiment_blocked=sentiment_blocked, risk_blocked=risk_blocked, trigger_reason=trigger_reason, swing_rsi=current_rsi, bullish_score=bullish_score, bearish_score=bearish_score, bearish_ready=bearish_ready, raw_direction=raw_direction, direction=direction, execution_entry_mode=execution_entry_mode, major_direction=major_direction, obv_zscore=float(execution_obv_confirmation.zscore), current_price=current_price))
+        rows.append(CTAAuditRow(ts=ts, market_regime=market_regime, blocker=blocker, passed_market_regime=passed_market_regime, passed_mtf_regime=passed_mtf_regime, passed_bullish_ready=passed_bullish_ready, passed_trigger=passed_trigger, passed_obv=passed_obv, passed_volume_profile=passed_volume_profile, sentiment_blocked=sentiment_blocked, risk_blocked=risk_blocked, trigger_reason=trigger_reason, candidate_state=candidate_state, candidate_reason=candidate_reason, watch_sample_promoted=watch_sample_promoted, watch_sample_origin_reason=watch_sample_origin_reason, watch_sample_age_bars=watch_sample_age_bars, entry_decider_decision=entry_decider_decision, entry_decider_score=entry_decider_score, swing_rsi=current_rsi, bullish_score=bullish_score, bearish_score=bearish_score, bearish_ready=bearish_ready, raw_direction=raw_direction, direction=direction, execution_entry_mode=execution_entry_mode, major_direction=major_direction, obv_zscore=float(execution_obv_confirmation.zscore), current_price=current_price))
 
     df = pd.DataFrame([r.__dict__ for r in rows])
     blocker_counts = df["blocker"].value_counts().to_dict() if not df.empty else {}
