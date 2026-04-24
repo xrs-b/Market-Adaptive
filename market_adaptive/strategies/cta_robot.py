@@ -6,6 +6,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
+from datetime import datetime, timezone
 
 from market_adaptive.config import CTAConfig, ExecutionConfig
 from market_adaptive.coordination import StrategyRuntimeContext
@@ -20,6 +21,7 @@ from market_adaptive.indicators import (
 from market_adaptive.risk import CTARiskProfile, LogicalPositionSnapshot
 from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies.base import BaseStrategyRobot
+from market_adaptive.db import TradeJournalRecord
 from market_adaptive.strategies.mtf_engine import MTFSignal, MultiTimeframeSignalEngine
 from market_adaptive.strategies.obv_gate import resolve_dynamic_obv_gate_for_signal
 from market_adaptive.strategies.order_flow_sentinel import OrderFlowAssessment, OrderFlowSentinel
@@ -388,6 +390,9 @@ class CTARobot(BaseStrategyRobot):
         self._same_direction_stop_events: dict[str, deque[float]] = {"long": deque(), "short": deque()}
         self._fast_track_reuse_until: dict[str, float] = {"long": 0.0, "short": 0.0}
         self._fast_track_reuse_signature: dict[str, tuple | None] = {"long": None, "short": None}
+        self._entry_zone_cooldown_until: dict[str, float] = {"long": 0.0, "short": 0.0}
+        self._entry_zone_anchor_price: dict[str, float | None] = {"long": None, "short": None}
+        self._entry_zone_trigger_family: dict[str, str | None] = {"long": None, "short": None}
         self._recent_watch_samples: dict[str, dict[str, float | str]] = {}
 
     def _resolve_obv_gate(self, signal: MTFSignal):
@@ -668,6 +673,46 @@ class CTARobot(BaseStrategyRobot):
             escalation_window_seconds,
         )
 
+    def _repeated_entry_zone_remaining_seconds(self, signal: TrendSignal) -> int:
+        side = "long" if signal.direction > 0 else "short"
+        trigger_family = str(getattr(signal, "execution_trigger_family", "") or "")
+        if not trigger_family or trigger_family == "waiting":
+            return 0
+        tracked_family = self._entry_zone_trigger_family.get(side)
+        if tracked_family != trigger_family:
+            return 0
+        anchor_price = self._entry_zone_anchor_price.get(side)
+        if anchor_price in {None, 0.0}:
+            return 0
+        atr_value = self._normalized_atr(float(signal.price), float(signal.atr))
+        tolerance_atr = max(0.0, float(getattr(self.config, "repeated_entry_price_atr_tolerance", 0.6)))
+        price_tolerance = atr_value * tolerance_atr
+        if price_tolerance <= 0 or abs(float(signal.price) - float(anchor_price)) > price_tolerance:
+            return 0
+        until_ts = float(self._entry_zone_cooldown_until.get(side, 0.0))
+        remaining = max(0.0, until_ts - float(self._time_provider()))
+        return int(remaining)
+
+    def _arm_repeated_entry_zone_cooldown(self, signal: TrendSignal, entry_price: float) -> None:
+        cooldown_seconds = max(0, int(getattr(self.config, "repeated_entry_family_cooldown_seconds", 900)))
+        if cooldown_seconds <= 0:
+            return
+        side = "long" if signal.direction > 0 else "short"
+        trigger_family = str(getattr(signal, "execution_trigger_family", "") or "")
+        if not trigger_family or trigger_family == "waiting":
+            return
+        self._entry_zone_trigger_family[side] = trigger_family
+        self._entry_zone_anchor_price[side] = float(entry_price)
+        self._entry_zone_cooldown_until[side] = float(self._time_provider()) + cooldown_seconds
+        logger.info(
+            "CTA repeated-entry cooldown armed | symbol=%s side=%s trigger_family=%s entry_price=%.4f cooldown=%ss",
+            self.symbol,
+            side,
+            trigger_family,
+            float(entry_price),
+            cooldown_seconds,
+        )
+
     def execute_active_cycle(self) -> str:
         signal = self._build_trend_signal()
         if signal is None:
@@ -694,15 +739,48 @@ class CTARobot(BaseStrategyRobot):
                 self._publish_risk_profile(None)
                 return "cta:hold"
 
+        action: str
         if self.position is None and signal.direction != 0:
-            return self._open_position(signal)
+            action = self._open_position(signal)
+        else:
+            self._publish_risk_profile(signal)
+            if self.position is None and signal.long_setup_blocked:
+                action = "cta:range_filter_blocked"
+            elif self.position is None and signal.bullish_ready and signal.raw_direction == 0:
+                action = "cta:bullish_ready"
+            else:
+                action = "cta:no_signal" if self.position is None else "cta:hold"
 
-        self._publish_risk_profile(signal)
-        if self.position is None and signal.long_setup_blocked:
-            return "cta:range_filter_blocked"
-        if self.position is None and signal.bullish_ready and signal.raw_direction == 0:
-            return "cta:bullish_ready"
-        return "cta:no_signal" if self.position is None else "cta:hold"
+        if self.position is None and action in {
+            "cta:order_flow_blocked",
+            "cta:entry_quality_blocked",
+            "cta:entry_location_blocked",
+            "cta:reward_risk_blocked",
+            "cta:repeated_entry_zone_cooldown",
+            "cta:fast_track_reuse_cooldown",
+            "cta:same_direction_cooldown",
+            "cta:range_filter_blocked",
+        }:
+            self._journal_event(
+                event_type="blocked_signal",
+                side="long" if signal.raw_direction > 0 else "short" if signal.raw_direction < 0 else None,
+                action=action,
+                trigger_family=str(signal.execution_trigger_family or "waiting"),
+                trigger_reason=str(signal.execution_trigger_reason or ""),
+                pathway=signal.entry_pathway.name,
+                price=float(signal.price),
+                metadata={
+                    "raw_direction": int(signal.raw_direction),
+                    "signal_confidence": float(signal.signal_confidence),
+                    "signal_quality_tier": str(signal.signal_quality_tier),
+                    "blocker_reason": str(signal.blocker_reason or ""),
+                    "long_setup_reason": str(signal.long_setup_reason or ""),
+                    "relaxed_entry": bool(signal.relaxed_entry),
+                    "relaxed_reasons": list(signal.relaxed_reasons),
+                },
+            )
+
+        return action
 
     def _build_trend_signal(self) -> TrendSignal | None:
         mtf_signal = self.mtf_engine.build_signal()
@@ -1561,11 +1639,18 @@ class CTARobot(BaseStrategyRobot):
             return None
         if not order_flow_assessment.entry_allowed and signal.execution_entry_mode not in {"weak_bull_scale_in_limit", "early_bullish_starter_limit", "starter_frontrun_limit", "starter_short_frontrun_limit"}:
             base_confirmation_ratio = max(0.0, float(self.config.order_flow_confirmation_ratio))
-            strict_order_flow_modes = {"breakout_confirmed", "major_bull_retest_ready", "trend_continuation_near_breakout_ready"}
+            strict_order_flow_families = {
+                "near_breakout_release",
+                "price_led_override",
+                "major_bull_retest_ready",
+                "trend_continuation_near_breakout",
+                "bullish_memory_breakout",
+            }
+            trigger_family = str(getattr(signal, "execution_trigger_family", "") or "")
             hard_order_flow_block = (
                 order_flow_assessment.reason == "empty_order_book"
                 or order_flow_assessment.imbalance_ratio < base_confirmation_ratio
-                or signal.execution_trigger_reason in strict_order_flow_modes
+                or trigger_family in strict_order_flow_families
             )
             if hard_order_flow_block:
                 logger.info(
@@ -1846,6 +1931,19 @@ class CTARobot(BaseStrategyRobot):
             )
             return "cta:fast_track_reuse_cooldown", position_side, 0.0, None
 
+        repeated_entry_remaining = self._repeated_entry_zone_remaining_seconds(signal)
+        if repeated_entry_remaining > 0:
+            logger.info(
+                "CTA repeated-entry zone cooldown blocked | symbol=%s side=%s remaining=%ss trigger_family=%s price=%.4f anchor_price=%.4f",
+                self.symbol,
+                position_side,
+                repeated_entry_remaining,
+                signal.execution_trigger_family,
+                float(signal.price),
+                float(self._entry_zone_anchor_price.get(position_side) or 0.0),
+            )
+            return "cta:repeated_entry_zone_cooldown", position_side, 0.0, None
+
         order_flow_assessment: OrderFlowAssessment | None = self._assess_order_flow(side=side, amount=amount)
         pathway_result = self._apply_entry_pathway_checks(
             signal=signal,
@@ -1914,7 +2012,28 @@ class CTARobot(BaseStrategyRobot):
             filled_amount=filled_amount,
             entry_price=entry_price,
         )
+        self._journal_event(
+            event_type="trade_open",
+            side=position_side,
+            action="cta:open_position",
+            trigger_family=str(signal.execution_trigger_family or "waiting"),
+            trigger_reason=str(signal.execution_trigger_reason or ""),
+            pathway=signal.entry_pathway.name,
+            price=float(entry_price),
+            size=float(filled_amount),
+            metadata={
+                "raw_direction": int(signal.raw_direction),
+                "execution_entry_mode": str(signal.execution_entry_mode),
+                "signal_confidence": float(signal.signal_confidence),
+                "signal_quality_tier": str(signal.signal_quality_tier),
+                "relaxed_entry": bool(signal.relaxed_entry),
+                "relaxed_reasons": list(signal.relaxed_reasons),
+                "risk_percent": float(signal.risk_percent),
+                "notional_price": float(notional_price),
+            },
+        )
         self._arm_fast_track_reuse_cooldown(signal)
+        self._arm_repeated_entry_zone_cooldown(signal, entry_price)
         return self._finalize_open_action(
             signal=signal,
             side=side,
@@ -2453,6 +2572,41 @@ class CTARobot(BaseStrategyRobot):
                     break
         return latest
 
+    def _journal_event(
+        self,
+        *,
+        event_type: str,
+        side: str | None = None,
+        action: str | None = None,
+        trigger_family: str | None = None,
+        trigger_reason: str | None = None,
+        pathway: str | None = None,
+        price: float | None = None,
+        size: float | None = None,
+        pnl: float | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        try:
+            self.database.insert_trade_journal(
+                TradeJournalRecord(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    strategy_name=self.strategy_name,
+                    symbol=self.symbol,
+                    event_type=event_type,
+                    side=side,
+                    action=action,
+                    trigger_family=trigger_family,
+                    trigger_reason=trigger_reason,
+                    pathway=pathway,
+                    price=price,
+                    size=size,
+                    pnl=pnl,
+                    metadata=metadata,
+                )
+            )
+        except Exception:
+            logger.exception("CTA trade journal insert failed | event_type=%s action=%s", event_type, action)
+
     def _log_entry_fill(
         self,
         *,
@@ -2579,6 +2733,21 @@ class CTARobot(BaseStrategyRobot):
             float(roi),
             float(position.stop_price),
             float(position.best_price),
+        )
+        self._journal_event(
+            event_type="trade_close",
+            side=position.side,
+            action=reason or "unspecified",
+            price=float(exit_price),
+            size=float(exit_amount),
+            pnl=float(pnl),
+            metadata={
+                "entry_price": float(position.entry_price),
+                "exit_price": float(exit_price),
+                "roi": float(roi),
+                "stop_price": float(position.stop_price),
+                "best_price": float(position.best_price),
+            },
         )
 
         if self.notifier is None or not hasattr(self.notifier, "notify_profit"):

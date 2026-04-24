@@ -252,6 +252,8 @@ class CTAConfig:
     order_flow_health_sigma_multiplier: float = 1.0
     order_flow_limit_buffer_bps: float = 3.0
     order_flow_max_slippage_bps: float = 12.0
+    repeated_entry_family_cooldown_seconds: int = 900
+    repeated_entry_price_atr_tolerance: float = 0.6
     heartbeat_interval_seconds: float = 300.0
     near_miss_report_interval_seconds: float = 7200.0
     near_miss_report_max_samples: int = 5

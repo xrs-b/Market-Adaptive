@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
+import json
 
 
 MARKET_STATUS_SCHEMA = """
@@ -44,6 +45,25 @@ CREATE TABLE IF NOT EXISTS account_daily_snapshot (
     daily_pnl REAL NOT NULL,
     initial_equity REAL NOT NULL,
     total_pnl REAL NOT NULL
+);
+"""
+
+TRADE_JOURNAL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS trade_journal (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    strategy_name TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    side TEXT,
+    action TEXT,
+    trigger_family TEXT,
+    trigger_reason TEXT,
+    pathway TEXT,
+    price REAL,
+    size REAL,
+    pnl REAL,
+    metadata_json TEXT
 );
 """
 
@@ -88,6 +108,23 @@ class AccountDailySnapshotRecord:
     total_pnl: float
 
 
+@dataclass
+class TradeJournalRecord:
+    timestamp: str
+    strategy_name: str
+    symbol: str
+    event_type: str
+    side: str | None = None
+    action: str | None = None
+    trigger_family: str | None = None
+    trigger_reason: str | None = None
+    pathway: str | None = None
+    price: float | None = None
+    size: float | None = None
+    pnl: float | None = None
+    metadata: dict | None = None
+
+
 class DatabaseInitializer:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path).expanduser().resolve()
@@ -100,6 +137,7 @@ class DatabaseInitializer:
             conn.execute(STRATEGY_RUNTIME_STATE_SCHEMA)
             conn.execute(SYSTEM_STATE_SCHEMA)
             conn.execute(ACCOUNT_DAILY_SNAPSHOT_SCHEMA)
+            conn.execute(TRADE_JOURNAL_SCHEMA)
             for statement in MARKET_STATUS_INDEXES:
                 conn.execute(statement)
             conn.commit()
@@ -330,3 +368,42 @@ class DatabaseInitializer:
             )
             for row in rows
         ]
+
+    def insert_trade_journal(self, record: TradeJournalRecord) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO trade_journal (
+                    timestamp,
+                    strategy_name,
+                    symbol,
+                    event_type,
+                    side,
+                    action,
+                    trigger_family,
+                    trigger_reason,
+                    pathway,
+                    price,
+                    size,
+                    pnl,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.timestamp,
+                    record.strategy_name,
+                    record.symbol,
+                    record.event_type,
+                    record.side,
+                    record.action,
+                    record.trigger_family,
+                    record.trigger_reason,
+                    record.pathway,
+                    record.price,
+                    record.size,
+                    record.pnl,
+                    json.dumps(record.metadata, ensure_ascii=False, sort_keys=True) if record.metadata is not None else None,
+                ),
+            )
+            conn.commit()
