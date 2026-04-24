@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train and persist the Market-Adaptive ML signal model from OHLCV CSV data.")
     parser.add_argument("--symbol", default="BTC/USDT", help="Trading symbol used for the saved model name")
     parser.add_argument("--csv", required=True, help="Input CSV with open/high/low/close/volume columns")
-    parser.add_argument("--model-path", default="Market-Adaptive/data/ml_models", help="Directory for persisted model bundle + metrics")
+    parser.add_argument("--model-path", default="data/ml_models", help="Directory for persisted model bundle + metrics")
     parser.add_argument("--label-horizon", type=int, default=3, help="Bars ahead used for labeling")
     parser.add_argument("--min-return-threshold", type=float, default=0.002, help="Minimum forward return required to label class=1")
     parser.add_argument("--tail", type=int, default=0, help="Optional: only use the last N rows from the CSV")

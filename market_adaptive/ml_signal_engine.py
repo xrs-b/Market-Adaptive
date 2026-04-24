@@ -77,7 +77,7 @@ class MLSignalDecision:
 
 
 class MarketAdaptiveMLEngine:
-    def __init__(self, *, enabled: bool = True, model_path: str = "Market-Adaptive/data/ml_models") -> None:
+    def __init__(self, *, enabled: bool = True, model_path: str = "data/ml_models") -> None:
         self.enabled = bool(enabled)
         self.model_path = Path(model_path)
         self.model_path.mkdir(parents=True, exist_ok=True)
@@ -203,7 +203,7 @@ class MarketAdaptiveMLEngine:
 
 
 class MarketAdaptiveModelTrainer:
-    def __init__(self, *, model_path: str = "Market-Adaptive/data/ml_models") -> None:
+    def __init__(self, *, model_path: str = "data/ml_models") -> None:
         self.model_path = Path(model_path)
         self.model_path.mkdir(parents=True, exist_ok=True)
 

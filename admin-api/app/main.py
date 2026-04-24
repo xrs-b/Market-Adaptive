@@ -22,7 +22,7 @@ from market_adaptive.config import AppConfig, load_config
 from market_adaptive.db import AccountDailySnapshotRecord, DatabaseInitializer, SystemStateRecord
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = ROOT / "Market-Adaptive" / "config" / "config.yaml"
+DEFAULT_CONFIG_PATH = ROOT / "config" / "config.yaml"
 DEFAULT_LOG_PATH = Path("/Users/oink/.openclaw/logs/main_controller_manual.log")
 RESTART_SCRIPT = ROOT / "scripts" / "restart_main_controller.sh"
 RUN_SCRIPT = ROOT / "scripts" / "run_main_controller.py"
