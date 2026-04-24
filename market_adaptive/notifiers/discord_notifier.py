@@ -68,7 +68,6 @@ class StrategyCleanupBucket:
 class CTANearMissPayload:
     symbol: str
     captured_at: float
-    execution_trigger_reason: str
     execution_memory_active: bool
     execution_memory_bars_ago: int | None
     execution_breakout: bool
@@ -77,6 +76,9 @@ class CTANearMissPayload:
     obv_threshold: float
     obv_gap: float
     price: float
+    candidate_state: str = "idle"
+    candidate_reason: str = ""
+    execution_trigger_reason: str = ""
 
 
 class DiscordNotifier:
@@ -268,8 +270,8 @@ class DiscordNotifier:
                 bars_ago = sample.execution_memory_bars_ago
                 memory_suffix = f"激活（{bars_ago} 根前）" if bars_ago is not None else "激活"
             detail_lines.append(
-                f"{index}. OBV Z-Score {sample.obv_zscore:.2f} / 阈值 {sample.obv_threshold:.2f} / 差距 {sample.obv_gap:.2f}\n"
-                f"   执行触发：{sample.execution_trigger_reason}｜Memory：{memory_suffix}｜突破：{'是' if sample.execution_breakout else '否'}｜KDJ 金叉：{'是' if sample.execution_golden_cross else '否'}"
+                f"{index}. [{sample.candidate_state}] OBV Z-Score {sample.obv_zscore:.2f} / 阈值 {sample.obv_threshold:.2f} / 差距 {sample.obv_gap:.2f}\n"
+                f"   执行触发：{sample.execution_trigger_reason}｜候选原因：{sample.candidate_reason or '-'}｜Memory：{memory_suffix}｜突破：{'是' if sample.execution_breakout else '否'}｜KDJ 金叉：{'是' if sample.execution_golden_cross else '否'}"
             )
         fields.append({"name": "样本详情", "value": self._truncate("\n".join(detail_lines), 1000), "inline": False})
         payload = self._build_embed_payload(
@@ -288,10 +290,14 @@ class DiscordNotifier:
             blocker_lines = ["PASSED × 0"]
         dominant_label = self._format_signal_profiler_blocking_label(summary)
         dominant_count = max(0, int(summary.get("dominant_blocking_count", 0)))
+        candidate_counts = summary.get("candidate_state_counts") or {}
         quality_counts = summary.get("quality_tier_counts") or {}
         pathway_counts = summary.get("entry_pathway_counts") or {}
+        candidate_line = " / ".join(f"{name}:{count}" for name, count in sorted(candidate_counts.items())) or "暂无"
         quality_line = " / ".join(f"{name}:{count}" for name, count in sorted(quality_counts.items())) or "暂无"
         pathway_line = " / ".join(f"{name}:{count}" for name, count in sorted(pathway_counts.items())) or "暂无"
+        latest_candidate_state = str(summary.get("latest_candidate_state") or "idle")
+        latest_candidate_reason = str(summary.get("latest_candidate_reason") or "-")
         latest_quality = str(summary.get("latest_signal_quality_tier") or "TIER_LOW")
         latest_pathway = str(summary.get("latest_entry_pathway") or "STRICT")
         latest_confidence = float(summary.get("latest_signal_confidence", 0.0) or 0.0)
@@ -303,8 +309,10 @@ class DiscordNotifier:
             {"name": "通过 Regime", "value": f"{int(summary.get('passed_regime', 0))}/{int(summary.get('window_cycles', 0))} ({float(summary.get('regime_pass_rate_pct', 0.0)):.1f}%)", "inline": True},
             {"name": "通过 Swing", "value": f"{int(summary.get('passed_swing', 0))}/{int(summary.get('window_cycles', 0))} ({float(summary.get('swing_pass_rate_pct', 0.0)):.1f}%)", "inline": True},
             {"name": "通过 Trigger", "value": f"{int(summary.get('passed_trigger', 0))}/{int(summary.get('window_cycles', 0))} ({float(summary.get('trigger_pass_rate_pct', 0.0)):.1f}%)", "inline": True},
+            {"name": "候选态分布", "value": self._truncate(candidate_line, 1000), "inline": False},
             {"name": "质量层分布", "value": self._truncate(quality_line, 1000), "inline": False},
             {"name": "路径分布", "value": self._truncate(pathway_line, 1000), "inline": False},
+            {"name": "最近候选态", "value": f"{latest_candidate_state} / {latest_candidate_reason}", "inline": False},
             {"name": "最近质量/路径", "value": f"{latest_quality} / {latest_pathway} / conf={latest_confidence:.2f}", "inline": False},
             {"name": "最近 OBV 强度", "value": self._format_signal_profiler_obv(summary), "inline": True},
             {"name": "最近价格", "value": self._format_signal_profiler_price(summary.get('latest_execution_price')), "inline": True},
@@ -463,6 +471,8 @@ class DiscordNotifier:
         return CTANearMissPayload(
             symbol=str(values.get("symbol") or symbol),
             captured_at=float(values.get("captured_at") or 0.0),
+            candidate_state=str(values.get("candidate_state") or "idle"),
+            candidate_reason=str(values.get("candidate_reason") or ""),
             execution_trigger_reason=str(values.get("execution_trigger_reason") or ""),
             execution_memory_active=bool(values.get("execution_memory_active")),
             execution_memory_bars_ago=values.get("execution_memory_bars_ago"),
