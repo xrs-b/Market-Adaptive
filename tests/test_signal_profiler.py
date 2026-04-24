@@ -17,6 +17,8 @@ class SignalProfilerTests(unittest.TestCase):
             major_direction = 1
             weak_bull_bias = False
             early_bullish = False
+            candidate_state = "trigger_ready"
+            candidate_reason = "Triggered via Memory Window"
             signal_quality_tier = "TIER_HIGH"
             entry_pathway = "FAST_TRACK"
             signal_confidence = 0.91
@@ -57,6 +59,8 @@ class SignalProfilerTests(unittest.TestCase):
             major_direction = -1
             weak_bull_bias = False
             early_bullish = False
+            candidate_state = "armed"
+            candidate_reason = "obv_strength_not_confirmed"
             signal_quality_tier = "TIER_LOW"
             entry_pathway = "STRICT"
             signal_confidence = 0.0
@@ -93,6 +97,8 @@ class SignalProfilerTests(unittest.TestCase):
             major_direction = 1
             weak_bull_bias = False
             early_bullish = False
+            candidate_state = "trigger_ready"
+            candidate_reason = "Triggered via Memory Window"
             signal_quality_tier = "TIER_LOW"
             entry_pathway = "STRICT"
             signal_confidence = 0.0
@@ -123,6 +129,8 @@ class SignalProfilerTests(unittest.TestCase):
             major_direction = 1
             weak_bull_bias = False
             early_bullish = False
+            candidate_state = "armed"
+            candidate_reason = "obv_strength_not_confirmed"
             signal_quality_tier = "TIER_LOW"
             entry_pathway = "STRICT"
             signal_confidence = 0.0
@@ -160,9 +168,12 @@ class SignalProfilerTests(unittest.TestCase):
         self.assertEqual(call["summary"]["dominant_blocking_label"], "OBV（执行过滤层）")
         self.assertEqual(call["summary"]["dominant_blocking_count"], 1)
         self.assertEqual(call["summary"]["blocking_layer_counts"], {"OBV": 1})
+        self.assertEqual(call["summary"]["candidate_state_counts"], {"armed": 1, "trigger_ready": 1})
         self.assertEqual(call["summary"]["quality_tier_counts"], {"TIER_HIGH": 1, "TIER_LOW": 1})
         self.assertEqual(call["summary"]["entry_pathway_counts"], {"FAST_TRACK": 1, "STRICT": 1})
         self.assertEqual(call["summary"]["latest_blocker_reason"], "Blocked_By_OBV_STRENGTH_NOT_CONFIRMED")
+        self.assertEqual(call["summary"]["latest_candidate_state"], "armed")
+        self.assertEqual(call["summary"]["latest_candidate_reason"], "obv_strength_not_confirmed")
         self.assertEqual(call["summary"]["latest_signal_quality_tier"], "TIER_LOW")
         self.assertEqual(call["summary"]["latest_entry_pathway"], "STRICT")
         self.assertAlmostEqual(call["summary"]["latest_signal_confidence"], 0.0)

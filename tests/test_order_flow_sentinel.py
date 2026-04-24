@@ -34,6 +34,9 @@ class OrderFlowSentinelTests(unittest.TestCase):
         self.assertAlmostEqual(assessment.imbalance_ratio, 2.0)
         self.assertTrue(assessment.confirmation_passed)
         self.assertTrue(assessment.high_conviction)
+        self.assertTrue(assessment.final_permit.allowed)
+        self.assertEqual(assessment.final_permit.status, "limit_protect")
+        self.assertEqual(assessment.final_permit.recommended_order_type, "limit")
 
     def test_history_health_floor_can_block_borderline_confirmation(self) -> None:
         order_book = {
@@ -62,6 +65,9 @@ class OrderFlowSentinelTests(unittest.TestCase):
 
         self.assertFalse(assessment.confirmation_passed)
         self.assertEqual(assessment.reason, "imbalance_decay_detected")
+        self.assertFalse(assessment.final_permit.allowed)
+        self.assertEqual(assessment.final_permit.status, "blocked")
+        self.assertEqual(assessment.final_permit.recommended_order_type, "none")
 
     def test_high_conviction_limit_price_tracks_depth_but_respects_slippage_cap(self) -> None:
         config = CTAConfig(
@@ -92,6 +98,38 @@ class OrderFlowSentinelTests(unittest.TestCase):
             assessment.recommended_limit_price,
             round(float(assessment.best_ask) * 1.002, 4),
         )
+        self.assertEqual(assessment.final_permit.status, "limit_protect")
+        self.assertEqual(assessment.final_permit.recommended_order_type, "limit")
+        self.assertTrue(assessment.final_permit.limit_price_protected)
+
+    def test_sell_side_high_conviction_uses_bid_depth_and_sell_limit_cap(self) -> None:
+        config = CTAConfig(
+            order_flow_confirmation_ratio=1.5,
+            order_flow_high_conviction_ratio=2.0,
+            order_flow_limit_buffer_bps=5.0,
+            order_flow_max_slippage_bps=20.0,
+        )
+        order_book = {
+            "bids": [
+                [100.0, 0.005],
+                [99.9, 0.005],
+                [99.8, 0.050],
+            ]
+            + [[99.7 - index * 0.1, 0.05] for index in range(17)],
+            "asks": [[100.1 + index * 0.1, 3.0] for index in range(20)],
+        }
+        sentinel = OrderFlowSentinel(DummyClient(order_book), config)
+
+        assessment = sentinel.assess_entry("BTC/USDT", "sell", amount=0.02)
+
+        self.assertTrue(assessment.entry_allowed)
+        self.assertTrue(assessment.use_limit_order)
+        self.assertIsNotNone(assessment.expected_average_price)
+        self.assertEqual(assessment.reference_price, assessment.best_bid)
+        assert assessment.recommended_limit_price is not None
+        assert assessment.best_bid is not None
+        self.assertLess(assessment.recommended_limit_price, assessment.best_bid)
+        self.assertGreaterEqual(assessment.recommended_limit_price, round(float(assessment.best_bid) / 1.002, 4))
 
     def test_low_imbalance_blocks_entry(self) -> None:
         order_book = {

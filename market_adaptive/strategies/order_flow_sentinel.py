@@ -8,6 +8,18 @@ from typing import Any
 from market_adaptive.config import CTAConfig
 
 
+@dataclass(frozen=True)
+class OrderFlowFinalPermit:
+    allowed: bool
+    status: str
+    reason: str
+    recommended_order_type: str
+    reference_price: float | None
+    recommended_limit_price: float | None
+    expected_average_price: float | None
+    limit_price_protected: bool
+
+
 @dataclass
 class OrderFlowAssessment:
     symbol: str
@@ -65,6 +77,49 @@ class OrderFlowAssessment:
     @property
     def reference_price(self) -> float | None:
         return self.best_ask if self.side == "buy" else self.best_bid
+
+    @property
+    def limit_price_protected(self) -> bool:
+        if not self.use_limit_order:
+            return False
+        if self.recommended_limit_price is None or self.reference_price is None:
+            return False
+        return self.recommended_limit_price != self.reference_price
+
+    @property
+    def final_permit(self) -> OrderFlowFinalPermit:
+        if not self.entry_allowed:
+            return OrderFlowFinalPermit(
+                allowed=False,
+                status="blocked",
+                reason=self.reason,
+                recommended_order_type="none",
+                reference_price=self.reference_price,
+                recommended_limit_price=self.recommended_limit_price,
+                expected_average_price=self.expected_average_price,
+                limit_price_protected=False,
+            )
+        if self.use_limit_order:
+            return OrderFlowFinalPermit(
+                allowed=True,
+                status="limit_protect",
+                reason=self.reason,
+                recommended_order_type="limit",
+                reference_price=self.reference_price,
+                recommended_limit_price=self.recommended_limit_price,
+                expected_average_price=self.expected_average_price,
+                limit_price_protected=self.limit_price_protected,
+            )
+        return OrderFlowFinalPermit(
+            allowed=True,
+            status="pass",
+            reason=self.reason,
+            recommended_order_type="market",
+            reference_price=self.reference_price,
+            recommended_limit_price=self.recommended_limit_price,
+            expected_average_price=self.expected_average_price,
+            limit_price_protected=False,
+        )
 
 
 class OrderFlowSentinel:
