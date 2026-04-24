@@ -4,10 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/Market-Adaptive/.venv/bin/python}"
-CONFIG_PATH="${1:-$ROOT_DIR/Market-Adaptive/config/config.yaml}"
+PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
+CONFIG_PATH="${1:-$ROOT_DIR/config/config.yaml}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
-LOG_DIR="${LOG_DIR:-$ROOT_DIR/Market-Adaptive/logs}"
+LOG_DIR="${LOG_DIR:-$ROOT_DIR/logs}"
 LOG_FILE="$LOG_DIR/main_controller.log"
 ARCHIVE_DIR="$LOG_DIR/archive"
 PLIST_NAME="com.market_adaptive.main_controller"

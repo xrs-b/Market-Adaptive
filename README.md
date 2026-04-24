@@ -2,6 +2,14 @@
 
 Market-Adaptive 是一个面向 **OKX 永续合约 / 模拟盘优先** 的模块化量化交易系统。
 
+> 当前仓库约定：**这是单目录项目**。
+> - `market_adaptive/`：主线源码
+> - `config/`：配置（提交 `config.yaml.example`，本地使用 `config.yaml`）
+> - `.venv/`：仓库内虚拟环境（本地，不提交）
+> - `logs/` / `data/`：运行产物（本地，不提交）
+>
+> 换句话说，部署时应只依赖**当前仓库目录本身**，不再依赖仓库外或同级的 `Market-Adaptive/` 运行资产目录。
+
 它现在不是“策略骨架”，而是一套已经包含：
 - 市场状态识别
 - CTA 趋势交易
@@ -148,17 +156,17 @@ Market-Adaptive 是一个面向 **OKX 永续合约 / 模拟盘优先** 的模块
 
 ### 1. 安装依赖
 
-建议使用已有虚拟环境：
-
-```bash
-source Market-Adaptive/.venv/bin/activate
-pip install -r requirements.txt
-```
-
-如果要新建：
+推荐使用**仓库内虚拟环境**：
 
 ```bash
 python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+如果已经存在仓库内 `.venv`：
+
+```bash
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
@@ -231,8 +239,8 @@ python scripts/run_cta_backtest_segmented.py
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 \
-PYTHONPATH=/Users/oink/.openclaw/workspace \
-/Users/oink/.openclaw/workspace/Market-Adaptive/.venv/bin/pytest -q tests
+PYTHONPATH=$(pwd) \
+.venv/bin/pytest -q tests
 ```
 
 常见定向测试：
