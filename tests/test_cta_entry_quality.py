@@ -312,6 +312,97 @@ def test_prepare_entry_execution_context_blocks_same_direction_during_cooldown()
     assert order_flow is None
 
 
+def test_resolve_final_entry_permit_blocks_same_direction_during_cooldown() -> None:
+    robot = _robot()
+    robot.symbol = "BTC/USDT"
+    robot._time_provider = lambda: 1000.0
+    robot._same_direction_cooldown_until = {"long": 1200.0, "short": 0.0}
+    robot._fast_track_reuse_until = {"long": 0.0, "short": 0.0}
+    robot._fast_track_reuse_signature = {"long": None, "short": None}
+    signal = _signal(direction=1, raw_direction=1, entry_pathway=EntryPathway.FAST_TRACK)
+
+    permit = robot._resolve_final_entry_permit(signal=signal, side="buy", amount=1.0)
+
+    assert permit.allowed is False
+    assert permit.status == "blocked"
+    assert permit.action == "cta:same_direction_cooldown"
+    assert permit.stage == "cooldown"
+    assert permit.reason == "same_direction_cooldown"
+    assert permit.position_side == "long"
+
+
+def test_resolve_final_entry_permit_returns_limit_protect_when_order_flow_recommends_limit() -> None:
+    robot = _robot()
+    robot.symbol = "BTC/USDT"
+    robot._time_provider = lambda: 1000.0
+    robot._same_direction_cooldown_until = {"long": 0.0, "short": 0.0}
+    robot._fast_track_reuse_until = {"long": 0.0, "short": 0.0}
+    robot._fast_track_reuse_signature = {"long": None, "short": None}
+    robot._assess_order_flow = lambda **kwargs: OrderFlowAssessment(
+        symbol="BTC/USDT",
+        side="buy",
+        depth_levels=20,
+        bid_sum=20.0,
+        ask_sum=8.0,
+        imbalance_ratio=2.5,
+        best_bid=100.0,
+        best_ask=100.1,
+        confirmation_passed=True,
+        high_conviction=True,
+        recommended_limit_price=100.2,
+        expected_average_price=100.15,
+        depth_boundary_price=100.25,
+        reason="confirmed_high_conviction",
+        history_mean=1.8,
+        history_sigma=0.1,
+        health_floor=1.7,
+        confirmation_threshold=1.5,
+        high_conviction_threshold=2.0,
+        decay_detected=False,
+    )
+    robot._apply_entry_pathway_checks = lambda **kwargs: None
+    robot._check_entry_risk_budget = lambda **kwargs: None
+    robot._check_entry_reward_risk = lambda **kwargs: None
+    robot._log_trade_open_context = lambda **kwargs: None
+    signal = _signal(direction=1, raw_direction=1, entry_pathway=EntryPathway.STANDARD, relaxed_entry=False, price=100.0)
+
+    permit = robot._resolve_final_entry_permit(signal=signal, side="buy", amount=1.0)
+
+    assert permit.allowed is True
+    assert permit.status == "limit_protect"
+    assert permit.stage == "final"
+    assert permit.reason == "limit_protect"
+    assert permit.position_side == "long"
+    assert permit.notional_price == 100.1
+    assert permit.order_flow_assessment is not None
+    assert permit.order_flow_assessment.final_permit.limit_price_protected is True
+
+
+def test_resolve_final_entry_permit_blocks_on_reward_risk() -> None:
+    robot = _robot()
+    robot.symbol = "BTC/USDT"
+    robot._time_provider = lambda: 1000.0
+    robot._same_direction_cooldown_until = {"long": 0.0, "short": 0.0}
+    robot._fast_track_reuse_until = {"long": 0.0, "short": 0.0}
+    robot._fast_track_reuse_signature = {"long": None, "short": None}
+    robot._assess_order_flow = lambda **kwargs: None
+    robot._apply_entry_pathway_checks = lambda **kwargs: None
+    robot._check_entry_risk_budget = lambda **kwargs: None
+    robot._check_entry_reward_risk = lambda **kwargs: "cta:reward_risk_blocked"
+    robot._log_trade_open_context = lambda **kwargs: None
+    signal = _signal(direction=1, raw_direction=1, entry_pathway=EntryPathway.STANDARD, relaxed_entry=False, price=100.0)
+
+    permit = robot._resolve_final_entry_permit(signal=signal, side="buy", amount=1.0)
+
+    assert permit.allowed is False
+    assert permit.status == "blocked"
+    assert permit.action == "cta:reward_risk_blocked"
+    assert permit.stage == "reward_risk"
+    assert permit.reason == "reward_risk_blocked"
+    assert permit.position_side == "long"
+    assert permit.notional_price == 100.0
+
+
 def test_arm_fast_track_reuse_cooldown_blocks_repeated_fast_track_long_setup() -> None:
     robot = _robot()
     robot.symbol = "BTC/USDT"
@@ -335,3 +426,51 @@ def test_arm_fast_track_reuse_cooldown_blocks_repeated_fast_track_long_setup() -
     assert position_side == "long"
     assert notional_price == 0.0
     assert order_flow is None
+
+
+def test_trigger_ready_signal_can_be_blocked_into_candidate_semantics_by_final_permit() -> None:
+    robot = _robot()
+    robot.symbol = "BTC/USDT"
+    robot._time_provider = lambda: 1000.0
+    robot._same_direction_cooldown_until = {"long": 0.0, "short": 0.0}
+    robot._fast_track_reuse_until = {"long": 0.0, "short": 0.0}
+    robot._fast_track_reuse_signature = {"long": None, "short": None}
+    robot._assess_order_flow = lambda **kwargs: None
+    robot._apply_entry_pathway_checks = lambda **kwargs: None
+    robot._check_entry_risk_budget = lambda **kwargs: None
+    robot._check_entry_reward_risk = lambda **kwargs: "cta:reward_risk_blocked"
+    robot._log_trade_open_context = lambda **kwargs: None
+    signal = _signal(
+        direction=1,
+        raw_direction=1,
+        bullish_ready=True,
+        execution_memory_active=True,
+        execution_breakout=True,
+        execution_trigger_reason="Triggered via Memory Window",
+    )
+    signal = TrendSignal(**{**signal.__dict__, "candidate_state": robot._derive_candidate_state(signal)[0], "candidate_reason": robot._derive_candidate_state(signal)[1]})
+
+    permit = robot._resolve_final_entry_permit(signal=signal, side="buy", amount=1.0)
+
+    assert signal.candidate_state == "trigger_ready"
+    assert permit.allowed is False
+    assert permit.reason == "reward_risk_blocked"
+
+
+def test_near_ready_blocked_signal_maps_to_armed_candidate_state() -> None:
+    robot = _robot()
+    signal = _signal(
+        direction=0,
+        raw_direction=0,
+        bullish_ready=True,
+        execution_memory_active=True,
+        execution_trigger_reason="Triggered via Memory Window",
+        long_setup_blocked=True,
+        long_setup_reason="obv_strength_not_confirmed",
+        blocker_reason="Blocked_By_OBV_STRENGTH_NOT_CONFIRMED",
+    )
+
+    candidate_state, candidate_reason = robot._derive_candidate_state(signal)
+
+    assert candidate_state == "armed"
+    assert candidate_reason == "obv_strength_not_confirmed"
