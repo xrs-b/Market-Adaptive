@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from market_adaptive.config import CTAConfig
+from market_adaptive.ml_signal_engine import MLSignalDecision
 from market_adaptive.strategies.cta_robot import CTARobot, EntryPathway, TrendSignal
 from market_adaptive.strategies.order_flow_sentinel import OrderFlowAssessment
 
@@ -22,7 +24,10 @@ def _robot() -> CTARobot:
         starter_quality_minimum_score=72.0,
         scale_in_quality_minimum_score=68.0,
         starter_countertrend_max_score_gap=10.0,
+        ml_min_confidence=0.6,
+        entry_location_score_min=-0.60,
     )
+    robot.symbol = "BTC/USDT"
     return robot
 
 
@@ -167,6 +172,19 @@ def test_resolve_entry_pathway_standard_for_medium_quality_signal() -> None:
     assert robot._resolve_entry_pathway(mtf_signal) == EntryPathway.STANDARD
 
 
+def test_resolve_entry_pathway_standard_for_major_bull_retest_even_when_high_quality() -> None:
+    robot = _robot()
+    robot.config.tier_high_confidence_threshold = 0.8
+    mtf_signal = SimpleNamespace(
+        signal_quality_tier=SimpleNamespace(name="TIER_HIGH"),
+        signal_confidence=1.0,
+        fully_aligned=True,
+        execution_trigger=SimpleNamespace(family="major_bull_retest"),
+    )
+
+    assert robot._resolve_entry_pathway(mtf_signal) == EntryPathway.STANDARD
+
+
 def test_resolve_entry_pathway_strict_for_low_quality_signal() -> None:
     robot = _robot()
     mtf_signal = SimpleNamespace(
@@ -206,6 +224,113 @@ def test_standard_path_uses_its_own_rr_floor() -> None:
     assert robot._resolve_minimum_expected_rr_for_pathway(signal) == 1.4
 
 
+def test_apply_ml_entry_gate_blocks_low_confidence_signal() -> None:
+    robot = _robot()
+    robot.ml_engine = SimpleNamespace(
+        evaluate=lambda **kwargs: MLSignalDecision(
+            used_model=True,
+            prediction=0,
+            probability_up=0.18,
+            aligned_confidence=0.18,
+            gate_passed=False,
+            reason="ml_low_confidence_or_counter_direction",
+        )
+    )
+
+    direction, blocked, reason, ml_decision = robot._apply_ml_entry_gate(
+        execution_frame=SimpleNamespace(),
+        final_direction=1,
+        long_setup_blocked=False,
+        long_setup_reason="",
+    )
+
+    assert direction == 0
+    assert blocked is True
+    assert reason == "ml_gate_blocked:ml_low_confidence_or_counter_direction"
+    assert ml_decision.used_model is True
+    assert ml_decision.gate_passed is False
+
+
+def test_apply_ml_entry_gate_preserves_signal_when_model_missing() -> None:
+    robot = _robot()
+    robot.ml_engine = SimpleNamespace(
+        evaluate=lambda **kwargs: MLSignalDecision(
+            used_model=False,
+            prediction=0,
+            probability_up=0.5,
+            aligned_confidence=0.5,
+            gate_passed=True,
+            reason="ml_model_missing",
+        )
+    )
+
+    direction, blocked, reason, ml_decision = robot._apply_ml_entry_gate(
+        execution_frame=SimpleNamespace(),
+        final_direction=-1,
+        long_setup_blocked=False,
+        long_setup_reason="",
+    )
+
+    assert direction == -1
+    assert blocked is False
+    assert reason == ""
+    assert ml_decision.reason == "ml_model_missing"
+
+
+def test_major_bull_retest_long_no_longer_requires_prior_high_break() -> None:
+    robot = _robot()
+    signal = _signal(
+        direction=1,
+        raw_direction=1,
+        major_direction=1,
+        weak_bull_bias=True,
+        weak_bear_bias=False,
+        early_bullish=True,
+        early_bearish=False,
+        bullish_score=72.0,
+        bearish_score=20.0,
+        bullish_threshold=55.0,
+        bearish_threshold=45.0,
+        bearish_ready=False,
+        execution_entry_mode="breakout_confirmed",
+        execution_breakout=False,
+        execution_trigger_family="major_bull_retest",
+        execution_trigger_reason="major_bull_retest_ready: gap=0.120% + KDJ memory 2 bars ago",
+        entry_pathway=EntryPathway.STANDARD,
+        relaxed_entry=False,
+        relaxed_reasons=(),
+    )
+
+    assert robot._resolve_trigger_family_gate_reason(signal) is None
+
+
+def test_near_breakout_release_long_is_not_disabled_by_legacy_missing_flag_default() -> None:
+    robot = _robot()
+    signal = _signal(
+        direction=1,
+        raw_direction=1,
+        major_direction=1,
+        weak_bull_bias=True,
+        weak_bear_bias=False,
+        early_bullish=True,
+        early_bearish=False,
+        bullish_score=86.0,
+        bearish_score=12.0,
+        bullish_threshold=55.0,
+        bearish_threshold=45.0,
+        bearish_ready=False,
+        execution_entry_mode="breakout_confirmed",
+        execution_breakout=False,
+        execution_trigger_family="near_breakout_release",
+        execution_trigger_reason="near_breakout_release: bullish_score=86 + gap=0.080% + latch_or_memory_active",
+        entry_pathway=EntryPathway.FAST_TRACK,
+        relaxed_entry=False,
+        relaxed_reasons=(),
+    )
+
+    assert robot._resolve_trigger_family_gate_reason(signal) is None
+
+
 def test_fast_track_blocks_on_strong_reverse_obv() -> None:
     robot = _robot()
     signal = _signal(
@@ -218,6 +343,31 @@ def test_fast_track_blocks_on_strong_reverse_obv() -> None:
     robot.symbol = "BTC/USDT"
 
     assert robot._apply_fast_track_checks(signal) == "cta:fast_track_blocked"
+
+
+def test_major_bull_retest_fast_track_keeps_upstream_relaxed_confirmation() -> None:
+    robot = _robot()
+    signal = _signal(
+        direction=1,
+        raw_direction=1,
+        major_direction=1,
+        weak_bull_bias=False,
+        weak_bear_bias=False,
+        early_bullish=False,
+        early_bearish=False,
+        bullish_score=98.0,
+        bearish_score=20.0,
+        bearish_ready=False,
+        execution_entry_mode="breakout_confirmed",
+        execution_breakout=False,
+        execution_trigger_family="major_bull_retest",
+        execution_trigger_reason="major_bull_retest_ready: gap=0.225% + KDJ memory 2 bars ago",
+        entry_pathway=EntryPathway.FAST_TRACK,
+        relaxed_entry=True,
+        relaxed_reasons=("VA:Edge Proximity",),
+    )
+
+    assert robot._resolve_trigger_family_gate_reason(signal) is None
 
 
 def test_standard_order_flow_soft_passes_on_non_empty_book_warning() -> None:
@@ -278,6 +428,100 @@ def test_standard_order_flow_blocks_on_empty_order_book() -> None:
     )
 
     assert robot._apply_standard_order_flow_checks(signal=signal, side="buy", amount=1.0, order_flow_assessment=assessment) == "cta:order_flow_blocked"
+
+
+def test_strict_order_flow_keeps_major_bull_retest_on_strict_confirmation_path() -> None:
+    robot = _robot()
+    robot.symbol = "BTC/USDT"
+    robot.config.order_flow_confirmation_ratio = 0.60
+    signal = _signal(
+        direction=1,
+        raw_direction=1,
+        major_direction=1,
+        weak_bull_bias=False,
+        weak_bear_bias=False,
+        early_bullish=False,
+        early_bearish=False,
+        bullish_score=84.0,
+        bearish_score=18.0,
+        bearish_ready=False,
+        execution_trigger_family="major_bull_retest",
+        execution_trigger_reason="major_bull_retest_ready: gap=0.120% + KDJ memory 2 bars ago",
+        entry_pathway=EntryPathway.STANDARD,
+        relaxed_entry=True,
+        execution_breakout=False,
+    )
+    assessment = OrderFlowAssessment(
+        symbol="BTC/USDT",
+        side="buy",
+        depth_levels=20,
+        bid_sum=12.0,
+        ask_sum=11.0,
+        imbalance_ratio=0.55,
+        best_bid=95000.0,
+        best_ask=95010.0,
+        confirmation_passed=False,
+        high_conviction=False,
+        recommended_limit_price=None,
+        expected_average_price=None,
+        depth_boundary_price=None,
+        reason="normal_decay",
+        history_mean=0.0,
+        history_sigma=0.0,
+        health_floor=0.0,
+        confirmation_threshold=0.60,
+        high_conviction_threshold=0.80,
+        decay_detected=False,
+    )
+
+    assert robot._apply_strict_order_flow_checks(signal=signal, side="buy", amount=1.0, order_flow_assessment=assessment) == "cta:order_flow_blocked"
+
+
+def test_strict_order_flow_softens_trend_continuation_near_breakout_when_base_ratio_still_holds() -> None:
+    robot = _robot()
+    robot.symbol = "BTC/USDT"
+    robot.config.order_flow_confirmation_ratio = 0.60
+    signal = _signal(
+        direction=1,
+        raw_direction=1,
+        major_direction=1,
+        weak_bull_bias=False,
+        weak_bear_bias=False,
+        early_bullish=False,
+        early_bearish=False,
+        bullish_score=84.0,
+        bearish_score=18.0,
+        bearish_ready=False,
+        execution_trigger_family="trend_continuation_near_breakout",
+        execution_trigger_reason="trend_continuation_near_breakout_ready: bullish_score=84 + gap=0.120% + obv_support=confirmed",
+        entry_pathway=EntryPathway.FAST_TRACK,
+        relaxed_entry=False,
+        execution_breakout=True,
+    )
+    assessment = OrderFlowAssessment(
+        symbol="BTC/USDT",
+        side="buy",
+        depth_levels=20,
+        bid_sum=13.0,
+        ask_sum=12.0,
+        imbalance_ratio=0.61,
+        best_bid=95000.0,
+        best_ask=95010.0,
+        confirmation_passed=False,
+        high_conviction=False,
+        recommended_limit_price=None,
+        expected_average_price=None,
+        depth_boundary_price=None,
+        reason="normal_decay",
+        history_mean=0.0,
+        history_sigma=0.0,
+        health_floor=0.0,
+        confirmation_threshold=0.60,
+        high_conviction_threshold=0.80,
+        decay_detected=False,
+    )
+
+    assert robot._apply_strict_order_flow_checks(signal=signal, side="buy", amount=1.0, order_flow_assessment=assessment) is None
 
 
 def test_reset_local_position_arms_same_direction_cooldown_for_position_mismatch() -> None:
@@ -457,6 +701,32 @@ def test_trigger_ready_signal_can_be_blocked_into_candidate_semantics_by_final_p
     assert permit.reason == "reward_risk_blocked"
 
 
+def test_missing_legacy_disable_flags_do_not_block_trend_continuation_or_memory_breakout() -> None:
+    robot = _robot()
+
+    trend_signal = _signal(
+        direction=1,
+        raw_direction=1,
+        entry_pathway=EntryPathway.FAST_TRACK,
+        execution_entry_mode="breakout_confirmed",
+        execution_trigger_family="trend_continuation_near_breakout",
+        signal_quality_tier="TIER_HIGH",
+        relaxed_entry=False,
+    )
+    memory_signal = _signal(
+        direction=1,
+        raw_direction=1,
+        entry_pathway=EntryPathway.STANDARD,
+        execution_entry_mode="breakout_confirmed",
+        execution_trigger_family="bullish_memory_breakout",
+        signal_confidence=0.75,
+        relaxed_entry=False,
+    )
+
+    assert robot._resolve_trigger_family_gate_reason(trend_signal) is None
+    assert robot._resolve_trigger_family_gate_reason(memory_signal) is None
+
+
 def test_near_ready_blocked_signal_maps_to_armed_candidate_state() -> None:
     robot = _robot()
     signal = _signal(
@@ -474,3 +744,585 @@ def test_near_ready_blocked_signal_maps_to_armed_candidate_state() -> None:
 
     assert candidate_state == "armed"
     assert candidate_reason == "obv_strength_not_confirmed"
+
+
+def _signal_sweep(**overrides) -> TrendSignal:
+    base = dict(
+        direction=1,
+        raw_direction=1,
+        major_direction=1,
+        weak_bull_bias=False,
+        weak_bear_bias=False,
+        early_bullish=True,
+        early_bearish=False,
+        entry_size_multiplier=1.0,
+        swing_rsi=55.0,
+        swing_rsi_slope=0.0,
+        bullish_score=78.0,
+        bearish_score=20.0,
+        bullish_threshold=55.0,
+        bearish_threshold=45.0,
+        bullish_ready=True,
+        bearish_ready=False,
+        execution_entry_mode="breakout_confirmed",
+        execution_golden_cross=False,
+        execution_breakout=True,
+        execution_breakdown=False,
+        execution_memory_active=False,
+        execution_latch_active=False,
+        execution_latch_price=None,
+        execution_frontrun_near_breakout=False,
+        execution_memory_bars_ago=None,
+        execution_trigger_family="spring_reclaim",
+        execution_trigger_reason="spring_reclaim: swept prior low",
+        liquidity_sweep=True,
+        liquidity_sweep_side="long",
+        oi_change_pct=0.25,
+        funding_rate=0.0003,
+        is_short_squeeze=False,
+        is_long_liquidation=False,
+        resonance_allowed=False,
+        resonance_reason="",
+        reverse_intercepted=False,
+        reverse_intercept_reason="",
+        sweep_extreme_price=99.5,
+        price=100.0,
+        atr=0.5,
+        risk_percent=0.01,
+        blocker_reason="PASSED",
+        data_alignment_valid=True,
+        data_mismatch_ms=0,
+        relaxed_entry=False,
+        relaxed_reasons=(),
+        entry_pathway=EntryPathway.FAST_TRACK,
+        signal_quality_tier="TIER_HIGH",
+        signal_confidence=0.85,
+        signal_strength_bonus=5.0,
+        obv_confirmation=SimpleNamespace(zscore=0.8, above_sma=True),
+        obv_threshold=1.0,
+        obv_confirmation_passed=True,
+        volume_filter_passed=True,
+        volume_profile=None,
+        long_setup_blocked=False,
+        long_setup_reason="",
+    )
+    base.update(overrides)
+    return TrendSignal(**base)
+
+
+def test_is_breakout_style_signal_detects_breakout_mode() -> None:
+    robot = _robot()
+    signal = _signal(execution_entry_mode="breakout_confirmed", execution_breakout=True)
+    assert robot._is_breakout_style_signal(signal) is True
+
+
+def test_is_breakout_style_signal_detects_sweep_family() -> None:
+    robot = _robot()
+    signal = _signal(execution_trigger_family="spring_reclaim", execution_entry_mode="standard")
+    assert robot._is_breakout_style_signal(signal) is True
+
+
+def test_is_breakout_style_signal_false_for_pullback() -> None:
+    robot = _robot()
+    signal = _signal(execution_entry_mode="pullback_entry", execution_trigger_family="waiting")
+    assert robot._is_breakout_style_signal(signal) is False
+
+
+def test_reverse_intercept_blocks_long_into_short_squeeze() -> None:
+    robot = _robot()
+    signal = _signal(
+        direction=1,
+        raw_direction=1,
+        execution_entry_mode="breakout_confirmed",
+        execution_breakout=True,
+        execution_trigger_family="breakout",
+        is_short_squeeze=True,
+        is_long_liquidation=False,
+    )
+    reason = robot._resolve_reverse_intercept_reason(signal)
+    assert reason == "breakout_long_into_short_squeeze"
+
+
+def test_reverse_intercept_blocks_short_into_long_liquidation() -> None:
+    robot = _robot()
+    signal = _signal(
+        direction=-1,
+        raw_direction=-1,
+        execution_entry_mode="breakdown_confirmed",
+        execution_breakdown=True,
+        execution_trigger_family="breakdown",
+        is_short_squeeze=False,
+        is_long_liquidation=True,
+    )
+    reason = robot._resolve_reverse_intercept_reason(signal)
+    assert reason == "breakout_short_into_long_liquidation"
+
+
+def test_reverse_intercept_allows_non_breakout_signals() -> None:
+    robot = _robot()
+    signal = _signal(
+        direction=1,
+        raw_direction=1,
+        execution_entry_mode="pullback_entry",
+        execution_breakout=False,
+        is_short_squeeze=True,
+        is_long_liquidation=False,
+    )
+    reason = robot._resolve_reverse_intercept_reason(signal)
+    assert reason is None
+
+
+def test_sweep_resonance_long_oi_turn() -> None:
+    robot = _robot()
+    allowed, reason = robot._supports_sweep_resonance(
+        direction=1,
+        sweep_side="long",
+        oi_change_pct=0.25,
+        is_short_squeeze=False,
+        is_long_liquidation=False,
+    )
+    assert allowed is True
+    assert "SWEEP_RESONANCE_LONG_OI_TURN" in reason
+
+
+def test_sweep_resonance_short_squeeze() -> None:
+    robot = _robot()
+    allowed, reason = robot._supports_sweep_resonance(
+        direction=-1,
+        sweep_side="short",
+        oi_change_pct=-0.5,
+        is_short_squeeze=True,
+        is_long_liquidation=False,
+    )
+    assert allowed is True
+    assert "SWEEP_RESONANCE_SHORT_SQUEEZE_FLUSH" in reason
+
+
+def test_sweep_resonance_rejected_when_mismatched() -> None:
+    robot = _robot()
+    allowed, reason = robot._supports_sweep_resonance(
+        direction=1,
+        sweep_side="short",
+        oi_change_pct=0.25,
+        is_short_squeeze=False,
+        is_long_liquidation=False,
+    )
+    assert allowed is False
+    assert reason == ""
+
+
+def test_sweep_resonance_rejected_below_threshold() -> None:
+    robot = _robot()
+    allowed, reason = robot._supports_sweep_resonance(
+        direction=1,
+        sweep_side="long",
+        oi_change_pct=0.05,
+        is_short_squeeze=False,
+        is_long_liquidation=False,
+    )
+    assert allowed is False
+
+
+def test_sweep_stop_anchor_long() -> None:
+    robot = _robot()
+    signal = _signal_sweep(direction=1, liquidity_sweep=True, liquidity_sweep_side="long", sweep_extreme_price=99.5)
+    stop, reason = robot._resolve_sweep_stop_anchor(signal, entry_price=100.0, fallback_stop_distance=1.0)
+    assert stop is not None
+    assert stop < 100.0
+    assert stop > 99.5
+
+
+def test_sweep_stop_anchor_short() -> None:
+    robot = _robot()
+    signal = _signal_sweep(
+        direction=-1,
+        liquidity_sweep=True,
+        liquidity_sweep_side="short",
+        sweep_extreme_price=100.5,
+        execution_breakdown=True,
+        execution_trigger_family="upthrust_reclaim",
+    )
+    stop, reason = robot._resolve_sweep_stop_anchor(signal, entry_price=100.0, fallback_stop_distance=1.0)
+    assert stop is not None
+    assert stop > 100.0
+    assert stop < 100.5
+
+
+def test_sweep_stop_returns_none_when_not_sweep() -> None:
+    robot = _robot()
+    signal = _signal_sweep(liquidity_sweep=False)
+    stop, reason = robot._resolve_sweep_stop_anchor(signal, entry_price=100.0, fallback_stop_distance=1.0)
+    assert stop is None
+    assert reason is None
+
+
+def test_resonance_relaxes_rr_for_fast_track() -> None:
+    robot = _robot()
+    robot.config.sweep_resonance_rr_relaxation_ratio = 0.20
+    signal = _signal_sweep(
+        entry_pathway=EntryPathway.FAST_TRACK,
+        resonance_allowed=True,
+        resonance_reason="SWEEP_RESONANCE_LONG_OI_TURN(0.25%)",
+        execution_entry_mode="starter_frontrun_limit",
+        relaxed_entry=False,
+    )
+    rr = robot._resolve_minimum_expected_rr_for_pathway(signal)
+    assert rr < 0.6
+
+
+def test_apply_entry_pathway_checks_blocks_reverse_intercept() -> None:
+    robot = _robot()
+    robot.symbol = "BTC/USDT"
+    robot._same_direction_cooldown_until = {"long": 0.0, "short": 0.0}
+    robot._fast_track_reuse_until = {"long": 0.0, "short": 0.0}
+    robot._fast_track_reuse_signature = {"long": None, "short": None}
+    robot._repeated_entry_zone_until = {"long": 0.0, "short": 0.0}
+    signal = _signal(
+        direction=1,
+        raw_direction=1,
+        entry_pathway=EntryPathway.FAST_TRACK,
+        execution_entry_mode="breakout_confirmed",
+        execution_breakout=True,
+        execution_trigger_family="breakout",
+        is_short_squeeze=True,
+        is_long_liquidation=False,
+        liquidity_sweep=False,
+        liquidity_sweep_side="",
+        oi_change_pct=0.0,
+        funding_rate=0.0,
+    )
+    result = robot._apply_entry_pathway_checks(signal=signal, side="buy", amount=1.0, order_flow_assessment=None)
+    assert result == "cta:reverse_intercept_blocked"
+
+
+def _signal_sweep_high(**overrides) -> TrendSignal:
+    """High-quality sweep signal for resonance tests."""
+    base = dict(
+        direction=1,
+        raw_direction=1,
+        major_direction=1,
+        weak_bull_bias=False,
+        weak_bear_bias=False,
+        early_bullish=True,
+        early_bearish=False,
+        entry_size_multiplier=1.0,
+        swing_rsi=55.0,
+        swing_rsi_slope=0.0,
+        bullish_score=78.0,
+        bearish_score=20.0,
+        bullish_threshold=55.0,
+        bearish_threshold=45.0,
+        bullish_ready=True,
+        bearish_ready=False,
+        execution_entry_mode="breakout_confirmed",
+        execution_golden_cross=False,
+        execution_breakout=True,
+        execution_breakdown=False,
+        execution_memory_active=False,
+        execution_latch_active=False,
+        execution_latch_price=None,
+        execution_frontrun_near_breakout=False,
+        execution_memory_bars_ago=None,
+        execution_trigger_family="spring_reclaim",
+        execution_trigger_reason="spring_reclaim: swept prior low",
+        liquidity_sweep=True,
+        liquidity_sweep_side="long",
+        oi_change_pct=0.25,
+        funding_rate=0.0003,
+        is_short_squeeze=False,
+        is_long_liquidation=False,
+        resonance_allowed=True,
+        resonance_reason="SWEEP_RESONANCE_LONG_OI_TURN(0.25%)",
+        reverse_intercepted=False,
+        reverse_intercept_reason="",
+        sweep_extreme_price=99.5,
+        price=100.0,
+        atr=0.5,
+        risk_percent=0.01,
+        blocker_reason="PASSED",
+        data_alignment_valid=True,
+        data_mismatch_ms=0,
+        relaxed_entry=False,
+        relaxed_reasons=(),
+        entry_pathway=EntryPathway.FAST_TRACK,
+        signal_quality_tier="TIER_HIGH",
+        signal_confidence=0.85,
+        signal_strength_bonus=5.0,
+        obv_confirmation=SimpleNamespace(zscore=0.8, above_sma=True),
+        obv_threshold=1.0,
+        obv_confirmation_passed=True,
+        volume_filter_passed=True,
+        volume_profile=None,
+        long_setup_blocked=False,
+        long_setup_reason="",
+    )
+    base.update(overrides)
+    return TrendSignal(**base)
+
+
+def test_resonance_execution_allowance_passes_for_high_quality_spring() -> None:
+    robot = _robot()
+    signal = _signal_sweep_high(
+        execution_trigger_family="spring_reclaim",
+        liquidity_sweep_side="long",
+        resonance_allowed=True,
+        resonance_reason="SWEEP_RESONANCE_LONG_OI_TURN(0.25%)",
+        direction=1,
+        major_direction=1,
+        signal_quality_tier="TIER_HIGH",
+        signal_confidence=0.85,
+        bullish_score=78.0,
+    )
+    allowed, tag = robot._resonance_execution_allowance(signal)
+    assert allowed is True
+    assert "spring_reclaim" in tag
+
+
+def test_resonance_execution_allowance_passes_for_high_quality_upthrust() -> None:
+    robot = _robot()
+    signal = _signal_sweep_high(
+        execution_trigger_family="upthrust_reclaim",
+        liquidity_sweep_side="short",
+        resonance_allowed=True,
+        resonance_reason="SWEEP_RESONANCE_SHORT_SQUEEZE_FLUSH",
+        direction=-1,
+        major_direction=-1,
+        signal_quality_tier="TIER_HIGH",
+        signal_confidence=0.82,
+        bullish_score=78.0,
+        bearish_score=75.0,
+    )
+    allowed, tag = robot._resonance_execution_allowance(signal)
+    assert allowed is True
+    assert "upthrust_reclaim" in tag
+
+
+def test_resonance_execution_allowance_fails_for_wrong_side() -> None:
+    robot = _robot()
+    signal = _signal_sweep_high(
+        direction=-1,
+        liquidity_sweep_side="long",
+        resonance_allowed=True,
+        resonance_reason="SWEEP_RESONANCE_LONG_OI_TURN(0.25%)",
+        execution_trigger_family="spring_reclaim",
+        major_direction=-1,
+        signal_quality_tier="TIER_HIGH",
+        signal_confidence=0.85,
+    )
+    allowed, tag = robot._resonance_execution_allowance(signal)
+    assert allowed is False
+
+
+def test_resonance_execution_allowance_fails_for_low_confidence() -> None:
+    robot = _robot()
+    signal = _signal_sweep_high(
+        direction=1,
+        resonance_allowed=True,
+        resonance_reason="SWEEP_RESONANCE_LONG_OI_TURN(0.25%)",
+        execution_trigger_family="spring_reclaim",
+        major_direction=1,
+        signal_quality_tier="TIER_MEDIUM",
+        signal_confidence=0.50,
+    )
+    allowed, _tag = robot._resonance_execution_allowance(signal)
+    assert allowed is False
+
+
+def test_resonance_execution_allowance_fails_for_low_tier() -> None:
+    robot = _robot()
+    signal = _signal_sweep_high(
+        direction=1,
+        resonance_allowed=True,
+        resonance_reason="SWEEP_RESONANCE_LONG_OI_TURN(0.25%)",
+        execution_trigger_family="spring_reclaim",
+        major_direction=1,
+        signal_quality_tier="TIER_LOW",
+        signal_confidence=0.70,
+    )
+    allowed, _tag = robot._resonance_execution_allowance(signal)
+    assert allowed is False
+
+
+def test_resonance_execution_allowance_fails_for_wrong_trigger_family() -> None:
+    robot = _robot()
+    signal = _signal_sweep_high(
+        direction=1,
+        resonance_allowed=True,
+        resonance_reason="SWEEP_RESONANCE_LONG_OI_TURN(0.25%)",
+        execution_trigger_family="near_breakout_release",
+        major_direction=1,
+        signal_quality_tier="TIER_HIGH",
+        signal_confidence=0.85,
+    )
+    allowed, _tag = robot._resonance_execution_allowance(signal)
+    assert allowed is False
+
+
+def test_resonance_execution_allowance_fails_when_resonance_not_allowed() -> None:
+    robot = _robot()
+    signal = _signal_sweep_high(
+        direction=1,
+        resonance_allowed=False,
+        resonance_reason="",
+        execution_trigger_family="spring_reclaim",
+        major_direction=1,
+        signal_quality_tier="TIER_HIGH",
+        signal_confidence=0.85,
+    )
+    allowed, tag = robot._resonance_execution_allowance(signal)
+    assert allowed is False
+    assert tag == ""
+
+
+def test_resonance_relaxes_starter_quality_gate() -> None:
+    robot = _robot()
+    robot.config.sweep_resonance_quality_relaxation = 4.0
+    signal = _signal_sweep_high(
+        execution_entry_mode="starter_frontrun_limit",
+        resonance_allowed=True,
+        resonance_reason="SWEEP_RESONANCE_LONG_OI_TURN(0.25%)",
+        direction=1,
+        bullish_score=70.0,
+        bearish_score=20.0,
+        major_direction=1,
+        signal_quality_tier="TIER_HIGH",
+        signal_confidence=0.85,
+        execution_trigger_family="spring_reclaim",
+        liquidity_sweep_side="long",
+    )
+    robot.config.sweep_resonance_execution_min_score = 68.0
+    passed, reason = robot._starter_entry_passes_quality_gate(signal)
+    assert passed is True
+
+
+def test_resonance_does_not_relax_starter_quality_when_resonance_not_active() -> None:
+    robot = _robot()
+    robot.config.sweep_resonance_quality_relaxation = 4.0
+    signal = _signal_sweep_high(
+        execution_entry_mode="starter_frontrun_limit",
+        resonance_allowed=False,
+        resonance_reason="",
+        direction=1,
+        bullish_score=70.0,
+        bearish_score=20.0,
+        major_direction=1,
+        signal_quality_tier="TIER_HIGH",
+        signal_confidence=0.85,
+        execution_trigger_family="spring_reclaim",
+        liquidity_sweep_side="long",
+    )
+    passed, reason = robot._starter_entry_passes_quality_gate(signal)
+    assert passed is False
+    assert "starter_entry_low_score" in str(reason)
+
+
+def test_resonance_bypasses_order_flow_soft_warning() -> None:
+    robot = _robot()
+    robot.config.sweep_resonance_of_relaxation_floor = 0.40
+    from market_adaptive.strategies.order_flow_sentinel import OrderFlowAssessment
+    of_assessment = OrderFlowAssessment(
+        symbol="BTC/USDT",
+        side="buy",
+        depth_levels=10,
+        bid_sum=50000.0,
+        ask_sum=75000.0,
+        imbalance_ratio=0.45,
+        best_bid=95000.0,
+        best_ask=95010.0,
+        confirmation_passed=False,
+        high_conviction=False,
+        recommended_limit_price=None,
+        expected_average_price=None,
+        depth_boundary_price=None,
+        reason="normal_decay",
+        history_mean=0.0,
+        history_sigma=0.0,
+        health_floor=0.0,
+        confirmation_threshold=0.60,
+        high_conviction_threshold=0.80,
+        decay_detected=False,
+    )
+    signal = _signal_sweep_high(
+        direction=1,
+        resonance_allowed=True,
+        resonance_reason="SWEEP_RESONANCE_LONG_OI_TURN(0.25%)",
+        execution_trigger_family="spring_reclaim",
+        major_direction=1,
+        signal_quality_tier="TIER_HIGH",
+        signal_confidence=0.85,
+        execution_entry_mode="starter_frontrun_limit",
+        liquidity_sweep_side="long",
+    )
+    result = robot._apply_strict_order_flow_checks(
+        signal=signal,
+        side="buy",
+        amount=1.0,
+        order_flow_assessment=of_assessment,
+    )
+    assert result is None
+
+
+def test_resonance_order_flow_still_blocks_empty_book() -> None:
+    robot = _robot()
+    robot.config.sweep_resonance_of_relaxation_floor = 0.40
+    from market_adaptive.strategies.order_flow_sentinel import OrderFlowAssessment
+    of_assessment = OrderFlowAssessment(
+        symbol="BTC/USDT",
+        side="buy",
+        depth_levels=10,
+        bid_sum=0.0,
+        ask_sum=0.0,
+        imbalance_ratio=0.0,
+        best_bid=None,
+        best_ask=None,
+        confirmation_passed=False,
+        high_conviction=False,
+        recommended_limit_price=None,
+        expected_average_price=None,
+        depth_boundary_price=None,
+        reason="empty_order_book",
+        history_mean=0.0,
+        history_sigma=0.0,
+        health_floor=0.0,
+        confirmation_threshold=0.60,
+        high_conviction_threshold=0.80,
+        decay_detected=False,
+    )
+    signal = _signal_sweep_high(
+        direction=1,
+        resonance_allowed=True,
+        resonance_reason="SWEEP_RESONANCE_LONG_OI_TURN(0.25%)",
+        execution_trigger_family="spring_reclaim",
+        major_direction=1,
+        signal_quality_tier="TIER_HIGH",
+        signal_confidence=0.85,
+        execution_entry_mode="starter_frontrun_limit",
+        liquidity_sweep_side="long",
+    )
+    result = robot._apply_strict_order_flow_checks(
+        signal=signal,
+        side="buy",
+        amount=1.0,
+        order_flow_assessment=of_assessment,
+    )
+    assert result == "cta:order_flow_blocked"
+
+
+def test_resonance_relaxes_entry_location_block() -> None:
+    robot = _robot()
+    robot.config.sweep_resonance_location_relaxation = 0.12
+    signal = _signal_sweep_high(
+        execution_entry_mode="starter_frontrun_limit",
+        resonance_allowed=True,
+        resonance_reason="SWEEP_RESONANCE_LONG_OI_TURN(0.25%)",
+        direction=1,
+        major_direction=1,
+        signal_quality_tier="TIER_HIGH",
+        signal_confidence=0.85,
+        execution_trigger_family="spring_reclaim",
+        liquidity_sweep_side="long",
+        execution_breakout=True,
+        entry_location_score=-0.50,
+    )
+    reason = robot._resolve_entry_location_block_reason(signal)
+    assert reason is None

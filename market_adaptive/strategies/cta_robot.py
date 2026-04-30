@@ -7,6 +7,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from market_adaptive.config import CTAConfig, ExecutionConfig
 from market_adaptive.coordination import StrategyRuntimeContext
@@ -22,6 +23,7 @@ from market_adaptive.risk import CTARiskProfile, LogicalPositionSnapshot
 from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies.base import BaseStrategyRobot
 from market_adaptive.db import TradeJournalRecord
+from market_adaptive.ml_signal_engine import MLSignalDecision, MarketAdaptiveMLEngine
 from market_adaptive.strategies.mtf_engine import MTFSignal, MultiTimeframeSignalEngine
 from market_adaptive.strategies.obv_gate import resolve_dynamic_obv_gate_for_signal
 from market_adaptive.strategies.order_flow_sentinel import OrderFlowAssessment, OrderFlowSentinel
@@ -103,6 +105,27 @@ class TrendSignal:
     watch_sample_promoted: bool = False
     watch_sample_age_seconds: float | None = None
     watch_sample_origin_reason: str = ""
+    ml_used_model: bool = False
+    ml_model_used: bool = False
+    ml_prediction: int = 0
+    ml_probability_up: float = 0.5
+    ml_aligned_confidence: float = 0.5
+    ml_gate_passed: bool = True
+    ml_reason: str = "ml_unavailable"
+    ml_gate_reason: str = "ml_unavailable"
+    liquidity_sweep: bool = False
+    liquidity_sweep_side: str = ""
+    oi_change_pct: float = 0.0
+    funding_rate: float = 0.0
+    is_short_squeeze: bool = False
+    is_long_liquidation: bool = False
+    resonance_allowed: bool = False
+    resonance_reason: str = ""
+    reverse_intercepted: bool = False
+    reverse_intercept_reason: str = ""
+    sweep_extreme_price: float | None = None
+    entry_location_score: float = 0.0
+    entry_location_reasons: tuple[str, ...] = ()
 
 
 @dataclass
@@ -287,6 +310,18 @@ class EntryOrderResult:
     average_price: float | None
 
 
+@dataclass(frozen=True)
+class FinalEntryPermit:
+    allowed: bool
+    status: str
+    action: str | None = None
+    stage: str = "final"
+    reason: str = ""
+    position_side: str = ""
+    notional_price: float = 0.0
+    order_flow_assessment: OrderFlowAssessment | None = None
+
+
 @dataclass
 class ManagedPosition:
     side: str
@@ -303,6 +338,9 @@ class ManagedPosition:
     max_unrealized_profit_pct: float = 0.0
     quick_trade_mode: bool = False
     opened_at_ms: int = 0
+    origin_trigger_family: str | None = None
+    origin_trigger_reason: str | None = None
+    origin_pathway: str | None = None
 
     @property
     def direction(self) -> int:
@@ -378,6 +416,10 @@ class CTARobot(BaseStrategyRobot):
         self.mtf_engine = MultiTimeframeSignalEngine(client, config)
         self.order_flow_sentinel = OrderFlowSentinel(client, config)
         self.statistical_pricing = StatisticalPricing(config.symbol)
+        self.ml_engine = MarketAdaptiveMLEngine(
+            enabled=bool(getattr(config, "ml_enabled", False)),
+            model_path=str(getattr(config, "ml_model_path", "data/ml_models")),
+        )
         self._last_signal_heartbeat_at = 0.0
         self._last_major_direction: int | None = None
         self._last_bullish_ready: bool | None = None
@@ -434,10 +476,16 @@ class CTARobot(BaseStrategyRobot):
         confidence = float(getattr(mtf_signal, "signal_confidence", 0.0) or 0.0)
         fully_aligned = bool(getattr(mtf_signal, "fully_aligned", False))
         high_confidence_floor = float(getattr(self.config, "tier_high_confidence_threshold", 0.8))
+        trigger_family = str(getattr(getattr(mtf_signal, "execution_trigger", None), "family", "") or "")
 
-        if quality_tier == "TIER_HIGH" and fully_aligned and confidence >= high_confidence_floor:
+        if (
+            quality_tier == "TIER_HIGH"
+            and fully_aligned
+            and confidence >= high_confidence_floor
+            and trigger_family != "major_bull_retest"
+        ):
             return EntryPathway.FAST_TRACK
-        if quality_tier == "TIER_MEDIUM":
+        if quality_tier in {"TIER_HIGH", "TIER_MEDIUM"}:
             return EntryPathway.STANDARD
         return EntryPathway.STRICT
 
@@ -548,6 +596,42 @@ class CTARobot(BaseStrategyRobot):
             return
         if decision.reason:
             logger.info('Passed: VA Override [Reason: %s] [%s]', decision.reason, context)
+
+    def _evaluate_ml_signal(self, *, execution_frame, direction: int) -> MLSignalDecision:
+        engine = getattr(self, "ml_engine", None)
+        if engine is None:
+            return MLSignalDecision(used_model=False, gate_passed=True, reason="ml_unavailable")
+        try:
+            return engine.evaluate(
+                symbol=self.symbol,
+                execution_frame=execution_frame,
+                direction=direction,
+                min_confidence=float(getattr(self.config, "ml_min_confidence", 0.60)),
+            )
+        except Exception:
+            logger.exception("CTA ML evaluation failed | symbol=%s direction=%s", self.symbol, direction)
+            return MLSignalDecision(used_model=False, gate_passed=True, reason="ml_exception")
+
+    def _apply_ml_entry_gate(
+        self,
+        *,
+        execution_frame,
+        final_direction: int,
+        long_setup_blocked: bool,
+        long_setup_reason: str,
+    ) -> tuple[int, bool, str, MLSignalDecision]:
+        ml_decision = self._evaluate_ml_signal(execution_frame=execution_frame, direction=final_direction)
+        if final_direction != 0 and ml_decision.used_model and not ml_decision.gate_passed:
+            logger.info(
+                "CTA ML gate blocked | symbol=%s direction=%s aligned_confidence=%.3f min_confidence=%.3f reason=%s",
+                self.symbol,
+                final_direction,
+                float(ml_decision.aligned_confidence),
+                float(getattr(self.config, "ml_min_confidence", 0.60)),
+                ml_decision.reason,
+            )
+            return 0, True, f"ml_gate_blocked:{ml_decision.reason}", ml_decision
+        return final_direction, long_setup_blocked, long_setup_reason, ml_decision
 
     def should_notify_action(self, action: str) -> bool:
         if action in {
@@ -678,7 +762,7 @@ class CTARobot(BaseStrategyRobot):
         trigger_family = str(getattr(signal, "execution_trigger_family", "") or "")
         if not trigger_family or trigger_family == "waiting":
             return 0
-        tracked_family = self._entry_zone_trigger_family.get(side)
+        tracked_family = getattr(self, "_entry_zone_trigger_family", {"long": None, "short": None}).get(side)
         if tracked_family != trigger_family:
             return 0
         anchor_price = self._entry_zone_anchor_price.get(side)
@@ -689,7 +773,7 @@ class CTARobot(BaseStrategyRobot):
         price_tolerance = atr_value * tolerance_atr
         if price_tolerance <= 0 or abs(float(signal.price) - float(anchor_price)) > price_tolerance:
             return 0
-        until_ts = float(self._entry_zone_cooldown_until.get(side, 0.0))
+        until_ts = float(getattr(self, "_entry_zone_cooldown_until", {"long": 0.0, "short": 0.0}).get(side, 0.0))
         remaining = max(0.0, until_ts - float(self._time_provider()))
         return int(remaining)
 
@@ -777,6 +861,12 @@ class CTARobot(BaseStrategyRobot):
                     "long_setup_reason": str(signal.long_setup_reason or ""),
                     "relaxed_entry": bool(signal.relaxed_entry),
                     "relaxed_reasons": list(signal.relaxed_reasons),
+                    "ml_used_model": bool(signal.ml_used_model),
+                    "ml_gate_passed": bool(signal.ml_gate_passed),
+                    "ml_aligned_confidence": float(signal.ml_aligned_confidence),
+                    "ml_reason": str(signal.ml_reason),
+                    "entry_location_score": float(signal.entry_location_score),
+                    "entry_location_reasons": list(signal.entry_location_reasons),
                 },
             )
 
@@ -849,6 +939,30 @@ class CTARobot(BaseStrategyRobot):
         relaxed_reasons: list[str] = []
         quick_trade_mode = False
         standard_path = entry_pathway is EntryPathway.STANDARD
+        liquidity_sweep = bool(getattr(mtf_signal.execution_trigger, "liquidity_sweep", False))
+        liquidity_sweep_side = str(getattr(mtf_signal.execution_trigger, "liquidity_sweep_side", "") or "")
+        oi_change_pct = float(getattr(mtf_signal, "oi_change_pct", 0.0) or 0.0)
+        funding_rate = float(getattr(mtf_signal, "funding_rate", 0.0) or 0.0)
+        is_short_squeeze = bool(getattr(mtf_signal, "is_short_squeeze", False))
+        is_long_liquidation = bool(getattr(mtf_signal, "is_long_liquidation", False))
+        resonance_allowed, resonance_reason = self._supports_sweep_resonance(
+            direction=raw_direction,
+            sweep_side=liquidity_sweep_side,
+            oi_change_pct=oi_change_pct,
+            is_short_squeeze=is_short_squeeze,
+            is_long_liquidation=is_long_liquidation,
+        )
+        sweep_extreme_price = None
+        if liquidity_sweep_side == "long":
+            sweep_candidates = [getattr(mtf_signal.execution_trigger, "prior_low", None), getattr(mtf_signal.execution_trigger, "latch_low_price", None)]
+            sweep_candidates = [float(v) for v in sweep_candidates if v not in (None, 0, "0")]
+            if sweep_candidates:
+                sweep_extreme_price = min(sweep_candidates)
+        elif liquidity_sweep_side == "short":
+            sweep_candidates = [getattr(mtf_signal.execution_trigger, "prior_high", None), getattr(mtf_signal.execution_trigger, "latch_high_price", None)]
+            sweep_candidates = [float(v) for v in sweep_candidates if v not in (None, 0, "0")]
+            if sweep_candidates:
+                sweep_extreme_price = max(sweep_candidates)
         standard_obv_floor = max(
             float(getattr(self.config, "near_breakout_release_obv_zscore_floor", -0.25)),
             float(obv_threshold) - 1.0,
@@ -867,13 +981,17 @@ class CTARobot(BaseStrategyRobot):
                 raw_direction=raw_direction,
             )
             if not obv_exempt and not obv_confirmation_passed:
-                if standard_path and float(obv_confirmation.zscore) >= standard_obv_floor:
+                if resonance_allowed:
+                    relaxed_reasons.append(resonance_reason or "SWEEP_RESONANCE_OBV_BYPASS")
+                elif standard_path and float(obv_confirmation.zscore) >= standard_obv_floor:
                     relaxed_reasons.append(f"STANDARD_OBV({float(obv_confirmation.zscore):.2f}) >= Floor({float(standard_obv_floor):.2f})")
                 else:
                     long_setup_blocked = True
                     long_setup_reason = "obv_strength_not_confirmed"
             elif not obv_exempt and not obv_confirmation.above_sma:
-                if relaxed_obv_allowed:
+                if resonance_allowed:
+                    relaxed_reasons.append((resonance_reason or "SWEEP_RESONANCE") + "_BELOW_SMA_BYPASS")
+                elif relaxed_obv_allowed:
                     relaxed_reasons.append(f"OBV({float(obv_confirmation.zscore):.2f}) > Floor({float(obv_threshold):.2f})")
                 elif standard_path and float(obv_confirmation.zscore) >= standard_obv_floor:
                     relaxed_reasons.append(f"STANDARD_OBV_BELOW_SMA({float(obv_confirmation.zscore):.2f})")
@@ -881,7 +999,9 @@ class CTARobot(BaseStrategyRobot):
                     long_setup_blocked = True
                     long_setup_reason = "obv_below_sma"
             elif volume_profile is None:
-                if standard_path:
+                if resonance_allowed:
+                    relaxed_reasons.append((resonance_reason or "SWEEP_RESONANCE") + "_NO_VOLUME_PROFILE")
+                elif standard_path:
                     relaxed_reasons.append("STANDARD_NO_VOLUME_PROFILE")
                 else:
                     long_setup_blocked = True
@@ -892,7 +1012,9 @@ class CTARobot(BaseStrategyRobot):
                     float(current_price) * 0.001,
                 )
                 poc_gap = max(0.0, float(volume_profile.poc_price) - float(current_price))
-                if standard_path and bool(mtf_signal.execution_trigger.frontrun_near_breakout or mtf_signal.execution_trigger.prior_high_break) and poc_gap <= poc_reclaim_tolerance:
+                if resonance_allowed and poc_gap <= max(poc_reclaim_tolerance, float(atr_series.iloc[-1]) * 0.5):
+                    relaxed_reasons.append((resonance_reason or "SWEEP_RESONANCE") + f"_POC_RECLAIM({poc_gap:.4f})")
+                elif standard_path and bool(mtf_signal.execution_trigger.frontrun_near_breakout or mtf_signal.execution_trigger.prior_high_break) and poc_gap <= poc_reclaim_tolerance:
                     relaxed_reasons.append(f"STANDARD_POC_RECLAIM_OK({poc_gap:.4f})")
                 else:
                     long_setup_blocked = True
@@ -901,6 +1023,8 @@ class CTARobot(BaseStrategyRobot):
                 # 如果是 pullback 支撑入场，允许绕过 inside_value_area 限制
                 if bool(getattr(mtf_signal.execution_trigger, 'pullback_near_support', False)) and raw_direction > 0:
                     pass  # 不 block，允许入场
+                elif resonance_allowed:
+                    relaxed_reasons.append((resonance_reason or "SWEEP_RESONANCE") + "_VA_BYPASS")
                 elif standard_path:
                     relaxed_reasons.append("STANDARD_VA_BYPASS")
                 else:
@@ -915,7 +1039,9 @@ class CTARobot(BaseStrategyRobot):
                     decision=value_area_decision,
                 )
             elif not volume_profile.above_value_area(current_price):
-                if standard_path:
+                if resonance_allowed:
+                    relaxed_reasons.append((resonance_reason or "SWEEP_RESONANCE") + "_BELOW_VAH_OK")
+                elif standard_path:
                     relaxed_reasons.append("STANDARD_BELOW_VAH_OK")
                 else:
                     long_setup_blocked = True
@@ -940,17 +1066,28 @@ class CTARobot(BaseStrategyRobot):
         elif raw_direction < 0:
             obv_confirmation_passed = volume_filter_passed
             if not volume_filter_passed:
-                final_direction = 0
-                long_setup_blocked = True
-                long_setup_reason = "obv_above_sma" if bool(obv_confirmation.above_sma) else "obv_strength_not_confirmed"
+                if resonance_allowed:
+                    relaxed_reasons.append(resonance_reason or "SWEEP_RESONANCE_SHORT_OBV_BYPASS")
+                else:
+                    final_direction = 0
+                    long_setup_blocked = True
+                    long_setup_reason = "obv_above_sma" if bool(obv_confirmation.above_sma) else "obv_strength_not_confirmed"
             elif volume_profile is None:
-                final_direction = 0
-                long_setup_blocked = True
-                long_setup_reason = "missing_volume_profile"
+                if resonance_allowed:
+                    relaxed_reasons.append((resonance_reason or "SWEEP_RESONANCE") + "_NO_VOLUME_PROFILE")
+                else:
+                    final_direction = 0
+                    long_setup_blocked = True
+                    long_setup_reason = "missing_volume_profile"
             elif float(current_price) >= float(volume_profile.poc_price):
-                final_direction = 0
-                long_setup_blocked = True
-                long_setup_reason = "above_poc"
+                poc_gap = max(0.0, float(current_price) - float(volume_profile.poc_price))
+                poc_tolerance = max(float(atr_series.iloc[-1]) * 0.5, float(current_price) * 0.001)
+                if resonance_allowed and poc_gap <= poc_tolerance:
+                    relaxed_reasons.append((resonance_reason or "SWEEP_RESONANCE") + f"_POC_REJECT_OK({poc_gap:.4f})")
+                else:
+                    final_direction = 0
+                    long_setup_blocked = True
+                    long_setup_reason = "above_poc"
             if long_setup_blocked and long_setup_reason == "obv_strength_not_confirmed":
                 bearish_score = float(getattr(mtf_signal, "bearish_score", 0.0))
                 bullish_score = float(getattr(mtf_signal, "bullish_score", 0.0))
@@ -984,6 +1121,13 @@ class CTARobot(BaseStrategyRobot):
                         bool(obv_confirmation.above_sma),
                         float(obv_confirmation.zscore),
                     )
+
+        final_direction, long_setup_blocked, long_setup_reason, ml_decision = self._apply_ml_entry_gate(
+            execution_frame=execution_frame,
+            final_direction=final_direction,
+            long_setup_blocked=long_setup_blocked,
+            long_setup_reason=long_setup_reason,
+        )
 
         blocker_reason = mtf_signal.blocker_reason
         if long_setup_blocked:
@@ -1068,7 +1212,27 @@ class CTARobot(BaseStrategyRobot):
             signal_strength_bonus=signal_strength_bonus,
             candidate_state=candidate_state,
             candidate_reason=candidate_reason,
+            ml_used_model=bool(ml_decision.used_model),
+            ml_model_used=bool(ml_decision.used_model),
+            ml_prediction=int(ml_decision.prediction),
+            ml_probability_up=float(ml_decision.probability_up),
+            ml_aligned_confidence=float(ml_decision.aligned_confidence),
+            ml_gate_passed=bool(ml_decision.gate_passed),
+            ml_reason=str(ml_decision.reason),
+            ml_gate_reason=str(ml_decision.reason),
+            liquidity_sweep=liquidity_sweep,
+            liquidity_sweep_side=liquidity_sweep_side,
+            oi_change_pct=oi_change_pct,
+            funding_rate=funding_rate,
+            is_short_squeeze=is_short_squeeze,
+            is_long_liquidation=is_long_liquidation,
+            resonance_allowed=resonance_allowed,
+            resonance_reason=resonance_reason,
+            sweep_extreme_price=sweep_extreme_price,
         )
+        entry_location_score, entry_location_reasons = self._score_entry_location(signal)
+        signal.entry_location_score = float(entry_location_score)
+        signal.entry_location_reasons = tuple(entry_location_reasons)
         signal = self._quality_filter_short_signal(signal)
         candidate_state, candidate_reason = self._derive_candidate_state(signal)
         signal.candidate_state = candidate_state
@@ -1088,6 +1252,87 @@ class CTARobot(BaseStrategyRobot):
             signal.execution_trigger_reason,
         )
         return signal
+
+    def _is_breakout_style_signal(self, signal: TrendSignal) -> bool:
+        mode = str(getattr(signal, "execution_entry_mode", "") or "").lower()
+        family = str(getattr(signal, "execution_trigger_family", "") or "").lower()
+        return bool(
+            getattr(signal, "execution_breakout", False)
+            or getattr(signal, "execution_breakdown", False)
+            or getattr(signal, "execution_frontrun_near_breakout", False)
+            or any(marker in mode for marker in ("breakout", "breakdown", "frontrun", "starter"))
+            or any(marker in family for marker in ("breakout", "reclaim", "frontrun", "continuation"))
+        )
+
+    def _resolve_reverse_intercept_reason(self, signal: TrendSignal) -> str | None:
+        if not self._is_breakout_style_signal(signal):
+            return None
+        if signal.direction > 0 and bool(getattr(signal, "is_short_squeeze", False)):
+            return "breakout_long_into_short_squeeze"
+        if signal.direction < 0 and bool(getattr(signal, "is_long_liquidation", False)):
+            return "breakout_short_into_long_liquidation"
+        return None
+
+    def _supports_sweep_resonance(self, *, direction: int, sweep_side: str, oi_change_pct: float, is_short_squeeze: bool, is_long_liquidation: bool) -> tuple[bool, str]:
+        min_oi_turn_pct = float(getattr(self.config, "sweep_resonance_min_oi_turn_pct", 0.15))
+        if direction > 0 and sweep_side == "long":
+            if oi_change_pct >= min_oi_turn_pct:
+                return True, f"SWEEP_RESONANCE_LONG_OI_TURN({oi_change_pct:.2f}%)"
+            if is_long_liquidation:
+                return True, "SWEEP_RESONANCE_LONG_LIQUIDATION_FLUSH"
+        if direction < 0 and sweep_side == "short":
+            if oi_change_pct >= min_oi_turn_pct:
+                return True, f"SWEEP_RESONANCE_SHORT_OI_TURN({oi_change_pct:.2f}%)"
+            if is_short_squeeze:
+                return True, "SWEEP_RESONANCE_SHORT_SQUEEZE_FLUSH"
+        return False, ""
+
+    def _resolve_sweep_stop_anchor(self, signal: TrendSignal, entry_price: float, fallback_stop_distance: float) -> tuple[float | None, str | None]:
+        sweep_extreme_price = getattr(signal, "sweep_extreme_price", None)
+        if not bool(getattr(signal, "liquidity_sweep", False)) or sweep_extreme_price in (None, 0, "0"):
+            return None, None
+        buffer_ratio = float(getattr(self.config, "sweep_stop_buffer_atr_ratio", 0.15))
+        min_price_buffer_ratio = float(getattr(self.config, "sweep_stop_min_price_ratio", 0.0006))
+        atr_value = self._normalized_atr(entry_price, signal.atr)
+        buffer_distance = max(atr_value * buffer_ratio, float(entry_price) * min_price_buffer_ratio)
+        anchor = float(sweep_extreme_price)
+        if signal.direction > 0:
+            candidate = anchor + buffer_distance
+            if candidate >= entry_price:
+                return None, None
+            return candidate, f"sweep_anchor_long({anchor:.4f})"
+        if signal.direction < 0:
+            candidate = anchor - buffer_distance
+            if candidate <= entry_price:
+                return None, None
+            return candidate, f"sweep_anchor_short({anchor:.4f})"
+        return None, None
+
+    def _resonance_execution_allowance(self, signal: TrendSignal) -> tuple[bool, str]:
+        if not bool(getattr(signal, "resonance_allowed", False)):
+            return False, ""
+        if not bool(getattr(signal, "liquidity_sweep", False)):
+            return False, ""
+        trigger_family = str(getattr(signal, "execution_trigger_family", "") or "")
+        if trigger_family not in {"spring_reclaim", "upthrust_reclaim"}:
+            return False, ""
+        direction = int(getattr(signal, "direction", 0) or 0)
+        sweep_side = str(getattr(signal, "liquidity_sweep_side", "") or "")
+        if (direction > 0 and sweep_side != "long") or (direction < 0 and sweep_side != "short"):
+            return False, ""
+        if int(getattr(signal, "major_direction", 0) or 0) != direction:
+            return False, ""
+        quality_tier = str(getattr(signal, "signal_quality_tier", "TIER_LOW") or "TIER_LOW")
+        if quality_tier not in {"TIER_HIGH", "TIER_MEDIUM"}:
+            return False, ""
+        confidence = float(getattr(signal, "signal_confidence", 0.0) or 0.0)
+        if confidence < float(getattr(self.config, "sweep_resonance_execution_min_confidence", 0.58)):
+            return False, ""
+        primary_score = float(signal.bullish_score if direction > 0 else signal.bearish_score)
+        minimum_score = float(getattr(self.config, "sweep_resonance_execution_min_score", 74.0))
+        if primary_score < minimum_score:
+            return False, ""
+        return True, f"{trigger_family}:{str(getattr(signal, 'resonance_reason', '') or 'SWEEP_RESONANCE')}"
 
     def _effective_signal_obv_threshold(self, signal: TrendSignal) -> float:
         if signal.obv_threshold is not None:
@@ -1244,6 +1489,14 @@ class CTARobot(BaseStrategyRobot):
             "blocker_reason": str(signal.blocker_reason),
             "relaxed_entry": bool(signal.relaxed_entry),
             "relaxed_reasons": list(signal.relaxed_reasons),
+            "ml_used_model": bool(signal.ml_used_model),
+            "ml_prediction": int(signal.ml_prediction),
+            "ml_probability_up": float(signal.ml_probability_up),
+            "ml_aligned_confidence": float(signal.ml_aligned_confidence),
+            "ml_gate_passed": bool(signal.ml_gate_passed),
+            "ml_reason": str(signal.ml_reason),
+            "entry_location_score": float(signal.entry_location_score),
+            "entry_location_reasons": list(signal.entry_location_reasons),
             "data_alignment_valid": bool(signal.data_alignment_valid),
             "data_mismatch_ms": int(signal.data_mismatch_ms),
         }
@@ -1389,6 +1642,7 @@ class CTARobot(BaseStrategyRobot):
     def _starter_entry_passes_quality_gate(self, signal: TrendSignal) -> tuple[bool, str | None]:
         entry_mode = str(signal.execution_entry_mode or "").lower()
         starter_like = any(marker in entry_mode for marker in ("starter", "frontrun", "scale_in", "early_"))
+        resonance_allowance, resonance_tag = self._resonance_execution_allowance(signal)
         if not starter_like:
             return True, None
 
@@ -1397,7 +1651,12 @@ class CTARobot(BaseStrategyRobot):
         minimum_score = float(getattr(self.config, "starter_quality_minimum_score", 72.0))
         if "scale_in" in entry_mode:
             minimum_score = float(getattr(self.config, "scale_in_quality_minimum_score", minimum_score))
+        if resonance_allowance:
+            score_relaxation = max(0.0, float(getattr(self.config, "sweep_resonance_quality_relaxation", 4.0)))
+            minimum_score = max(68.0, minimum_score - min(6.0, score_relaxation))
         if primary_score < minimum_score:
+            if resonance_allowance:
+                return False, f"starter_entry_low_score[{resonance_tag}]"
             return False, "starter_entry_low_score"
 
         if signal.direction < 0 and int(signal.major_direction) > 0:
@@ -1410,14 +1669,91 @@ class CTARobot(BaseStrategyRobot):
                 return False, "starter_entry_countertrend"
         return True, None
 
+    def _score_entry_location(self, signal: TrendSignal) -> tuple[float, tuple[str, ...]]:
+        score = 0.0
+        reasons: list[str] = []
+        volume_profile = signal.volume_profile
+        price = float(getattr(signal, "price", 0.0) or 0.0)
+        atr = max(float(getattr(signal, "atr", 0.0) or 0.0), price * 0.001, 1e-9)
+        breakout_confirmed = bool(signal.execution_breakout) if signal.direction > 0 else bool(signal.execution_breakdown)
+        near_breakout = bool(breakout_confirmed or signal.execution_frontrun_near_breakout)
+
+        if near_breakout:
+            score += 0.45
+            reasons.append("near_breakout")
+        else:
+            score -= 0.65
+            reasons.append("far_from_breakout")
+
+        if volume_profile is None:
+            reasons.append("no_volume_profile")
+        else:
+            inside_value_area = bool(volume_profile.contains_price(price))
+            if signal.direction > 0:
+                poc_gap_atr = (float(volume_profile.poc_price) - price) / atr
+                if bool(volume_profile.above_poc(price)):
+                    score += 0.35
+                    reasons.append("above_poc")
+                elif poc_gap_atr <= 0.35:
+                    score += 0.10
+                    reasons.append("near_poc_reclaim")
+                else:
+                    score -= min(0.45, 0.18 + max(0.0, poc_gap_atr - 0.35) * 0.12)
+                    reasons.append("below_poc")
+            else:
+                if inside_value_area:
+                    score -= 0.20
+                    reasons.append("short_inside_value_area")
+                else:
+                    score += 0.10
+                    reasons.append("short_outside_value_area")
+
+        obv_z = float(getattr(signal.obv_confirmation, "zscore", 0.0) or 0.0)
+        obv_threshold = float(self._effective_signal_obv_threshold(signal))
+        if signal.direction > 0:
+            if obv_z >= obv_threshold:
+                score += 0.15
+                reasons.append("obv_supportive")
+            elif obv_z < max(-0.5, obv_threshold - 1.0):
+                score -= 0.15
+                reasons.append("obv_weak")
+        else:
+            if obv_z <= -abs(obv_threshold):
+                score += 0.15
+                reasons.append("obv_supportive")
+            elif obv_z > abs(obv_threshold):
+                score -= 0.15
+                reasons.append("obv_weak")
+
+        if signal.relaxed_entry:
+            score -= 0.10
+            reasons.append("relaxed_entry")
+        if signal.entry_pathway is EntryPathway.FAST_TRACK:
+            score += 0.10
+            reasons.append("fast_track")
+        elif signal.entry_pathway is EntryPathway.STANDARD:
+            score += 0.05
+            reasons.append("standard_path")
+
+        return max(-1.0, min(1.0, score)), tuple(reasons)
+
     def _resolve_entry_location_block_reason(self, signal: TrendSignal) -> str | None:
         entry_mode = str(signal.execution_entry_mode or "").lower()
         structure_confirmed = bool(signal.execution_breakout) if signal.direction > 0 else bool(signal.execution_breakdown)
         near_breakout = bool(structure_confirmed or signal.execution_frontrun_near_breakout)
+        resonance_allowance, _resonance_tag = self._resonance_execution_allowance(signal)
         if signal.relaxed_entry and bool(getattr(self.config, "relaxed_entry_require_near_breakout", True)) and not near_breakout:
             return "relaxed_entry_chasing"
         if any(marker in entry_mode for marker in ("starter", "frontrun", "scale_in", "early_")) and bool(getattr(self.config, "starter_entry_require_near_breakout", True)) and not near_breakout:
             return "starter_entry_chasing"
+        worst_location_floor = float(getattr(self.config, "entry_location_score_min", -0.60))
+        location_score = float(getattr(signal, "entry_location_score", 0.0) or 0.0)
+        if location_score <= worst_location_floor:
+            if resonance_allowance:
+                relaxed_floor = min(-0.35, worst_location_floor - max(0.0, float(getattr(self.config, "sweep_resonance_location_relaxation", 0.12))))
+                if near_breakout and location_score > relaxed_floor:
+                    return None
+            return "entry_location_score_too_low"
         return None
 
     def _fast_track_hard_block_reason(self, signal: TrendSignal) -> str | None:
@@ -1433,8 +1769,13 @@ class CTARobot(BaseStrategyRobot):
 
     def _resolve_minimum_expected_rr_for_pathway(self, signal: TrendSignal) -> float:
         minimum_expected_rr = self._resolve_minimum_expected_rr(signal)
+        if bool(getattr(signal, "resonance_allowed", False)) and not bool(getattr(signal, "reverse_intercepted", False)):
+            relaxation_ratio = min(0.25, max(0.0, float(getattr(self.config, "sweep_resonance_rr_relaxation_ratio", 0.15))))
+            minimum_expected_rr *= max(0.0, 1.0 - relaxation_ratio)
         if signal.entry_pathway is EntryPathway.STANDARD:
             standard_floor = float(getattr(self.config, "standard_entry_minimum_expected_rr", minimum_expected_rr))
+            if bool(getattr(signal, "resonance_allowed", False)):
+                standard_floor *= max(0.0, 1.0 - min(0.25, max(0.0, float(getattr(self.config, "sweep_resonance_rr_relaxation_ratio", 0.15)))))
             return max(minimum_expected_rr, standard_floor)
         if signal.entry_pathway is not EntryPathway.FAST_TRACK:
             return minimum_expected_rr
@@ -1483,10 +1824,10 @@ class CTARobot(BaseStrategyRobot):
 
         if signal.direction > 0:
             disabled_long_families = {
-                "near_breakout_release": bool(getattr(self.config, "disable_near_breakout_release_long", True)),
+                "near_breakout_release": bool(getattr(self.config, "disable_near_breakout_release_long", False)),
                 "price_led_override": bool(getattr(self.config, "disable_price_led_override_long", True)),
-                "trend_continuation_near_breakout": bool(getattr(self.config, "disable_trend_continuation_long", True)),
-                "bullish_memory_breakout": bool(getattr(self.config, "disable_bullish_memory_breakout_long", True)),
+                "trend_continuation_near_breakout": bool(getattr(self.config, "disable_trend_continuation_long", False)),
+                "bullish_memory_breakout": bool(getattr(self.config, "disable_bullish_memory_breakout_long", False)),
             }
             if disabled_long_families.get(trigger_family, False):
                 return f"{trigger_family}_disabled"
@@ -1558,12 +1899,14 @@ class CTARobot(BaseStrategyRobot):
         entry_location_block_reason = self._resolve_entry_location_block_reason(signal)
         if entry_location_block_reason is not None:
             logger.info(
-                "CTA entry location blocked | symbol=%s side=%s mode=%s pathway=%s reason=%s breakout=%s breakdown=%s near_breakout=%s",
+                "CTA entry location blocked | symbol=%s side=%s mode=%s pathway=%s reason=%s score=%.2f loc_reasons=%s breakout=%s breakdown=%s near_breakout=%s",
                 self.symbol,
                 "buy" if signal.direction > 0 else "sell",
                 signal.execution_entry_mode,
                 signal.entry_pathway.name,
                 entry_location_block_reason,
+                float(signal.entry_location_score),
+                ",".join(signal.entry_location_reasons),
                 signal.execution_breakout,
                 signal.execution_breakdown,
                 signal.execution_frontrun_near_breakout,
@@ -1637,22 +1980,9 @@ class CTARobot(BaseStrategyRobot):
     ) -> str | None:
         if order_flow_assessment is None:
             return None
-        if not order_flow_assessment.entry_allowed and signal.execution_entry_mode not in {"weak_bull_scale_in_limit", "early_bullish_starter_limit", "starter_frontrun_limit", "starter_short_frontrun_limit"}:
-            base_confirmation_ratio = max(0.0, float(self.config.order_flow_confirmation_ratio))
-            strict_order_flow_families = {
-                "near_breakout_release",
-                "price_led_override",
-                "major_bull_retest_ready",
-                "trend_continuation_near_breakout",
-                "bullish_memory_breakout",
-            }
-            trigger_family = str(getattr(signal, "execution_trigger_family", "") or "")
-            hard_order_flow_block = (
-                order_flow_assessment.reason == "empty_order_book"
-                or order_flow_assessment.imbalance_ratio < base_confirmation_ratio
-                or trigger_family in strict_order_flow_families
-            )
-            if hard_order_flow_block:
+        resonance_allowance, _resonance_tag = self._resonance_execution_allowance(signal)
+        if not order_flow_assessment.entry_allowed:
+            if order_flow_assessment.reason == "empty_order_book":
                 logger.info(
                     "CTA order flow blocked | symbol=%s side=%s mode=%s pathway=%s trigger=%s amount=%.8f diagnostics=%s",
                     self.symbol,
@@ -1664,6 +1994,41 @@ class CTARobot(BaseStrategyRobot):
                     order_flow_assessment.diagnostics(),
                 )
                 return "cta:order_flow_blocked"
+            if signal.execution_entry_mode not in {"weak_bull_scale_in_limit", "early_bullish_starter_limit", "starter_frontrun_limit", "starter_short_frontrun_limit"}:
+                base_confirmation_ratio = max(0.0, float(self.config.order_flow_confirmation_ratio))
+                strict_order_flow_families = {
+                    "near_breakout_release",
+                    "price_led_override",
+                    "major_bull_retest",
+                    "bullish_memory_breakout",
+                }
+                trigger_family = str(getattr(signal, "execution_trigger_family", "") or "")
+                if trigger_family in strict_order_flow_families or order_flow_assessment.imbalance_ratio < base_confirmation_ratio:
+                    logger.info(
+                        "CTA order flow blocked | symbol=%s side=%s mode=%s pathway=%s trigger=%s amount=%.8f diagnostics=%s",
+                        self.symbol,
+                        side,
+                        signal.execution_entry_mode,
+                        signal.entry_pathway.name,
+                        signal.execution_trigger_reason,
+                        amount,
+                        order_flow_assessment.diagnostics(),
+                    )
+                    return "cta:order_flow_blocked"
+                if resonance_allowance:
+                    relaxed_of_floor = max(0.35, float(getattr(self.config, "sweep_resonance_of_relaxation_floor", 0.40)))
+                    if order_flow_assessment.imbalance_ratio >= relaxed_of_floor:
+                        logger.info(
+                            "CTA order flow resonance bypass | symbol=%s side=%s mode=%s pathway=%s trigger=%s imbalance=%.3f floor=%.3f",
+                            self.symbol,
+                            side,
+                            signal.execution_entry_mode,
+                            signal.entry_pathway.name,
+                            signal.execution_trigger_reason,
+                            order_flow_assessment.imbalance_ratio,
+                            relaxed_of_floor,
+                        )
+                        return None
             logger.info(
                 "CTA order flow soft warning | symbol=%s side=%s mode=%s pathway=%s trigger=%s amount=%.8f diagnostics=%s",
                 self.symbol,
@@ -1684,6 +2049,21 @@ class CTARobot(BaseStrategyRobot):
         amount: float,
         order_flow_assessment: OrderFlowAssessment | None,
     ) -> str | None:
+        reverse_intercept_reason = self._resolve_reverse_intercept_reason(signal)
+        if reverse_intercept_reason is not None:
+            signal.reverse_intercepted = True
+            signal.reverse_intercept_reason = reverse_intercept_reason
+            logger.info(
+                "CTA reverse intercept blocked | symbol=%s side=%s pathway=%s reason=%s trigger_family=%s oi_change_pct=%.2f funding=%.5f",
+                self.symbol,
+                side,
+                signal.entry_pathway.name,
+                reverse_intercept_reason,
+                signal.execution_trigger_family,
+                float(getattr(signal, "oi_change_pct", 0.0)),
+                float(getattr(signal, "funding_rate", 0.0)),
+            )
+            return "cta:reverse_intercept_blocked"
         if signal.entry_pathway is EntryPathway.FAST_TRACK:
             fast_track_result = self._apply_fast_track_checks(signal)
             if fast_track_result is not None:
@@ -1835,6 +2215,19 @@ class CTARobot(BaseStrategyRobot):
             stop_price = entry_price - stop_distance
         else:
             stop_price = entry_price + stop_distance
+        sweep_stop_price, sweep_stop_reason = self._resolve_sweep_stop_anchor(signal, entry_price, stop_distance)
+        if sweep_stop_price is not None:
+            stop_price = float(sweep_stop_price)
+            stop_distance = abs(float(entry_price) - float(stop_price))
+            logger.info(
+                "CTA sweep stop anchored | symbol=%s side=%s reason=%s entry=%.4f stop=%.4f stop_distance=%.4f",
+                self.symbol,
+                position_side,
+                sweep_stop_reason,
+                float(entry_price),
+                float(stop_price),
+                float(stop_distance),
+            )
         return ManagedPosition(
             side=position_side,
             entry_price=entry_price,
@@ -1846,6 +2239,9 @@ class CTARobot(BaseStrategyRobot):
             stop_distance=stop_distance,
             risk_percent=signal.risk_percent,
             quick_trade_mode=signal.quick_trade_mode,
+            origin_trigger_family=str(signal.execution_trigger_family or "waiting"),
+            origin_trigger_reason=str(signal.execution_trigger_reason or ""),
+            origin_pathway=signal.entry_pathway.name,
         )
 
     def _resolve_filled_entry_price(
@@ -1976,6 +2372,64 @@ class CTARobot(BaseStrategyRobot):
         self._log_trade_open_context(signal=signal, side=side)
         return None, position_side, notional_price, order_flow_assessment
 
+    def _resolve_final_entry_permit(
+        self,
+        *,
+        signal: TrendSignal,
+        side: str,
+        amount: float,
+    ) -> FinalEntryPermit:
+        action, position_side, notional_price, order_flow_assessment = self._prepare_entry_execution_context(
+            signal=signal,
+            side=side,
+            amount=amount,
+        )
+        if action is not None:
+            stage = "final"
+            reason = str(action).replace("cta:", "")
+            if action == "cta:same_direction_cooldown":
+                stage = "cooldown"
+            elif action == "cta:fast_track_reuse_cooldown":
+                stage = "cooldown"
+            elif action == "cta:repeated_entry_zone_cooldown":
+                stage = "cooldown"
+            elif action == "cta:risk_blocked":
+                stage = "risk_budget"
+                reason = "risk_blocked"
+            elif action == "cta:reward_risk_blocked":
+                stage = "reward_risk"
+                reason = "reward_risk_blocked"
+            return FinalEntryPermit(
+                allowed=False,
+                status="blocked",
+                action=action,
+                stage=stage,
+                reason=reason,
+                position_side=position_side,
+                notional_price=float(notional_price),
+                order_flow_assessment=order_flow_assessment,
+            )
+
+        limit_price_protected = bool(
+            order_flow_assessment is not None
+            and getattr(order_flow_assessment, "recommended_limit_price", None) not in (None, 0, "0")
+        )
+        if order_flow_assessment is not None:
+            try:
+                setattr(order_flow_assessment, "final_permit", SimpleNamespace(limit_price_protected=limit_price_protected))
+            except Exception:
+                pass
+        return FinalEntryPermit(
+            allowed=True,
+            status="limit_protect" if limit_price_protected else "allowed",
+            action=None,
+            stage="final",
+            reason="limit_protect" if limit_price_protected else "allowed",
+            position_side=position_side,
+            notional_price=float(notional_price),
+            order_flow_assessment=order_flow_assessment,
+        )
+
     def _execute_entry_and_build_position(
         self,
         *,
@@ -2030,6 +2484,23 @@ class CTARobot(BaseStrategyRobot):
                 "relaxed_reasons": list(signal.relaxed_reasons),
                 "risk_percent": float(signal.risk_percent),
                 "notional_price": float(notional_price),
+                "ml_used_model": bool(signal.ml_used_model),
+                "ml_prediction": int(signal.ml_prediction),
+                "ml_probability_up": float(signal.ml_probability_up),
+                "ml_aligned_confidence": float(signal.ml_aligned_confidence),
+                "ml_gate_passed": bool(signal.ml_gate_passed),
+                "ml_reason": str(signal.ml_reason),
+                "entry_location_score": float(signal.entry_location_score),
+                "entry_location_reasons": list(signal.entry_location_reasons),
+                "liquidity_sweep": bool(signal.liquidity_sweep),
+                "liquidity_sweep_side": str(signal.liquidity_sweep_side),
+                "oi_change_pct": float(signal.oi_change_pct),
+                "funding_rate": float(signal.funding_rate),
+                "resonance_allowed": bool(signal.resonance_allowed),
+                "resonance_reason": str(signal.resonance_reason),
+                "reverse_intercepted": bool(signal.reverse_intercepted),
+                "reverse_intercept_reason": str(signal.reverse_intercept_reason),
+                "sweep_extreme_price": signal.sweep_extreme_price,
             },
         )
         self._arm_fast_track_reuse_cooldown(signal)
@@ -2051,22 +2522,22 @@ class CTARobot(BaseStrategyRobot):
             self._publish_risk_profile(None)
             return amount_result
 
-        context_result, position_side, notional_price, order_flow_assessment = self._prepare_entry_execution_context(
+        permit = self._resolve_final_entry_permit(
             signal=signal,
             side=side,
             amount=amount,
         )
-        if context_result is not None:
+        if not permit.allowed:
             self._publish_risk_profile(None)
-            return context_result
+            return str(permit.action or "cta:risk_blocked")
 
         execution_result = self._execute_entry_and_build_position(
             signal=signal,
             side=side,
             amount=amount,
-            position_side=position_side,
-            notional_price=notional_price,
-            order_flow_assessment=order_flow_assessment,
+            position_side=permit.position_side,
+            notional_price=permit.notional_price,
+            order_flow_assessment=permit.order_flow_assessment,
             sentiment_halved=sentiment_halved,
         )
         if execution_result in {"cta:low_fill_ratio", "cta:risk_blocked"}:
@@ -2738,6 +3209,9 @@ class CTARobot(BaseStrategyRobot):
             event_type="trade_close",
             side=position.side,
             action=reason or "unspecified",
+            trigger_family=str(position.origin_trigger_family or "waiting"),
+            trigger_reason=str(position.origin_trigger_reason or ""),
+            pathway=str(position.origin_pathway or ""),
             price=float(exit_price),
             size=float(exit_amount),
             pnl=float(pnl),
@@ -2747,6 +3221,9 @@ class CTARobot(BaseStrategyRobot):
                 "roi": float(roi),
                 "stop_price": float(position.stop_price),
                 "best_price": float(position.best_price),
+                "origin_trigger_family": str(position.origin_trigger_family or "waiting"),
+                "origin_trigger_reason": str(position.origin_trigger_reason or ""),
+                "origin_pathway": str(position.origin_pathway or ""),
             },
         )
 
