@@ -1,3 +1,9 @@
+"""Legacy hands coordinator kept for run_the_hands and compatibility tests.
+
+Not on the newer main CTA/Grid bootstrapping path; keep as a thin wrapper until
+callers are migrated or removed.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

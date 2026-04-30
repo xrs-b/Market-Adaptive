@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from market_adaptive.config import _read_yaml, load_config
+from market_adaptive.config import CTAConfig, _read_yaml, load_config
 from market_adaptive.db import DatabaseInitializer
 
 
@@ -77,6 +77,10 @@ class MarketAdaptiveBootstrapTests(unittest.TestCase):
         self.assertEqual(config.cta.order_flow_high_conviction_ratio, 2.0)
         self.assertEqual(config.cta.order_flow_limit_buffer_bps, 3.0)
         self.assertEqual(config.cta.order_flow_max_slippage_bps, 12.0)
+        self.assertEqual(config.cta.entry_location_score_min, -0.60)
+        self.assertFalse(config.cta.disable_trend_continuation_long)
+        self.assertFalse(config.cta.disable_bullish_memory_breakout_long)
+        self.assertEqual(config.cta.entry_location_min_score, -0.60)
         self.assertEqual(config.cta.cta_assist_trim_ratio, 0.25)
         self.assertEqual(config.runtime.fast_risk_check_interval_seconds, 1)
         self.assertTrue(config.runtime.start_grid_websocket_on_boot)
@@ -98,6 +102,11 @@ class MarketAdaptiveBootstrapTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "Duplicate config key detected: cta"):
                 _read_yaml(config_path)
+
+    def test_cta_entry_location_score_min_normalizes_legacy_percent_scale(self) -> None:
+        config = CTAConfig(entry_location_score_min=-60)
+        self.assertEqual(config.entry_location_score_min, -0.60)
+        self.assertEqual(config.entry_location_min_score, -0.60)
 
     def test_database_initializer_creates_market_status_table(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

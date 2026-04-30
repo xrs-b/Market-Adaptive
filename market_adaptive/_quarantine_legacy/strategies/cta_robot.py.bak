@@ -1,0 +1,2265 @@
+from __future__ import annotations
+
+import logging
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from enum import Enum
+
+from market_adaptive.config import CTAConfig, ExecutionConfig
+from market_adaptive.coordination import StrategyRuntimeContext
+from market_adaptive.indicators import (
+    OBVConfirmationSnapshot,
+    VolumeProfileSnapshot,
+    compute_atr,
+    compute_obv,
+    compute_obv_confirmation_snapshot,
+    compute_volume_profile,
+)
+from market_adaptive.risk import CTARiskProfile, LogicalPositionSnapshot
+from market_adaptive.sentiment import SentimentAnalyst
+from market_adaptive.strategies.base import BaseStrategyRobot
+from market_adaptive.strategies.mtf_engine import MTFSignal, MultiTimeframeSignalEngine
+from market_adaptive.strategies.obv_gate import resolve_dynamic_obv_gate_for_signal
+from market_adaptive.strategies.order_flow_sentinel import OrderFlowAssessment, OrderFlowSentinel
+from market_adaptive.strategies.signal_profiler import SignalProfiler
+
+logger = logging.getLogger(__name__)
+
+
+class EntryPathway(Enum):
+    FAST_TRACK = "fast_track"
+    STANDARD = "standard"
+    STRICT = "strict"
+
+
+@dataclass
+class TrendSignal:
+    direction: int
+    raw_direction: int
+    major_direction: int
+    major_bias_score: float = 0.0
+    weak_bull_bias: bool = False
+    weak_bear_bias: bool = False
+    early_bullish: bool = False
+    early_bearish: bool = False
+    entry_size_multiplier: float = 1.0
+    swing_rsi: float = 0.0
+    swing_rsi_slope: float = 0.0
+    bullish_score: float = 0.0
+    bearish_score: float = 0.0
+    bullish_threshold: float = 0.0
+    bearish_threshold: float = 0.0
+    bullish_ready: bool = False
+    bearish_ready: bool = False
+    execution_entry_mode: str = "breakout_confirmed"
+    execution_golden_cross: bool = False
+    execution_breakout: bool = False
+    execution_breakdown: bool = False
+    execution_memory_active: bool = False
+    execution_latch_active: bool = False
+    execution_latch_price: float | None = None
+    execution_frontrun_near_breakout: bool = False
+    execution_memory_bars_ago: int | None = None
+    execution_trigger_family: str = "waiting"
+    execution_trigger_group: str = "waiting"
+    execution_trigger_reason: str = ""
+    volatility_squeeze_breakout: bool = False
+    mtf_aligned: bool = False
+    obv_bias: int = 0
+    obv_confirmation: OBVConfirmationSnapshot = field(default_factory=lambda: OBVConfirmationSnapshot(0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+    obv_threshold: float | None = None
+    obv_confirmation_passed: bool = False
+    volume_filter_passed: bool = False
+    volume_profile: VolumeProfileSnapshot | None = None
+    long_setup_blocked: bool = False
+    long_setup_reason: str = ""
+    price: float = 0.0
+    atr: float = 0.0
+    risk_percent: float = 0.0
+    blocker_reason: str = ""
+    data_alignment_valid: bool = True
+    data_mismatch_ms: int = 0
+    relaxed_entry: bool = False
+    relaxed_reasons: tuple[str, ...] = ()
+    quick_trade_mode: bool = False
+    entry_pathway: EntryPathway = EntryPathway.STRICT
+    signal_quality_tier: str = "TIER_LOW"
+    signal_confidence: float = 0.0
+    signal_strength_bonus: float = 0.0
+
+    @property
+    def obv_signal_strength(self) -> float:
+        return self.obv_confirmation.zscore
+
+    @property
+    def obv_signal_confirmed(self) -> bool:
+        return self.obv_confirmation_passed
+
+    @property
+    def obv_slope_angle(self) -> float:
+        return self.obv_signal_strength
+
+    @property
+    def obv_slope_passed(self) -> bool:
+        return self.obv_signal_confirmed
+
+
+@dataclass
+class CTANearMissSample:
+    symbol: str
+    captured_at: float
+    execution_trigger_family: str = "waiting"
+    execution_trigger_group: str = "waiting"
+    execution_trigger_reason: str = ""
+    execution_memory_active: bool = False
+    execution_memory_bars_ago: int | None = None
+    execution_breakout: bool = False
+    execution_golden_cross: bool = False
+    obv_zscore: float = 0.0
+    obv_threshold: float = 0.0
+    obv_gap: float = 0.0
+    price: float = 0.0
+
+
+@dataclass(frozen=True)
+class ValueAreaDecision:
+    inside_value_area: bool
+    blocked: bool
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class HighMomentumClearanceDecision:
+    eligible: bool
+    used_rsi_override: bool = False
+    used_value_area_override: bool = False
+
+    @property
+    def activated(self) -> bool:
+        return bool(self.eligible and self.used_rsi_override and self.used_value_area_override)
+
+
+@dataclass
+class EntryOrderResult:
+    order: dict
+    used_limit_order: bool
+    filled_amount: float
+    average_price: float | None
+
+
+@dataclass
+class ManagedPosition:
+    side: str
+    entry_price: float
+    initial_size: float
+    remaining_size: float
+    stop_price: float
+    best_price: float
+    atr_value: float
+    stop_distance: float
+    risk_percent: float = 0.0
+    first_target_hit: bool = False
+    second_target_hit: bool = False
+    max_unrealized_profit_pct: float = 0.0
+    quick_trade_mode: bool = False
+    opened_at_ms: int = 0
+
+    @property
+    def direction(self) -> int:
+        return 1 if self.side == "long" else -1
+
+    @property
+    def exit_side(self) -> str:
+        return "sell" if self.side == "long" else "buy"
+
+    def profit_ratio(self, price: float) -> float:
+        if self.side == "long":
+            return (price - self.entry_price) / self.entry_price
+        return (self.entry_price - price) / self.entry_price
+
+    def update_dynamic_stop(self, price: float, atr: float, stop_multiplier: float) -> None:
+        raw_profit_ratio = float(self.profit_ratio(price))
+        self.max_unrealized_profit_pct = max(float(self.max_unrealized_profit_pct), raw_profit_ratio * 100.0)
+
+        current_stop_distance = max(float(atr) * float(stop_multiplier), float(price) * 0.001)
+        if self.max_unrealized_profit_pct > 4.0:
+            current_stop_distance = min(current_stop_distance, max(float(atr) * 0.5, float(price) * 0.001))
+
+        self.atr_value = float(atr)
+        self.stop_distance = current_stop_distance
+
+        if self.side == "long":
+            self.best_price = max(self.best_price, price)
+            candidate = self.best_price - current_stop_distance
+            if self.max_unrealized_profit_pct > 2.0:
+                candidate = max(candidate, float(self.entry_price))
+            self.stop_price = max(self.stop_price, candidate)
+            return
+
+        self.best_price = min(self.best_price, price)
+        candidate = self.best_price + current_stop_distance
+        if self.max_unrealized_profit_pct > 2.0:
+            candidate = min(candidate, float(self.entry_price))
+        self.stop_price = min(self.stop_price, candidate)
+
+    def stop_hit(self, price: float) -> bool:
+        if self.side == "long":
+            return price <= self.stop_price
+        return price >= self.stop_price
+
+
+class CTARobot(BaseStrategyRobot):
+    strategy_name = "cta"
+    activation_status = "trend"
+    activation_statuses = ("trend", "trend_impulse", "range_breakout_ready")
+    _QUALITY_TIER_RANK = {"TIER_LOW": 0, "TIER_MEDIUM": 1, "TIER_HIGH": 2}
+
+    def __init__(
+        self,
+        client,
+        database,
+        config: CTAConfig,
+        execution_config: ExecutionConfig,
+        notifier=None,
+        risk_manager=None,
+        sentiment_analyst: SentimentAnalyst | None = None,
+        runtime_context: StrategyRuntimeContext | None = None,
+        signal_profiler: SignalProfiler | None = None,
+        grid_center_provider=None,
+    ) -> None:
+        super().__init__(client=client, database=database, symbol=config.symbol, notifier=notifier)
+        self.config = config
+        self.execution_config = execution_config
+        self.risk_manager = risk_manager
+        self.sentiment_analyst = sentiment_analyst
+        self.runtime_context = runtime_context
+        self.signal_profiler = signal_profiler
+        self.grid_center_provider = grid_center_provider
+        self.position: ManagedPosition | None = None
+        self.mtf_engine = MultiTimeframeSignalEngine(client, config)
+        self.order_flow_sentinel = OrderFlowSentinel(client, config)
+        self._last_signal_heartbeat_at = 0.0
+        self._last_major_direction: int | None = None
+        self._last_bullish_ready: bool | None = None
+        self._near_miss_samples: list[CTANearMissSample] = []
+        self._near_miss_window_started_at: float | None = None
+        self._last_near_miss_report_at = 0.0
+        self._time_provider = time.time
+        self._signal_flip_pending = False
+        self._same_direction_cooldown_until: dict[str, float] = {"long": 0.0, "short": 0.0}
+        self._same_direction_stop_events: dict[str, deque[float]] = {"long": deque(), "short": deque()}
+        self._fast_track_reuse_until: dict[str, float] = {"long": 0.0, "short": 0.0}
+        self._fast_track_reuse_signature: dict[str, tuple | None] = {"long": None, "short": None}
+
+    def _resolve_obv_gate(self, signal: MTFSignal):
+        return resolve_dynamic_obv_gate_for_signal(
+            signal,
+            configured_threshold=float(self.config.obv_zscore_threshold),
+            obv_sma_period=int(self.config.obv_sma_period),
+            obv_zscore_window=int(self.config.obv_zscore_window),
+        )
+
+    def _evaluate_high_momentum_clearance(
+        self,
+        *,
+        mtf_signal: MTFSignal,
+        inside_value_area: bool,
+        raw_direction: int,
+    ) -> HighMomentumClearanceDecision:
+        long_eligible = bool(
+            raw_direction > 0
+            and float(mtf_signal.bullish_score) >= 75.0
+            and mtf_signal.execution_trigger.frontrun_near_breakout
+        )
+        short_eligible = bool(
+            raw_direction < 0
+            and float(getattr(mtf_signal, "bearish_score", 0.0)) >= 75.0
+            and mtf_signal.execution_trigger.frontrun_near_breakout
+        )
+        eligible = bool(long_eligible or short_eligible)
+        used_rsi_override = bool(eligible and getattr(mtf_signal, "rsi_blocking_overridden", False))
+        used_value_area_override = bool(eligible and inside_value_area)
+        return HighMomentumClearanceDecision(
+            eligible=eligible,
+            used_rsi_override=used_rsi_override,
+            used_value_area_override=used_value_area_override,
+        )
+
+    def _resolve_entry_pathway(self, mtf_signal: MTFSignal) -> EntryPathway:
+        quality_tier = str(getattr(getattr(mtf_signal, "signal_quality_tier", None), "name", "TIER_LOW"))
+        confidence = float(getattr(mtf_signal, "signal_confidence", 0.0) or 0.0)
+        fully_aligned = bool(getattr(mtf_signal, "fully_aligned", False))
+        high_confidence_floor = float(getattr(self.config, "tier_high_confidence_threshold", 0.8))
+
+        if quality_tier == "TIER_HIGH" and fully_aligned and confidence >= high_confidence_floor:
+            return EntryPathway.FAST_TRACK
+        if quality_tier == "TIER_MEDIUM":
+            return EntryPathway.STANDARD
+        return EntryPathway.STRICT
+
+    def _resolve_dynamic_stop_loss_multiplier(self, signal: TrendSignal) -> float:
+        base_multiplier = float(self.config.stop_loss_atr)
+        if not bool(getattr(self.config, "dynamic_stop_loss_enabled", True)):
+            return base_multiplier
+        score = float(signal.bullish_score if signal.direction >= 0 else signal.bearish_score)
+        score_ratio = min(1.0, max(0.0, score / 100.0))
+        min_scale = float(getattr(self.config, "dynamic_stop_loss_min_scale", 0.85))
+        max_scale = float(getattr(self.config, "dynamic_stop_loss_max_scale", 1.05))
+        scale = max_scale - ((max_scale - min_scale) * score_ratio)
+        return base_multiplier * scale
+
+    def _evaluate_value_area_decision(
+        self,
+        *,
+        volume_profile: VolumeProfileSnapshot | None,
+        current_price: float,
+        atr_value: float,
+        major_direction: int,
+        bullish_score: float,
+        bearish_score: float,
+        execution_frontrun_near_breakout: bool,
+        raw_direction: int,
+    ) -> ValueAreaDecision:
+        if volume_profile is None:
+            return ValueAreaDecision(inside_value_area=False, blocked=False)
+
+        inside_value_area = bool(volume_profile.contains_price(current_price))
+        if not inside_value_area:
+            return ValueAreaDecision(inside_value_area=False, blocked=False)
+
+        edge_threshold = float(getattr(self.config, "value_area_edge_atr_multiplier", 1.0)) * max(0.0, float(atr_value))
+        value_area_high = float(volume_profile.value_area_high)
+        value_area_low = float(volume_profile.value_area_low)
+
+        drive_first_score = float(getattr(self.config, "drive_first_tradeable_score", 60.0))
+        if raw_direction > 0 and float(bullish_score) >= 75.0 and bool(execution_frontrun_near_breakout):
+            return ValueAreaDecision(inside_value_area=True, blocked=False, reason='High Momentum')
+        if raw_direction < 0 and float(bearish_score) >= 75.0 and bool(execution_frontrun_near_breakout):
+            return ValueAreaDecision(inside_value_area=True, blocked=False, reason='High Momentum')
+
+        if int(major_direction) > 0 and raw_direction > 0 and float(bullish_score) >= drive_first_score and float(current_price) >= value_area_high - edge_threshold:
+            return ValueAreaDecision(inside_value_area=True, blocked=False, reason='Edge Proximity')
+
+        if int(major_direction) < 0 and raw_direction < 0 and float(bearish_score) >= drive_first_score and float(current_price) <= value_area_low + edge_threshold:
+            return ValueAreaDecision(inside_value_area=True, blocked=False, reason='Edge Proximity')
+
+        if raw_direction < 0 and float(current_price) >= value_area_high - edge_threshold:
+            return ValueAreaDecision(inside_value_area=True, blocked=False, reason='VAH Proximity')
+
+        return ValueAreaDecision(inside_value_area=True, blocked=True)
+
+    def _relaxed_short_passes_quality_gate(self, signal: TrendSignal) -> bool:
+        if signal.direction >= 0 or not signal.relaxed_entry:
+            return True
+        bearish_score = float(getattr(signal, "bearish_score", 0.0))
+        bullish_score = float(getattr(signal, "bullish_score", 0.0))
+        if bearish_score < float(getattr(self.config, "relaxed_short_minimum_score", 48.0)):
+            return False
+        if (
+            int(signal.major_direction) > 0
+            and bullish_score > bearish_score
+            and (bullish_score - bearish_score) > float(getattr(self.config, "relaxed_short_max_countertrend_score_gap", 12.0))
+        ):
+            return False
+        if bool(getattr(self.config, "relaxed_short_require_early_or_breakdown", True)):
+            if not (bool(signal.early_bearish) or bool(signal.execution_breakdown) or bool(signal.weak_bear_bias)):
+                return False
+        return True
+
+    def _quality_filter_short_signal(self, signal: TrendSignal) -> TrendSignal:
+        if signal.direction >= 0:
+            return signal
+        if not self._relaxed_short_passes_quality_gate(signal):
+            blocker_reason = "Blocked_By_RELAXED_SHORT_LOW_QUALITY"
+            return TrendSignal(
+                **{
+                    **signal.__dict__,
+                    "direction": 0,
+                    "long_setup_blocked": True,
+                    "long_setup_reason": "relaxed_short_low_quality",
+                    "blocker_reason": blocker_reason,
+                    "relaxed_entry": False,
+                    "relaxed_reasons": tuple(r for r in signal.relaxed_reasons if not str(r).startswith("SHORT_")),
+                }
+            )
+        return signal
+
+    def _log_value_area_event(
+        self,
+        *,
+        volume_profile: VolumeProfileSnapshot | None,
+        current_price: float,
+        decision: ValueAreaDecision,
+    ) -> None:
+        if volume_profile is None or not decision.inside_value_area:
+            return
+        context = (
+            f'POC: {float(volume_profile.poc_price):.4f}, '
+            f'VAH: {float(volume_profile.value_area_high):.4f}, '
+            f'VAL: {float(volume_profile.value_area_low):.4f}, '
+            f'Price: {float(current_price):.4f}'
+        )
+        if decision.blocked:
+            logger.info('Blocked: Inside VA [%s]', context)
+            return
+        if decision.reason:
+            logger.info('Passed: VA Override [Reason: %s] [%s]', decision.reason, context)
+
+    def should_notify_action(self, action: str) -> bool:
+        if action in {
+            "cta:hold",
+            "cta:no_signal",
+            "cta:insufficient_data",
+            "cta:risk_blocked",
+            "cta:range_filter_blocked",
+            "cta:bullish_ready",
+            "cta:order_flow_blocked",
+            "cta:slippage_blocked",
+            "skip:inactive",
+        }:
+            return False
+        if action.startswith("cta:open_"):
+            return False
+        return super().should_notify_action(action)
+
+    def flatten_and_cancel_all(self, reason: str) -> None:
+        super().flatten_and_cancel_all(reason)
+        self.position = None
+        self._publish_risk_profile(None)
+
+    def force_risk_exit(self, reason: str) -> str:
+        if self.position is None:
+            self.client.cancel_all_orders(self.symbol)
+            self._publish_risk_profile(None)
+            return "cta:risk_exit_no_position"
+
+        self.client.cancel_all_orders(self.symbol)
+        self._close_remaining_position(reason=reason)
+        self._publish_risk_profile(None)
+        return "cta:risk_exit_all_out"
+
+    def get_logical_position(self) -> LogicalPositionSnapshot | None:
+        if self.position is None:
+            return None
+        return LogicalPositionSnapshot(
+            symbol=self.symbol,
+            side=self.position.side,
+            size=self._round_size(self.position.remaining_size),
+            strategy_name=self.strategy_name,
+        )
+
+    def reset_local_position(self, reason: str) -> None:
+        previous_side = self.position.side if self.position is not None else None
+        self.position = None
+        if previous_side is not None and reason in {"position_mismatch", "exchange_flat"}:
+            self._activate_same_direction_cooldown(previous_side, f"recovery_reset:{reason}")
+        self._publish_risk_profile(None)
+
+    def _cooldown_remaining_seconds(self, side: str) -> int:
+        until_ts = float(self._same_direction_cooldown_until.get(side, 0.0))
+        remaining = max(0.0, until_ts - float(self._time_provider()))
+        return int(remaining)
+
+    def _build_fast_track_reuse_signature(self, signal: TrendSignal) -> tuple | None:
+        if signal.entry_pathway is not EntryPathway.FAST_TRACK or signal.direction <= 0:
+            return None
+        return (
+            int(signal.direction),
+            str(signal.execution_trigger_family or "waiting"),
+            str(signal.execution_trigger_reason or ""),
+            signal.execution_memory_bars_ago,
+        )
+
+    def _arm_fast_track_reuse_cooldown(self, signal: TrendSignal) -> None:
+        signature = self._build_fast_track_reuse_signature(signal)
+        if signature is None:
+            return
+        cooldown_seconds = max(0, int(getattr(self.config, "fast_track_reuse_cooldown_seconds", 300)))
+        if cooldown_seconds <= 0:
+            return
+        side = "long" if signal.direction > 0 else "short"
+        self._fast_track_reuse_signature[side] = signature
+        self._fast_track_reuse_until[side] = float(self._time_provider()) + cooldown_seconds
+        logger.info(
+            "CTA fast-track reuse cooldown armed | symbol=%s side=%s cooldown=%ss signature=%s",
+            self.symbol,
+            side,
+            cooldown_seconds,
+            signature,
+        )
+
+    def _fast_track_reuse_remaining_seconds(self, signal: TrendSignal) -> int:
+        signature = self._build_fast_track_reuse_signature(signal)
+        if signature is None:
+            return 0
+        side = "long" if signal.direction > 0 else "short"
+        if self._fast_track_reuse_signature.get(side) != signature:
+            return 0
+        until_ts = float(self._fast_track_reuse_until.get(side, 0.0))
+        remaining = max(0.0, until_ts - float(self._time_provider()))
+        return int(remaining)
+
+    def _activate_same_direction_cooldown(self, side: str, reason: str) -> None:
+        now_ts = float(self._time_provider())
+        cooldown_seconds = max(0, int(getattr(self.config, "same_direction_stop_cooldown_seconds", 300)))
+        escalation_window_seconds = max(1, int(getattr(self.config, "same_direction_stop_cooldown_window_seconds", 1200)))
+        escalation_count = max(2, int(getattr(self.config, "same_direction_stop_cooldown_escalation_count", 2)))
+        escalation_seconds = max(cooldown_seconds, int(getattr(self.config, "same_direction_stop_cooldown_escalation_seconds", 900)))
+        if cooldown_seconds <= 0:
+            return
+
+        events = self._same_direction_stop_events.setdefault(side, deque())
+        while events and (now_ts - events[0]) > escalation_window_seconds:
+            events.popleft()
+        events.append(now_ts)
+
+        if len(events) >= escalation_count:
+            cooldown_seconds = escalation_seconds
+            reason = f"{reason}|escalated:{len(events)}in{escalation_window_seconds}s"
+
+        until_ts = now_ts + cooldown_seconds
+        self._same_direction_cooldown_until[side] = until_ts
+        logger.info(
+            "CTA same-direction cooldown armed | symbol=%s side=%s reason=%s cooldown=%ss recent_stopouts=%s window=%ss",
+            self.symbol,
+            side,
+            reason,
+            cooldown_seconds,
+            len(events),
+            escalation_window_seconds,
+        )
+
+    def execute_active_cycle(self) -> str:
+        signal = self._build_trend_signal()
+        if signal is None:
+            self._publish_risk_profile(None)
+            return "cta:insufficient_data"
+
+        self._maybe_log_signal_heartbeat(signal)
+        self._request_urgent_wakeup_on_signal_transition(signal)
+        self._collect_near_miss_sample(signal)
+        self._maybe_flush_near_miss_report()
+
+        coordination_action = self._apply_runtime_coordination(signal)
+        if coordination_action is not None:
+            return coordination_action
+
+        actions: list[str] = []
+        closed_position = False
+
+        if self.position is not None:
+            actions, closed_position = self._manage_position(signal)
+            if actions:
+                return "+".join(actions)
+            if closed_position:
+                self._publish_risk_profile(None)
+                return "cta:hold"
+
+        if self.position is None and signal.direction != 0:
+            return self._open_position(signal)
+
+        self._publish_risk_profile(signal)
+        if self.position is None and signal.long_setup_blocked:
+            return "cta:range_filter_blocked"
+        if self.position is None and signal.bullish_ready and signal.raw_direction == 0:
+            return "cta:bullish_ready"
+        return "cta:no_signal" if self.position is None else "cta:hold"
+
+    def _build_trend_signal(self) -> TrendSignal | None:
+        mtf_signal = self.mtf_engine.build_signal()
+        if mtf_signal is None:
+            return None
+
+        execution_frame = mtf_signal.execution_frame
+        execution_obv = compute_obv(execution_frame)
+        atr_series = compute_atr(execution_frame, length=self.config.atr_period)
+
+        obv_confirmation = compute_obv_confirmation_snapshot(
+            execution_frame,
+            obv=execution_obv,
+            sma_period=self.config.obv_sma_period,
+            zscore_window=self.config.obv_zscore_window,
+        )
+        obv_bias = 1 if obv_confirmation.above_sma else -1 if obv_confirmation.below_sma else 0
+        bullish_raw_direction = 1 if (mtf_signal.fully_aligned and int(mtf_signal.major_direction) >= 0 and not bool(getattr(mtf_signal, "bearish_ready", False))) else 0
+        bearish_raw_direction = -1 if (
+            mtf_signal.fully_aligned
+            and bool(getattr(mtf_signal, "bearish_ready", False))
+            and (
+                int(mtf_signal.major_direction) < 0
+                or bool(getattr(mtf_signal, "weak_bear_bias", False))
+                or bool(getattr(mtf_signal, "early_bearish", False))
+            )
+        ) else 0
+        raw_direction = bullish_raw_direction if bullish_raw_direction != 0 else bearish_raw_direction
+        entry_pathway = self._resolve_entry_pathway(mtf_signal)
+        signal_quality_tier = str(getattr(getattr(mtf_signal, "signal_quality_tier", None), "name", "TIER_LOW"))
+        signal_confidence = float(getattr(mtf_signal, "signal_confidence", 0.0) or 0.0)
+        signal_strength_bonus = float(getattr(mtf_signal, "signal_strength_bonus", 0.0) or 0.0)
+        obv_gate = self._resolve_obv_gate(mtf_signal)
+        obv_threshold = float(obv_gate.threshold)
+        obv_exempt = bool(obv_gate.exempt)
+        drive_first_tradeable = bool(float(mtf_signal.bullish_score) >= float(getattr(self.config, "drive_first_tradeable_score", 60.0)))
+        relaxed_obv_allowed = bool(
+            raw_direction > 0
+            and int(mtf_signal.major_direction) > 0
+            and drive_first_tradeable
+            and float(obv_confirmation.zscore) > float(obv_threshold)
+        )
+        volume_filter_passed = False
+        if raw_direction > 0:
+            volume_filter_passed = bool(obv_gate.passed(obv_confirmation) or relaxed_obv_allowed)
+        elif raw_direction < 0:
+            volume_filter_passed = bool(obv_gate.passed(obv_confirmation))
+        current_price = float(execution_frame["close"].iloc[-1])
+        volume_profile = compute_volume_profile(
+            execution_frame,
+            lookback_hours=self.config.volume_profile_lookback_hours,
+            value_area_pct=self.config.volume_profile_value_area_pct,
+            bin_count=self.config.volume_profile_bin_count,
+        )
+        inside_value_area = bool(volume_profile.contains_price(current_price)) if volume_profile is not None else False
+        high_momentum_clearance = self._evaluate_high_momentum_clearance(
+            mtf_signal=mtf_signal,
+            inside_value_area=inside_value_area,
+            raw_direction=raw_direction,
+        )
+
+        final_direction = raw_direction
+        long_setup_blocked = False
+        long_setup_reason = ""
+        obv_confirmation_passed = True
+        relaxed_reasons: list[str] = []
+        quick_trade_mode = False
+        standard_path = entry_pathway is EntryPathway.STANDARD
+        standard_obv_floor = max(
+            float(getattr(self.config, "near_breakout_release_obv_zscore_floor", -0.25)),
+            float(obv_threshold) - 1.0,
+        )
+
+        if raw_direction > 0:
+            obv_confirmation_passed = volume_filter_passed
+            value_area_decision = self._evaluate_value_area_decision(
+                volume_profile=volume_profile,
+                current_price=current_price,
+                atr_value=float(atr_series.iloc[-1]),
+                major_direction=int(mtf_signal.major_direction),
+                bullish_score=float(mtf_signal.bullish_score),
+                bearish_score=float(getattr(mtf_signal, "bearish_score", 0.0)),
+                execution_frontrun_near_breakout=bool(mtf_signal.execution_trigger.frontrun_near_breakout),
+                raw_direction=raw_direction,
+            )
+            if not obv_exempt and not obv_confirmation_passed:
+                if standard_path and float(obv_confirmation.zscore) >= standard_obv_floor:
+                    relaxed_reasons.append(f"STANDARD_OBV({float(obv_confirmation.zscore):.2f}) >= Floor({float(standard_obv_floor):.2f})")
+                else:
+                    long_setup_blocked = True
+                    long_setup_reason = "obv_strength_not_confirmed"
+            elif not obv_exempt and not obv_confirmation.above_sma:
+                if relaxed_obv_allowed:
+                    relaxed_reasons.append(f"OBV({float(obv_confirmation.zscore):.2f}) > Floor({float(obv_threshold):.2f})")
+                elif standard_path and float(obv_confirmation.zscore) >= standard_obv_floor:
+                    relaxed_reasons.append(f"STANDARD_OBV_BELOW_SMA({float(obv_confirmation.zscore):.2f})")
+                else:
+                    long_setup_blocked = True
+                    long_setup_reason = "obv_below_sma"
+            elif volume_profile is None:
+                if standard_path:
+                    relaxed_reasons.append("STANDARD_NO_VOLUME_PROFILE")
+                else:
+                    long_setup_blocked = True
+                    long_setup_reason = "missing_volume_profile"
+            elif not volume_profile.above_poc(current_price):
+                poc_reclaim_tolerance = max(
+                    float(getattr(self.config, "value_area_edge_atr_multiplier", 1.0)) * max(float(atr_series.iloc[-1]), 0.0),
+                    float(current_price) * 0.001,
+                )
+                poc_gap = max(0.0, float(volume_profile.poc_price) - float(current_price))
+                if standard_path and bool(mtf_signal.execution_trigger.frontrun_near_breakout or mtf_signal.execution_trigger.prior_high_break) and poc_gap <= poc_reclaim_tolerance:
+                    relaxed_reasons.append(f"STANDARD_POC_RECLAIM_OK({poc_gap:.4f})")
+                else:
+                    long_setup_blocked = True
+                    long_setup_reason = "below_poc"
+            elif value_area_decision.blocked:
+                if standard_path:
+                    relaxed_reasons.append("STANDARD_VA_BYPASS")
+                else:
+                    long_setup_blocked = True
+                    long_setup_reason = "inside_value_area"
+            elif value_area_decision.inside_value_area and value_area_decision.reason:
+                if value_area_decision.reason in {"High Momentum", "Edge Proximity"}:
+                    relaxed_reasons.append(f"VA:{value_area_decision.reason}")
+                self._log_value_area_event(
+                    volume_profile=volume_profile,
+                    current_price=current_price,
+                    decision=value_area_decision,
+                )
+            elif not volume_profile.above_value_area(current_price):
+                if standard_path:
+                    relaxed_reasons.append("STANDARD_BELOW_VAH_OK")
+                else:
+                    long_setup_blocked = True
+                    long_setup_reason = "below_value_area_high"
+
+            if long_setup_reason == "inside_value_area":
+                self._log_value_area_event(
+                    volume_profile=volume_profile,
+                    current_price=current_price,
+                    decision=value_area_decision,
+                )
+
+            if long_setup_blocked:
+                final_direction = 0
+
+            if final_direction > 0 and high_momentum_clearance.activated:
+                logger.info("[FINAL_TRIGGER_OVERRIDE] Full Clearance - All Guards Relaxed for High Momentum Breakout")
+            if final_direction > 0 and bool(getattr(mtf_signal, "rsi_blocking_overridden", False)):
+                relaxed_reasons.append(
+                    f"RSI({float(mtf_signal.swing_rsi):.2f}) tolerated with Score({float(mtf_signal.bullish_score):.0f})"
+                )
+        elif raw_direction < 0:
+            obv_confirmation_passed = volume_filter_passed
+            if not volume_filter_passed:
+                final_direction = 0
+                long_setup_blocked = True
+                long_setup_reason = "obv_above_sma" if bool(obv_confirmation.above_sma) else "obv_strength_not_confirmed"
+            elif volume_profile is None:
+                final_direction = 0
+                long_setup_blocked = True
+                long_setup_reason = "missing_volume_profile"
+            elif float(current_price) >= float(volume_profile.poc_price):
+                final_direction = 0
+                long_setup_blocked = True
+                long_setup_reason = "above_poc"
+            if long_setup_blocked and long_setup_reason == "obv_strength_not_confirmed":
+                bearish_score = float(getattr(mtf_signal, "bearish_score", 0.0))
+                bullish_score = float(getattr(mtf_signal, "bullish_score", 0.0))
+                obv_scalp_candidate = bool(
+                    bearish_score >= float(getattr(self.config, "obv_scalp_min_bearish_score", 52.0))
+                    and bullish_score <= float(getattr(self.config, "obv_scalp_max_bullish_score", 62.0))
+                    and bool(getattr(mtf_signal, "weak_bear_bias", False))
+                    and (
+                        not bool(getattr(self.config, "obv_scalp_require_early_bearish", True))
+                        or bool(getattr(mtf_signal, "early_bearish", False))
+                    )
+                    and (
+                        "major_bull_retest_ready" in str(mtf_signal.execution_trigger.reason)
+                        or "Triggered via Memory Window" in str(mtf_signal.execution_trigger.reason)
+                    )
+                    and bool(mtf_signal.execution_trigger.bullish_memory_active)
+                    and not bool(obv_confirmation.above_sma)
+                    and float(obv_confirmation.zscore) <= float(getattr(self.config, "obv_scalp_max_positive_obv_zscore", 0.15))
+                )
+                if obv_scalp_candidate:
+                    quick_trade_mode = True
+                    long_setup_blocked = False
+                    final_direction = raw_direction
+                    relaxed_reasons.append("OBV_SCALP_OVERRIDE")
+                    logger.info(
+                        "CTA quick short scalp override | symbol=%s reason=%s bearish_score=%.1f weak_bear=%s obv_above_sma=%s obv_z=%.2f",
+                        self.symbol,
+                        mtf_signal.execution_trigger.reason,
+                        float(getattr(mtf_signal, 'bearish_score', 0.0)),
+                        bool(getattr(mtf_signal, 'weak_bear_bias', False)),
+                        bool(obv_confirmation.above_sma),
+                        float(obv_confirmation.zscore),
+                    )
+
+        blocker_reason = mtf_signal.blocker_reason
+        if long_setup_blocked:
+            blocker_reason = f"Blocked_By_{str(long_setup_reason).upper()}"
+        if self.signal_profiler is not None:
+            grid_center = self.grid_center_provider() if callable(self.grid_center_provider) else None
+            self.signal_profiler.record(
+                mtf_signal,
+                grid_center_price=grid_center,
+                blocker_reason=blocker_reason,
+                execution_obv_threshold=float(obv_threshold),
+            )
+
+        signal = TrendSignal(
+            direction=final_direction,
+            raw_direction=raw_direction,
+            major_direction=mtf_signal.major_direction,
+            major_bias_score=mtf_signal.major_bias_score,
+            weak_bull_bias=mtf_signal.weak_bull_bias,
+            weak_bear_bias=bool(getattr(mtf_signal, "weak_bear_bias", False)),
+            early_bullish=mtf_signal.early_bullish,
+            early_bearish=bool(getattr(mtf_signal, "early_bearish", False)),
+            entry_size_multiplier=mtf_signal.entry_size_multiplier,
+            swing_rsi=mtf_signal.swing_rsi,
+            swing_rsi_slope=mtf_signal.swing_rsi_slope,
+            bullish_score=mtf_signal.bullish_score,
+            bearish_score=float(getattr(mtf_signal, "bearish_score", 0.0)),
+            bullish_threshold=mtf_signal.bullish_threshold,
+            bearish_threshold=float(getattr(mtf_signal, "bearish_threshold", 0.0)),
+            bullish_ready=mtf_signal.bullish_ready,
+            bearish_ready=bool(getattr(mtf_signal, "bearish_ready", False)),
+            execution_entry_mode=mtf_signal.execution_entry_mode,
+            execution_golden_cross=mtf_signal.execution_trigger.kdj_golden_cross,
+            execution_breakout=mtf_signal.execution_trigger.prior_high_break,
+            execution_breakdown=mtf_signal.execution_trigger.prior_low_break,
+            execution_memory_active=mtf_signal.execution_trigger.bullish_memory_active,
+            execution_latch_active=mtf_signal.execution_trigger.bullish_latch_active,
+            execution_latch_price=mtf_signal.execution_trigger.latch_low_price,
+            execution_frontrun_near_breakout=mtf_signal.execution_trigger.frontrun_near_breakout,
+            execution_memory_bars_ago=mtf_signal.execution_trigger.bullish_cross_bars_ago,
+            execution_trigger_family=("obv_scalp" if quick_trade_mode else str(getattr(mtf_signal.execution_trigger, "family", "waiting"))),
+            execution_trigger_reason=(f"OBV_SCALP|{mtf_signal.execution_trigger.reason}" if quick_trade_mode else mtf_signal.execution_trigger.reason),
+            mtf_aligned=mtf_signal.fully_aligned,
+            obv_bias=obv_bias,
+            obv_confirmation=obv_confirmation,
+            obv_threshold=obv_threshold,
+            obv_confirmation_passed=obv_confirmation_passed,
+            volume_filter_passed=volume_filter_passed,
+            volume_profile=volume_profile,
+            long_setup_blocked=long_setup_blocked,
+            long_setup_reason=long_setup_reason,
+            price=current_price,
+            atr=float(atr_series.iloc[-1]),
+            risk_percent=self._resolve_risk_percent(mtf_signal),
+            blocker_reason=blocker_reason,
+            data_alignment_valid=mtf_signal.data_alignment_valid,
+            data_mismatch_ms=mtf_signal.data_mismatch_ms,
+            relaxed_entry=bool(relaxed_reasons),
+            relaxed_reasons=tuple(dict.fromkeys(relaxed_reasons)),
+            quick_trade_mode=quick_trade_mode,
+            entry_pathway=entry_pathway,
+            signal_quality_tier=signal_quality_tier,
+            signal_confidence=signal_confidence,
+            signal_strength_bonus=signal_strength_bonus,
+        )
+        signal = self._quality_filter_short_signal(signal)
+        logger.info(
+            "CTA Signal | symbol=%s quality=%s pathway=%s direction=%s raw_direction=%s score=%.1f confidence=%.2f strength_bonus=%.1f aligned=%s trigger=%s",
+            self.symbol,
+            signal.signal_quality_tier,
+            signal.entry_pathway.name,
+            signal.direction,
+            signal.raw_direction,
+            float(signal.bullish_score if signal.raw_direction >= 0 else signal.bearish_score),
+            float(signal.signal_confidence),
+            float(signal.signal_strength_bonus),
+            bool(signal.mtf_aligned),
+            signal.execution_trigger_reason,
+        )
+        return signal
+
+    def _effective_signal_obv_threshold(self, signal: TrendSignal) -> float:
+        if signal.obv_threshold is not None:
+            return float(signal.obv_threshold)
+        return float(self.config.obv_zscore_threshold)
+
+    def _build_signal_heartbeat_payload(self, signal: TrendSignal) -> dict[str, float | str | bool]:
+        obv = signal.obv_confirmation
+        threshold = self._effective_signal_obv_threshold(signal)
+        return {
+            "symbol": self.symbol,
+            "bullish_ready": bool(signal.bullish_ready),
+            "bullish_score": float(signal.bullish_score),
+            "bearish_score": float(signal.bearish_score),
+            "bullish_threshold": float(signal.bullish_threshold),
+            "bearish_threshold": float(signal.bearish_threshold),
+            "major_bias_score": float(signal.major_bias_score),
+            "weak_bull_bias": bool(signal.weak_bull_bias),
+            "weak_bear_bias": bool(signal.weak_bear_bias),
+            "early_bullish": bool(signal.early_bullish),
+            "early_bearish": bool(signal.early_bearish),
+            "entry_size_multiplier": float(signal.entry_size_multiplier),
+            "swing_rsi": float(signal.swing_rsi),
+            "swing_rsi_slope": float(signal.swing_rsi_slope),
+            "raw_direction": int(signal.raw_direction),
+            "direction": int(signal.direction),
+            "execution_entry_mode": str(signal.execution_entry_mode),
+            "entry_pathway": str(signal.entry_pathway.name),
+            "signal_quality_tier": str(signal.signal_quality_tier),
+            "signal_confidence": float(signal.signal_confidence),
+            "signal_strength_bonus": float(signal.signal_strength_bonus),
+            "execution_trigger_reason": str(signal.execution_trigger_reason),
+            "execution_memory_active": bool(signal.execution_memory_active),
+            "execution_latch_active": bool(signal.execution_latch_active),
+            "execution_latch_price": signal.execution_latch_price,
+            "execution_frontrun_near_breakout": bool(signal.execution_frontrun_near_breakout),
+            "execution_memory_bars_ago": signal.execution_memory_bars_ago,
+            "obv_current": float(obv.current_obv),
+            "obv_sma": float(obv.sma_value),
+            "obv_above_sma": bool(obv.above_sma),
+            "obv_increment": float(obv.increment_value),
+            "obv_increment_mean": float(obv.increment_mean),
+            "obv_increment_std": float(obv.increment_std),
+            "obv_zscore": float(obv.zscore),
+            "obv_zscore_threshold": float(threshold),
+            "obv_zscore_gap": float(obv.zscore - float(threshold)),
+            "obv_confirmation_passed": bool(signal.obv_confirmation_passed),
+            "volume_filter_passed": bool(signal.volume_filter_passed),
+            "mtf_aligned": bool(signal.mtf_aligned),
+            "risk_percent": float(signal.risk_percent),
+            "long_setup_reason": str(signal.long_setup_reason),
+            "price": float(signal.price),
+            "atr": float(signal.atr),
+            "blocker_reason": str(signal.blocker_reason),
+            "relaxed_entry": bool(signal.relaxed_entry),
+            "relaxed_reasons": list(signal.relaxed_reasons),
+            "data_alignment_valid": bool(signal.data_alignment_valid),
+            "data_mismatch_ms": int(signal.data_mismatch_ms),
+        }
+
+    def _maybe_log_signal_heartbeat(self, signal: TrendSignal) -> None:
+        interval = float(getattr(self.config, "heartbeat_interval_seconds", 300.0) or 0.0)
+        if interval <= 0:
+            return
+        now = self._time_provider()
+        if now - float(self._last_signal_heartbeat_at) < interval:
+            return
+        self._last_signal_heartbeat_at = now
+        logger.info("CTA signal heartbeat | %s", self._build_signal_heartbeat_payload(signal))
+
+    def _is_execution_near_ready(self, signal: TrendSignal) -> bool:
+        return bool(
+            signal.bullish_ready
+            and (
+                signal.raw_direction > 0
+                or signal.execution_memory_active
+                or signal.execution_latch_active
+                or signal.execution_frontrun_near_breakout
+                or signal.execution_breakout
+            )
+        )
+
+    def _request_urgent_wakeup_on_signal_transition(self, signal: TrendSignal) -> None:
+        if self.runtime_context is None:
+            self._last_major_direction = int(signal.major_direction)
+            self._last_bullish_ready = bool(signal.bullish_ready)
+            return
+
+        reasons: list[str] = []
+        major_direction = int(signal.major_direction)
+        bullish_ready = bool(signal.bullish_ready)
+        if self._last_major_direction is not None and self._last_major_direction != major_direction:
+            reasons.append(f"cta_major_direction:{self._last_major_direction}->{major_direction}")
+        if self._last_bullish_ready is not None and self._last_bullish_ready != bullish_ready:
+            reasons.append(f"cta_bullish_ready:{self._last_bullish_ready}->{bullish_ready}")
+        self._last_major_direction = major_direction
+        self._last_bullish_ready = bullish_ready
+        if reasons:
+            self.runtime_context.request_urgent_wakeup("|".join(reasons))
+
+    def _collect_near_miss_sample(self, signal: TrendSignal) -> None:
+        if signal.long_setup_reason != "obv_strength_not_confirmed":
+            return
+        if not self._is_execution_near_ready(signal):
+            return
+        threshold = self._effective_signal_obv_threshold(signal)
+        sample = CTANearMissSample(
+            symbol=self.symbol,
+            captured_at=float(self._time_provider()),
+            execution_trigger_family=str(signal.execution_trigger_family or "waiting"),
+            execution_trigger_group=str(signal.execution_trigger_group or "waiting"),
+            execution_trigger_reason=str(signal.execution_trigger_reason),
+            execution_memory_active=bool(signal.execution_memory_active),
+            execution_memory_bars_ago=signal.execution_memory_bars_ago,
+            execution_breakout=bool(signal.execution_breakout),
+            execution_golden_cross=bool(signal.execution_golden_cross),
+            obv_zscore=float(signal.obv_confirmation.zscore),
+            obv_threshold=threshold,
+            obv_gap=float(threshold - float(signal.obv_confirmation.zscore)),
+            price=float(signal.price),
+        )
+        if self._near_miss_window_started_at is None:
+            self._near_miss_window_started_at = sample.captured_at
+        self._near_miss_samples.append(sample)
+        max_samples = max(1, int(getattr(self.config, "near_miss_report_max_samples", 5) or 5))
+        self._near_miss_samples = sorted(
+            self._near_miss_samples,
+            key=lambda item: (item.obv_gap, -item.obv_zscore, -item.captured_at),
+        )[: max_samples * 3]
+
+    def _maybe_flush_near_miss_report(self) -> None:
+        interval = float(getattr(self.config, "near_miss_report_interval_seconds", 3600.0) or 0.0)
+        if interval <= 0 or not self._near_miss_samples:
+            return
+        now = float(self._time_provider())
+        window_started_at = self._near_miss_window_started_at
+        if window_started_at is None or now - float(window_started_at) < interval:
+            return
+        samples = self._consume_near_miss_samples()
+        if not samples:
+            return
+        min_samples = max(1, int(getattr(self.config, "near_miss_report_min_samples", 2) or 2))
+        if len(samples) < min_samples:
+            return
+        self._last_near_miss_report_at = now
+        if self.notifier is not None and hasattr(self.notifier, "notify_cta_near_miss_report"):
+            self.notifier.notify_cta_near_miss_report(symbol=self.symbol, samples=samples, window_seconds=interval)
+
+    def _consume_near_miss_samples(self) -> list[CTANearMissSample]:
+        if not self._near_miss_samples:
+            return []
+        max_samples = max(1, int(getattr(self.config, "near_miss_report_max_samples", 5) or 5))
+        samples = sorted(
+            self._near_miss_samples,
+            key=lambda item: (item.obv_gap, -item.obv_zscore, -item.captured_at),
+        )[:max_samples]
+        self._near_miss_samples = []
+        self._near_miss_window_started_at = None
+        return samples
+
+    def _expected_reward_risk_ratio(self, signal: TrendSignal, *, reference_price: float, stop_distance: float) -> float | None:
+        target_price = self._resolve_expected_reward_target_price(signal, reference_price=reference_price)
+        if target_price is None or reference_price <= 0 or stop_distance <= 0:
+            return None
+        if signal.direction > 0:
+            expected_reward = max(0.0, float(target_price) - float(reference_price))
+        else:
+            expected_reward = max(0.0, float(reference_price) - float(target_price))
+        if expected_reward <= 0:
+            return 0.0
+        return float(expected_reward / stop_distance)
+
+    def _resolve_expected_reward_target_price(self, signal: TrendSignal, *, reference_price: float) -> float | None:
+        volume_profile = signal.volume_profile
+        if volume_profile is None or reference_price <= 0:
+            return None
+
+        entry_mode = str(signal.execution_entry_mode or "").lower()
+        breakout_like_entry = entry_mode == "breakout_confirmed"
+        atr_extension = self._normalized_atr(reference_price, signal.atr) * float(
+            getattr(self.config, "breakout_rr_target_atr_multiplier", 3.0)
+        )
+
+        if signal.direction > 0:
+            base_target = float(volume_profile.high_price)
+            if breakout_like_entry:
+                return max(base_target, float(reference_price) + atr_extension)
+            return base_target
+
+        base_target = float(volume_profile.low_price)
+        if breakout_like_entry:
+            return min(base_target, float(reference_price) - atr_extension)
+        return base_target
+
+    def _resolve_minimum_expected_rr(self, signal: TrendSignal) -> float:
+        minimum_expected_rr = float(getattr(self.config, "minimum_expected_rr", 0.0))
+        entry_mode = str(signal.execution_entry_mode or "").lower()
+        if signal.relaxed_entry:
+            minimum_expected_rr = max(minimum_expected_rr, float(getattr(self.config, "relaxed_entry_minimum_expected_rr", minimum_expected_rr)))
+        if signal.relaxed_entry and signal.direction < 0:
+            minimum_expected_rr = max(minimum_expected_rr, float(getattr(self.config, "relaxed_short_minimum_expected_rr", minimum_expected_rr)))
+        if signal.quick_trade_mode:
+            minimum_expected_rr = max(minimum_expected_rr, float(getattr(self.config, "quick_trade_minimum_expected_rr", minimum_expected_rr)))
+        if any(marker in entry_mode for marker in ("starter", "frontrun", "scale_in", "early_")):
+            minimum_expected_rr = max(minimum_expected_rr, float(getattr(self.config, "starter_entry_minimum_expected_rr", minimum_expected_rr)))
+        return minimum_expected_rr
+
+    def _starter_entry_passes_quality_gate(self, signal: TrendSignal) -> tuple[bool, str | None]:
+        entry_mode = str(signal.execution_entry_mode or "").lower()
+        starter_like = any(marker in entry_mode for marker in ("starter", "frontrun", "scale_in", "early_"))
+        if not starter_like:
+            return True, None
+
+        primary_score = float(signal.bullish_score if signal.direction > 0 else signal.bearish_score)
+        opposing_score = float(signal.bearish_score if signal.direction > 0 else signal.bullish_score)
+        minimum_score = float(getattr(self.config, "starter_quality_minimum_score", 72.0))
+        if "scale_in" in entry_mode:
+            minimum_score = float(getattr(self.config, "scale_in_quality_minimum_score", minimum_score))
+        if primary_score < minimum_score:
+            return False, "starter_entry_low_score"
+
+        if signal.direction < 0 and int(signal.major_direction) > 0:
+            max_gap = float(getattr(self.config, "starter_countertrend_max_score_gap", 10.0))
+            if (opposing_score - primary_score) > max_gap:
+                return False, "starter_entry_countertrend"
+        if signal.direction > 0 and int(signal.major_direction) < 0:
+            max_gap = float(getattr(self.config, "starter_countertrend_max_score_gap", 10.0))
+            if (opposing_score - primary_score) > max_gap:
+                return False, "starter_entry_countertrend"
+        return True, None
+
+    def _resolve_entry_location_block_reason(self, signal: TrendSignal) -> str | None:
+        entry_mode = str(signal.execution_entry_mode or "").lower()
+        structure_confirmed = bool(signal.execution_breakout) if signal.direction > 0 else bool(signal.execution_breakdown)
+        near_breakout = bool(structure_confirmed or signal.execution_frontrun_near_breakout)
+        if signal.relaxed_entry and bool(getattr(self.config, "relaxed_entry_require_near_breakout", True)) and not near_breakout:
+            return "relaxed_entry_chasing"
+        if any(marker in entry_mode for marker in ("starter", "frontrun", "scale_in", "early_")) and bool(getattr(self.config, "starter_entry_require_near_breakout", True)) and not near_breakout:
+            return "starter_entry_chasing"
+        return None
+
+    def _fast_track_hard_block_reason(self, signal: TrendSignal) -> str | None:
+        reverse_obv_threshold = max(0.5, abs(float(self._effective_signal_obv_threshold(signal))))
+        obv_zscore = float(signal.obv_confirmation.zscore)
+        if signal.direction > 0:
+            if bool(signal.obv_confirmation.above_sma) is False and obv_zscore <= -reverse_obv_threshold:
+                return "fast_track_reverse_obv"
+        elif signal.direction < 0:
+            if bool(signal.obv_confirmation.above_sma) and obv_zscore >= reverse_obv_threshold:
+                return "fast_track_reverse_obv"
+        return None
+
+    def _resolve_minimum_expected_rr_for_pathway(self, signal: TrendSignal) -> float:
+        minimum_expected_rr = self._resolve_minimum_expected_rr(signal)
+        if signal.entry_pathway is EntryPathway.STANDARD:
+            standard_floor = float(getattr(self.config, "standard_entry_minimum_expected_rr", minimum_expected_rr))
+            return max(minimum_expected_rr, standard_floor)
+        if signal.entry_pathway is not EntryPathway.FAST_TRACK:
+            return minimum_expected_rr
+        if signal.relaxed_entry:
+            return minimum_expected_rr
+        entry_mode = str(signal.execution_entry_mode or "").lower()
+        if not any(marker in entry_mode for marker in ("starter", "frontrun", "scale_in", "early_")):
+            return minimum_expected_rr
+        starter_floor = float(getattr(self.config, "starter_entry_minimum_expected_rr", minimum_expected_rr))
+        return min(minimum_expected_rr, starter_floor)
+
+    def _pathway_skips_strict_order_flow(self, signal: TrendSignal) -> bool:
+        if signal.entry_pathway is not EntryPathway.FAST_TRACK:
+            return False
+        entry_mode = str(signal.execution_entry_mode or "").lower()
+        return any(marker in entry_mode for marker in ("starter", "frontrun", "scale_in", "early_"))
+
+    def _apply_fast_track_checks(self, signal: TrendSignal) -> str | None:
+        hard_block_reason = self._fast_track_hard_block_reason(signal)
+        if hard_block_reason is not None:
+            logger.info(
+                "CTA fast-track blocked | symbol=%s side=%s reason=%s obv_above_sma=%s obv_z=%.2f threshold=%.2f",
+                self.symbol,
+                "buy" if signal.direction > 0 else "sell",
+                hard_block_reason,
+                bool(signal.obv_confirmation.above_sma),
+                float(signal.obv_confirmation.zscore),
+                float(self._effective_signal_obv_threshold(signal)),
+            )
+            return "cta:fast_track_blocked"
+        return None
+
+    def _quality_tier_rank(self, value: str) -> int:
+        return int(self._QUALITY_TIER_RANK.get(str(value or "TIER_LOW").upper(), 0))
+
+    def _targeted_long_entry_passes_quality_gate(self, signal: TrendSignal) -> tuple[bool, str | None]:
+        if signal.direction <= 0:
+            return True, None
+
+        trigger_family = str(signal.execution_trigger_family or "waiting")
+        pathway = signal.entry_pathway
+        signal_confidence = float(getattr(signal, "signal_confidence", 0.0) or 0.0)
+        quality_tier = str(getattr(signal, "signal_quality_tier", "TIER_LOW") or "TIER_LOW")
+        relaxed_reasons = {str(reason) for reason in (signal.relaxed_reasons or ())}
+
+        hard_disabled_long_families = {
+            "trend_continuation_near_breakout": bool(getattr(self.config, "disable_trend_continuation_long", True)),
+            "near_breakout_release": bool(getattr(self.config, "disable_near_breakout_release_long", True)),
+            "bullish_memory_breakout": bool(getattr(self.config, "disable_bullish_memory_breakout_long", True)),
+            "major_bull_retest": bool(getattr(self.config, "disable_major_bull_retest_long", True)),
+            "price_led_override": bool(getattr(self.config, "disable_price_led_override_long", True)),
+        }
+        if hard_disabled_long_families.get(trigger_family, False):
+            return False, f"{trigger_family}_disabled"
+
+        if (
+            trigger_family == "trend_continuation_near_breakout"
+            and bool(getattr(self.config, "trend_continuation_standard_block_enabled", True))
+        ):
+            minimum_pathway = str(getattr(self.config, "trend_continuation_minimum_entry_pathway", "FAST_TRACK") or "FAST_TRACK").upper()
+            if pathway.name != minimum_pathway:
+                return False, "trend_continuation_requires_higher_pathway"
+            if self._quality_tier_rank(quality_tier) < self._quality_tier_rank("TIER_HIGH"):
+                return False, "trend_continuation_requires_high_quality"
+
+        if trigger_family == "near_breakout_release" and pathway is EntryPathway.STANDARD and signal.relaxed_entry:
+            minimum_confidence = float(getattr(self.config, "near_breakout_release_standard_min_confidence", 0.70))
+            if signal_confidence < minimum_confidence:
+                return False, "near_breakout_release_low_confidence"
+
+        if trigger_family == "bullish_memory_breakout" and pathway is EntryPathway.STANDARD:
+            minimum_confidence = float(getattr(self.config, "bullish_memory_breakout_standard_min_confidence", 0.70))
+            if signal_confidence < minimum_confidence:
+                return False, "bullish_memory_breakout_low_confidence"
+            if signal.relaxed_entry and "STANDARD_VA_BYPASS" in relaxed_reasons:
+                minimum_confidence = float(getattr(self.config, "bullish_memory_breakout_standard_va_bypass_min_confidence", 0.74))
+                if signal_confidence < minimum_confidence:
+                    return False, "bullish_memory_breakout_va_bypass_low_confidence"
+            if signal.relaxed_entry and any(reason.startswith("STANDARD_POC_RECLAIM_OK") for reason in relaxed_reasons):
+                minimum_confidence = float(getattr(self.config, "bullish_memory_breakout_poc_reclaim_min_confidence", 0.75))
+                if signal_confidence < minimum_confidence:
+                    return False, "bullish_memory_breakout_poc_reclaim_low_confidence"
+            if signal.relaxed_entry and any(reason.startswith("OBV(") for reason in relaxed_reasons):
+                minimum_confidence = float(getattr(self.config, "bullish_memory_breakout_obv_floor_min_confidence", 0.70))
+                if signal_confidence < minimum_confidence:
+                    return False, "bullish_memory_breakout_obv_floor_low_confidence"
+
+        if signal.execution_entry_mode == "weak_bear_scale_in_limit" and pathway is EntryPathway.STANDARD:
+            minimum_confidence = float(getattr(self.config, "countertrend_standard_long_min_confidence", 0.70))
+            if signal_confidence < minimum_confidence:
+                return False, "countertrend_standard_long_low_confidence"
+
+        return True, None
+
+    def _targeted_short_entry_passes_quality_gate(self, signal: TrendSignal) -> tuple[bool, str | None]:
+        if signal.direction >= 0:
+            return True, None
+
+        trigger_family = str(signal.execution_trigger_family or "waiting")
+        pathway = signal.entry_pathway
+        signal_confidence = float(getattr(signal, "signal_confidence", 0.0) or 0.0)
+
+        if trigger_family == "early_bearish" and pathway is EntryPathway.STANDARD:
+            minimum_confidence = float(getattr(self.config, "early_bearish_standard_min_confidence", 0.60))
+            if signal_confidence < minimum_confidence:
+                return False, "early_bearish_low_confidence"
+
+        return True, None
+
+    def _apply_standard_checks(self, signal: TrendSignal) -> str | None:
+        entry_location_block_reason = self._resolve_entry_location_block_reason(signal)
+        if entry_location_block_reason is not None:
+            logger.info(
+                "CTA entry location blocked | symbol=%s side=%s mode=%s pathway=%s reason=%s breakout=%s breakdown=%s near_breakout=%s",
+                self.symbol,
+                "buy" if signal.direction > 0 else "sell",
+                signal.execution_entry_mode,
+                signal.entry_pathway.name,
+                entry_location_block_reason,
+                signal.execution_breakout,
+                signal.execution_breakdown,
+                signal.execution_frontrun_near_breakout,
+            )
+            return "cta:entry_location_blocked"
+
+        starter_quality_passed, starter_quality_reason = self._starter_entry_passes_quality_gate(signal)
+        if not starter_quality_passed:
+            logger.info(
+                "CTA starter quality blocked | symbol=%s side=%s mode=%s pathway=%s reason=%s bullish_score=%.1f bearish_score=%.1f major_direction=%s",
+                self.symbol,
+                "buy" if signal.direction > 0 else "sell",
+                signal.execution_entry_mode,
+                signal.entry_pathway.name,
+                starter_quality_reason,
+                float(signal.bullish_score),
+                float(signal.bearish_score),
+                int(signal.major_direction),
+            )
+            return "cta:entry_quality_blocked"
+
+        targeted_long_quality_passed, targeted_long_quality_reason = self._targeted_long_entry_passes_quality_gate(signal)
+        if not targeted_long_quality_passed:
+            logger.info(
+                "CTA targeted long quality blocked | symbol=%s side=%s family=%s mode=%s pathway=%s tier=%s confidence=%.2f obv_z=%.2f relaxed=%s reasons=%s reason=%s",
+                self.symbol,
+                "buy" if signal.direction > 0 else "sell",
+                signal.execution_trigger_family,
+                signal.execution_entry_mode,
+                signal.entry_pathway.name,
+                signal.signal_quality_tier,
+                float(signal.signal_confidence),
+                float(signal.obv_confirmation.zscore),
+                bool(signal.relaxed_entry),
+                list(signal.relaxed_reasons),
+                targeted_long_quality_reason,
+            )
+            return "cta:entry_quality_blocked"
+
+        targeted_short_quality_passed, targeted_short_quality_reason = self._targeted_short_entry_passes_quality_gate(signal)
+        if not targeted_short_quality_passed:
+            logger.info(
+                "CTA targeted short quality blocked | symbol=%s side=%s family=%s mode=%s pathway=%s tier=%s confidence=%.2f obv_z=%.2f relaxed=%s reasons=%s reason=%s",
+                self.symbol,
+                "buy" if signal.direction > 0 else "sell",
+                signal.execution_trigger_family,
+                signal.execution_entry_mode,
+                signal.entry_pathway.name,
+                signal.signal_quality_tier,
+                float(signal.signal_confidence),
+                float(signal.obv_confirmation.zscore),
+                bool(signal.relaxed_entry),
+                list(signal.relaxed_reasons),
+                targeted_short_quality_reason,
+            )
+            return "cta:entry_quality_blocked"
+        return None
+
+    def _assess_order_flow(self, *, side: str, amount: float) -> OrderFlowAssessment | None:
+        if side != "buy" or not self.config.order_flow_enabled:
+            return None
+        return self.order_flow_sentinel.assess_entry(self.symbol, side, amount)
+
+    def _apply_standard_order_flow_checks(
+        self,
+        *,
+        signal: TrendSignal,
+        side: str,
+        amount: float,
+        order_flow_assessment: OrderFlowAssessment | None,
+    ) -> str | None:
+        if order_flow_assessment is None:
+            return None
+        if order_flow_assessment.entry_allowed:
+            return None
+        if order_flow_assessment.reason == "empty_order_book":
+            logger.info(
+                "CTA order flow blocked | symbol=%s side=%s mode=%s pathway=%s trigger=%s amount=%.8f diagnostics=%s",
+                self.symbol,
+                side,
+                signal.execution_entry_mode,
+                signal.entry_pathway.name,
+                signal.execution_trigger_reason,
+                amount,
+                order_flow_assessment.diagnostics(),
+            )
+            return "cta:order_flow_blocked"
+        logger.info(
+            "CTA standard order flow soft warning | symbol=%s side=%s mode=%s pathway=%s trigger=%s amount=%.8f diagnostics=%s",
+            self.symbol,
+            side,
+            signal.execution_entry_mode,
+            signal.entry_pathway.name,
+            signal.execution_trigger_reason,
+            amount,
+            order_flow_assessment.diagnostics(),
+        )
+        return None
+
+    def _apply_strict_order_flow_checks(
+        self,
+        *,
+        signal: TrendSignal,
+        side: str,
+        amount: float,
+        order_flow_assessment: OrderFlowAssessment | None,
+    ) -> str | None:
+        if order_flow_assessment is None:
+            return None
+        if not order_flow_assessment.entry_allowed and signal.execution_entry_mode not in {"weak_bull_scale_in_limit", "early_bullish_starter_limit", "starter_frontrun_limit", "starter_short_frontrun_limit"}:
+            base_confirmation_ratio = max(0.0, float(self.config.order_flow_confirmation_ratio))
+            strict_order_flow_modes = {"breakout_confirmed", "major_bull_retest_ready", "trend_continuation_near_breakout_ready"}
+            hard_order_flow_block = (
+                order_flow_assessment.reason == "empty_order_book"
+                or order_flow_assessment.imbalance_ratio < base_confirmation_ratio
+                or signal.execution_trigger_reason in strict_order_flow_modes
+            )
+            if hard_order_flow_block:
+                logger.info(
+                    "CTA order flow blocked | symbol=%s side=%s mode=%s pathway=%s trigger=%s amount=%.8f diagnostics=%s",
+                    self.symbol,
+                    side,
+                    signal.execution_entry_mode,
+                    signal.entry_pathway.name,
+                    signal.execution_trigger_reason,
+                    amount,
+                    order_flow_assessment.diagnostics(),
+                )
+                return "cta:order_flow_blocked"
+            logger.info(
+                "CTA order flow soft warning | symbol=%s side=%s mode=%s pathway=%s trigger=%s amount=%.8f diagnostics=%s",
+                self.symbol,
+                side,
+                signal.execution_entry_mode,
+                signal.entry_pathway.name,
+                signal.execution_trigger_reason,
+                amount,
+                order_flow_assessment.diagnostics(),
+            )
+        return None
+
+    def _apply_entry_pathway_checks(
+        self,
+        *,
+        signal: TrendSignal,
+        side: str,
+        amount: float,
+        order_flow_assessment: OrderFlowAssessment | None,
+    ) -> str | None:
+        if signal.entry_pathway is EntryPathway.FAST_TRACK:
+            fast_track_result = self._apply_fast_track_checks(signal)
+            if fast_track_result is not None:
+                return fast_track_result
+            if not self._pathway_skips_strict_order_flow(signal):
+                strict_result = self._apply_strict_order_flow_checks(
+                    signal=signal,
+                    side=side,
+                    amount=amount,
+                    order_flow_assessment=order_flow_assessment,
+                )
+                if strict_result is not None:
+                    return strict_result
+            return self._apply_standard_checks(signal)
+
+        if signal.entry_pathway is EntryPathway.STANDARD:
+            standard_order_flow_result = self._apply_standard_order_flow_checks(
+                signal=signal,
+                side=side,
+                amount=amount,
+                order_flow_assessment=order_flow_assessment,
+            )
+            if standard_order_flow_result is not None:
+                return standard_order_flow_result
+            return self._apply_standard_checks(signal)
+
+        strict_result = self._apply_strict_order_flow_checks(
+            signal=signal,
+            side=side,
+            amount=amount,
+            order_flow_assessment=order_flow_assessment,
+        )
+        if strict_result is not None:
+            return strict_result
+        return self._apply_standard_checks(signal)
+
+    def _check_entry_reward_risk(
+        self,
+        *,
+        signal: TrendSignal,
+        side: str,
+        reference_price: float,
+    ) -> str | None:
+        pre_entry_atr = self._normalized_atr(reference_price, signal.atr)
+        pre_entry_stop_distance = pre_entry_atr * self._resolve_dynamic_stop_loss_multiplier(signal)
+        expected_rr = self._expected_reward_risk_ratio(signal, reference_price=reference_price, stop_distance=pre_entry_stop_distance)
+        minimum_expected_rr = self._resolve_minimum_expected_rr_for_pathway(signal)
+        if expected_rr is not None and expected_rr < minimum_expected_rr:
+            logger.info(
+                "CTA reward/risk blocked | symbol=%s side=%s pathway=%s expected_rr=%.2f threshold=%.2f price=%.2f stop_distance=%.2f",
+                self.symbol,
+                side,
+                signal.entry_pathway.name,
+                expected_rr,
+                minimum_expected_rr,
+                reference_price,
+                pre_entry_stop_distance,
+            )
+            return "cta:reward_risk_blocked"
+        return None
+
+    def _resolve_entry_amount(self, *, signal: TrendSignal, side: str) -> tuple[str | None, float, bool]:
+        amount = self._calculate_entry_amount(signal.price)
+        sentiment_halved = False
+
+        amount *= max(0.0, min(1.0, float(signal.entry_size_multiplier)))
+        if signal.quick_trade_mode:
+            amount *= max(0.0, min(1.0, float(getattr(self.config, 'obv_scalp_entry_fraction', 0.35))))
+        amount = self._normalize_order_amount(amount)
+        if amount <= 0:
+            return "cta:risk_blocked", 0.0, False
+
+        if side == "buy" and self.sentiment_analyst is not None:
+            sentiment_decision = self.sentiment_analyst.evaluate_cta_buy(self.symbol)
+            if sentiment_decision.blocked:
+                return "cta:sentiment_blocked", 0.0, False
+            if sentiment_decision.size_multiplier < 1.0:
+                amount = self._normalize_order_amount(amount * sentiment_decision.size_multiplier)
+                sentiment_halved = amount > 0
+                if amount <= 0:
+                    return "cta:sentiment_blocked", 0.0, False
+        return None, amount, sentiment_halved
+
+    def _check_entry_risk_budget(
+        self,
+        *,
+        signal: TrendSignal,
+        amount: float,
+        notional_price: float,
+    ) -> str | None:
+        position_side = "long" if signal.direction > 0 else "short"
+        if self.risk_manager is None:
+            return None
+        requested_notional = self.client.estimate_notional(self.symbol, amount, notional_price)
+        allowed, _reason = self.risk_manager.can_open_new_position(
+            self.symbol,
+            requested_notional,
+            strategy_name=self.strategy_name,
+            opening_side=position_side,
+        )
+        if not allowed:
+            return "cta:risk_blocked"
+        return None
+
+    def _log_trade_open_context(self, *, signal: TrendSignal, side: str) -> None:
+        if signal.execution_memory_active and (signal.execution_breakout or signal.weak_bull_bias):
+            logger.info(
+                "CTA entry trigger | symbol=%s side=%s %s",
+                self.symbol,
+                side,
+                signal.execution_trigger_reason,
+            )
+        entry_type = "Relaxed_Entry" if signal.relaxed_entry else "Standard_Entry"
+        entry_reason = (
+            f"Score({float(signal.bullish_score):.0f}) > Threshold({float(getattr(self.config, 'drive_first_tradeable_score', 60.0)):.0f})"
+            if signal.relaxed_entry
+            else str(signal.execution_trigger_reason)
+        )
+        if signal.relaxed_entry and signal.relaxed_reasons:
+            entry_reason = f"{entry_reason} | Relaxations: {', '.join(signal.relaxed_reasons)}"
+        logger.info("[TRADE_OPEN] Type: %s | Pathway: %s | Reason: %s", entry_type, signal.entry_pathway.name, entry_reason)
+
+    def _finalize_entry_fill(
+        self,
+        *,
+        entry_order: EntryOrderResult,
+        requested_amount: float,
+    ) -> tuple[str | None, float, float]:
+        filled_amount = self._normalize_order_amount(entry_order.filled_amount)
+        fill_ratio = (filled_amount / requested_amount) if requested_amount > 0 else 0.0
+        if filled_amount <= 0:
+            return ("cta:low_fill_ratio" if entry_order.used_limit_order else "cta:risk_blocked"), 0.0, 0.0
+        if entry_order.used_limit_order and fill_ratio < 0.5:
+            return "cta:low_fill_ratio", filled_amount, fill_ratio
+        return None, filled_amount, fill_ratio
+
+    def _build_managed_position(
+        self,
+        *,
+        signal: TrendSignal,
+        position_side: str,
+        filled_amount: float,
+        entry_price: float,
+    ) -> ManagedPosition:
+        atr_value = self._normalized_atr(entry_price, signal.atr)
+        stop_loss_multiplier = self._resolve_dynamic_stop_loss_multiplier(signal)
+        stop_distance = atr_value * stop_loss_multiplier
+        if signal.direction > 0:
+            stop_price = entry_price - stop_distance
+        else:
+            stop_price = entry_price + stop_distance
+        return ManagedPosition(
+            side=position_side,
+            entry_price=entry_price,
+            initial_size=filled_amount,
+            remaining_size=filled_amount,
+            stop_price=stop_price,
+            best_price=entry_price,
+            atr_value=atr_value,
+            stop_distance=stop_distance,
+            risk_percent=signal.risk_percent,
+            quick_trade_mode=signal.quick_trade_mode,
+        )
+
+    def _resolve_filled_entry_price(
+        self,
+        *,
+        entry_order: EntryOrderResult,
+        order_flow_assessment: OrderFlowAssessment | None,
+        fallback_price: float,
+    ) -> float:
+        entry_price = (
+            float(entry_order.average_price)
+            if entry_order.average_price not in (None, 0, "0")
+            else self._extract_order_price(
+                entry_order.order,
+                fallback=(
+                    order_flow_assessment.expected_average_price
+                    if order_flow_assessment is not None and order_flow_assessment.expected_average_price is not None
+                    else fallback_price
+                ),
+            )
+        )
+        return float(entry_price)
+
+    def _finalize_open_action(
+        self,
+        *,
+        signal: TrendSignal,
+        side: str,
+        position_side: str,
+        filled_amount: float,
+        entry_price: float,
+        entry_order: EntryOrderResult,
+        sentiment_halved: bool,
+    ) -> str:
+        self._signal_flip_pending = False
+        self._publish_risk_profile(signal)
+        if self.notifier is not None and hasattr(self.notifier, "notify_trade"):
+            trade_notional = self.client.estimate_notional(self.symbol, filled_amount, entry_price)
+            self.notifier.notify_trade(
+                side=side,
+                price=entry_price,
+                size=filled_amount,
+                strategy=self.strategy_name,
+                signal=f"cta_open_{position_side}",
+                symbol=self.symbol,
+                notional=trade_notional,
+            )
+        action = f"cta:open_{position_side}"
+        if signal.quick_trade_mode:
+            action += "_obv_scalp"
+        if entry_order.used_limit_order:
+            action += "_limit"
+        if sentiment_halved:
+            action += "_sentiment_halved"
+        return action
+
+    def _prepare_entry_execution_context(
+        self,
+        *,
+        signal: TrendSignal,
+        side: str,
+        amount: float,
+    ) -> tuple[str | None, str, float, OrderFlowAssessment | None]:
+        position_side = "long" if signal.direction > 0 else "short"
+        cooldown_remaining = self._cooldown_remaining_seconds(position_side)
+        if cooldown_remaining > 0:
+            logger.info(
+                "CTA same-direction cooldown blocked | symbol=%s side=%s remaining=%ss",
+                self.symbol,
+                position_side,
+                cooldown_remaining,
+            )
+            return "cta:same_direction_cooldown", position_side, 0.0, None
+
+        fast_track_reuse_remaining = self._fast_track_reuse_remaining_seconds(signal)
+        if fast_track_reuse_remaining > 0:
+            logger.info(
+                "CTA fast-track reuse cooldown blocked | symbol=%s side=%s remaining=%ss trigger=%s",
+                self.symbol,
+                position_side,
+                fast_track_reuse_remaining,
+                signal.execution_trigger_reason,
+            )
+            return "cta:fast_track_reuse_cooldown", position_side, 0.0, None
+
+        order_flow_assessment: OrderFlowAssessment | None = self._assess_order_flow(side=side, amount=amount)
+        pathway_result = self._apply_entry_pathway_checks(
+            signal=signal,
+            side=side,
+            amount=amount,
+            order_flow_assessment=order_flow_assessment,
+        )
+        if pathway_result is not None:
+            return pathway_result, "", 0.0, order_flow_assessment
+
+        notional_price = signal.price
+        if order_flow_assessment is not None and order_flow_assessment.reference_price is not None:
+            notional_price = max(notional_price, order_flow_assessment.reference_price)
+        risk_budget_result = self._check_entry_risk_budget(
+            signal=signal,
+            amount=amount,
+            notional_price=notional_price,
+        )
+        if risk_budget_result is not None:
+            return risk_budget_result, position_side, notional_price, order_flow_assessment
+
+        reward_risk_result = self._check_entry_reward_risk(
+            signal=signal,
+            side=side,
+            reference_price=notional_price,
+        )
+        if reward_risk_result is not None:
+            return reward_risk_result, position_side, notional_price, order_flow_assessment
+
+        self._log_trade_open_context(signal=signal, side=side)
+        return None, position_side, notional_price, order_flow_assessment
+
+    def _execute_entry_and_build_position(
+        self,
+        *,
+        signal: TrendSignal,
+        side: str,
+        amount: float,
+        position_side: str,
+        notional_price: float,
+        order_flow_assessment: OrderFlowAssessment | None,
+        sentiment_halved: bool,
+    ) -> str:
+        entry_order = self._place_entry_order(
+            side=side,
+            amount=amount,
+            order_flow_assessment=order_flow_assessment,
+            execution_entry_mode=signal.execution_entry_mode,
+        )
+        fill_result, filled_amount, _fill_ratio = self._finalize_entry_fill(
+            entry_order=entry_order,
+            requested_amount=amount,
+        )
+        if fill_result is not None:
+            return fill_result
+
+        entry_price = self._resolve_filled_entry_price(
+            entry_order=entry_order,
+            order_flow_assessment=order_flow_assessment,
+            fallback_price=notional_price,
+        )
+        self.position = self._build_managed_position(
+            signal=signal,
+            position_side=position_side,
+            filled_amount=filled_amount,
+            entry_price=entry_price,
+        )
+        self._arm_fast_track_reuse_cooldown(signal)
+        return self._finalize_open_action(
+            signal=signal,
+            side=side,
+            position_side=position_side,
+            filled_amount=filled_amount,
+            entry_price=entry_price,
+            entry_order=entry_order,
+            sentiment_halved=sentiment_halved,
+        )
+
+    def _open_position(self, signal: TrendSignal) -> str:
+        side = "buy" if signal.direction > 0 else "sell"
+        amount_result, amount, sentiment_halved = self._resolve_entry_amount(signal=signal, side=side)
+        if amount_result is not None:
+            self._publish_risk_profile(None)
+            return amount_result
+
+        context_result, position_side, notional_price, order_flow_assessment = self._prepare_entry_execution_context(
+            signal=signal,
+            side=side,
+            amount=amount,
+        )
+        if context_result is not None:
+            self._publish_risk_profile(None)
+            return context_result
+
+        execution_result = self._execute_entry_and_build_position(
+            signal=signal,
+            side=side,
+            amount=amount,
+            position_side=position_side,
+            notional_price=notional_price,
+            order_flow_assessment=order_flow_assessment,
+            sentiment_halved=sentiment_halved,
+        )
+        if execution_result in {"cta:low_fill_ratio", "cta:risk_blocked"}:
+            self._publish_risk_profile(None)
+        return execution_result
+
+    def _calculate_entry_amount(self, reference_price: float) -> float:
+        target_margin = max(0.0, float(self.config.margin_fraction_per_trade))
+        target_leverage = max(0.0, float(self.config.nominal_leverage))
+        if target_margin <= 0 or target_leverage <= 0 or reference_price <= 0:
+            return 0.0
+
+        if not hasattr(self.client, "fetch_total_equity"):
+            fallback_amount = float(self.execution_config.cta_order_size)
+            logger.info(
+                "CTA sizing fallback | symbol=%s reason=no_equity_api amount=%.8f price=%.2f",
+                self.symbol,
+                fallback_amount,
+                reference_price,
+            )
+            return fallback_amount
+
+        try:
+            equity = float(self.client.fetch_total_equity("USDT"))
+        except Exception:
+            logger.exception("CTA sizing failed to fetch account equity; falling back to configured order size")
+            fallback_amount = float(self.execution_config.cta_order_size)
+            logger.info(
+                "CTA sizing fallback | symbol=%s reason=equity_fetch_failed amount=%.8f price=%.2f",
+                self.symbol,
+                fallback_amount,
+                reference_price,
+            )
+            return fallback_amount
+
+        target_notional = equity * target_margin * target_leverage
+        if target_notional <= 0:
+            return 0.0
+
+        unit_notional = self.client.estimate_notional(self.symbol, 1.0, reference_price)
+        if unit_notional <= 0:
+            return 0.0
+        amount = target_notional / unit_notional
+        logger.info(
+            "CTA sizing | symbol=%s equity=%.4f margin_fraction=%.4f leverage=%.2f target_notional=%.4f ref_price=%.2f raw_amount=%.8f",
+            self.symbol,
+            equity,
+            target_margin,
+            target_leverage,
+            target_notional,
+            reference_price,
+            amount,
+        )
+        return amount
+
+    def _place_entry_order(
+        self,
+        *,
+        side: str,
+        amount: float,
+        order_flow_assessment: OrderFlowAssessment | None,
+        execution_entry_mode: str,
+    ) -> EntryOrderResult:
+        fallback_price = (
+            order_flow_assessment.expected_average_price
+            if order_flow_assessment is not None and order_flow_assessment.expected_average_price is not None
+            else None
+        )
+        minimum_amount = 0.0
+        if hasattr(self.client, "get_min_order_amount"):
+            minimum_amount = float(self.client.get_min_order_amount(self.symbol))
+
+        aggressive_limit_price = self._resolve_aggressive_entry_price(
+            side=side,
+            order_flow_assessment=order_flow_assessment,
+            execution_entry_mode=execution_entry_mode,
+        )
+        if aggressive_limit_price is not None:
+            params = {"timeInForce": "IOC", "executionMode": "aggressive_limit"}
+            if execution_entry_mode == "weak_bull_scale_in_limit":
+                params["executionMode"] = "weak_bull_scale_in"
+            elif execution_entry_mode == "early_bullish_starter_limit":
+                params["executionMode"] = "early_bullish_starter"
+            elif execution_entry_mode == "starter_frontrun_limit":
+                params["executionMode"] = "starter_frontrun"
+            elif order_flow_assessment is not None:
+                params["orderFlowImbalance"] = round(order_flow_assessment.imbalance_ratio, 4)
+            response = self.client.place_limit_order(self.symbol, side, amount, aggressive_limit_price, params=params)
+            limit_response = self._refresh_ioc_fill(response)
+            limit_filled = self._normalize_order_amount(
+                self._extract_filled_amount(limit_response, 0.0, used_limit_order=True)
+            )
+            limit_price = self._extract_order_price(limit_response, fallback=fallback_price or response.get("price") or 0.0)
+            unfilled_amount = self._normalize_order_amount(max(0.0, float(amount) - limit_filled))
+            self._log_entry_fill(
+                order=limit_response,
+                limit_price=response.get("price"),
+                fill_price=limit_price,
+                fill_qty=limit_filled,
+                unfilled_qty=unfilled_amount,
+            )
+            if limit_filled > 0 and unfilled_amount <= max(minimum_amount, 0.0):
+                return EntryOrderResult(limit_response, True, limit_filled, limit_price)
+
+            market_response = self.client.place_market_order(self.symbol, side, max(unfilled_amount, amount if limit_filled <= 0 else unfilled_amount))
+            market_filled = self._normalize_order_amount(
+                self._extract_filled_amount(market_response, unfilled_amount if limit_filled > 0 else amount, used_limit_order=False)
+            )
+            market_price = self._extract_order_price(
+                market_response,
+                fallback=fallback_price or limit_price or aggressive_limit_price,
+            )
+            remaining_unfilled = self._normalize_order_amount(max(0.0, amount - limit_filled - market_filled))
+            self._log_entry_fill(
+                order=market_response,
+                limit_price=response.get("price"),
+                fill_price=market_price,
+                fill_qty=market_filled,
+                unfilled_qty=remaining_unfilled,
+            )
+            combined_filled = self._normalize_order_amount(limit_filled + market_filled)
+            combined_average = None
+            if combined_filled > 0:
+                combined_average = ((limit_filled * limit_price) + (market_filled * market_price)) / combined_filled
+            combined_order = {
+                **limit_response,
+                "filled": combined_filled,
+                "average": combined_average,
+                "amount": amount,
+                "remaining": self._normalize_order_amount(max(0.0, amount - combined_filled)),
+                "info": {
+                    **(limit_response.get("info") or {}),
+                    "marketChaseOrder": market_response,
+                },
+            }
+            return EntryOrderResult(combined_order, True, combined_filled, combined_average)
+
+        response = self.client.place_market_order(self.symbol, side, amount)
+        filled_amount = self._normalize_order_amount(
+            self._extract_filled_amount(response, amount, used_limit_order=False)
+        )
+        average_price = self._extract_order_price(response, fallback=fallback_price or 0.0) if filled_amount > 0 else None
+        return EntryOrderResult(response, False, filled_amount, average_price)
+
+    def _resolve_aggressive_entry_price(
+        self,
+        *,
+        side: str,
+        order_flow_assessment: OrderFlowAssessment | None,
+        execution_entry_mode: str,
+    ) -> float | None:
+        if execution_entry_mode in {"weak_bull_scale_in_limit", "early_bullish_starter_limit", "starter_frontrun_limit", "starter_short_frontrun_limit", "near_breakout_release_limit"}:
+            reference_price = self._resolve_book_reference_price(side=side)
+        else:
+            if (
+                order_flow_assessment is None
+                or not order_flow_assessment.entry_allowed
+                or not order_flow_assessment.use_limit_order
+            ):
+                return None
+            reference_price = order_flow_assessment.best_ask if side == "buy" else order_flow_assessment.best_bid
+        if reference_price in (None, 0, "0"):
+            return None
+        tick_size = self._estimate_tick_size(side=side)
+        if tick_size <= 0:
+            return None
+        offset_ticks = 1.0 if execution_entry_mode == "weak_bull_scale_in_limit" else 2.0
+        if execution_entry_mode in {"starter_frontrun_limit", "starter_short_frontrun_limit"}:
+            offset_ticks = 1.5
+        aggressive_price = float(reference_price) + (offset_ticks * tick_size if side == "buy" else -offset_ticks * tick_size)
+        if hasattr(self.client, "price_to_precision"):
+            aggressive_price = float(self.client.price_to_precision(self.symbol, aggressive_price))
+        return aggressive_price
+
+    def _resolve_book_reference_price(self, *, side: str) -> float | None:
+        try:
+            order_book = self.client.fetch_order_book(self.symbol, limit=1)
+        except Exception:
+            return None
+        levels = list((order_book.get("asks") if side == "buy" else order_book.get("bids")) or [])
+        if not levels:
+            return None
+        return float(levels[0][0])
+
+    def _estimate_tick_size(self, *, side: str) -> float:
+        try:
+            order_book = self.client.fetch_order_book(self.symbol, limit=3)
+        except Exception:
+            order_book = {}
+        levels = list((order_book.get("asks") if side == "buy" else order_book.get("bids")) or [])
+        prices = [float(level[0]) for level in levels if isinstance(level, (list, tuple)) and len(level) >= 2 and float(level[0]) > 0]
+        prices = sorted(set(prices))
+        if len(prices) >= 2:
+            diffs = [abs(b - a) for a, b in zip(prices, prices[1:]) if abs(b - a) > 0]
+            if diffs:
+                return min(diffs)
+        return 0.01
+
+    def _manage_position(self, signal: TrendSignal) -> tuple[list[str], bool]:
+        assert self.position is not None
+        actions: list[str] = []
+
+        if signal.direction != 0 and signal.direction != self.position.direction:
+            if not self._signal_flip_pending:
+                reduction_ratio = float(getattr(self.config, "signal_flip_reduce_ratio", 0.50))
+                reduction_size = self.position.remaining_size * reduction_ratio
+                if reduction_size > 0 and self._reduce_position(reduction_size):
+                    self._signal_flip_pending = True
+                    self._publish_risk_profile(None if self.position is None else signal)
+                    actions.append("cta:signal_flip_reduce")
+                    return actions, self.position is None
+            self._close_remaining_position(reason="signal_flip")
+            self._publish_risk_profile(None)
+            actions.append("cta:signal_flip_exit")
+            return actions, True
+        self._signal_flip_pending = False
+
+        profit_ratio = self.position.profit_ratio(signal.price)
+        first_take_profit_pct = float(getattr(self.config, 'obv_scalp_first_take_profit_pct', 0.006)) if self.position.quick_trade_mode else float(self.config.first_take_profit_pct)
+        second_take_profit_pct = float(getattr(self.config, 'obv_scalp_second_take_profit_pct', 0.012)) if self.position.quick_trade_mode else float(self.config.second_take_profit_pct)
+        first_exit_size = self.position.initial_size * (0.50 if self.position.quick_trade_mode else self.config.first_take_profit_size)
+        second_exit_size = self.position.initial_size * (0.50 if self.position.quick_trade_mode else self.config.second_take_profit_size)
+
+        if self.position is not None and not self.position.first_target_hit and profit_ratio >= first_take_profit_pct:
+            if self._reduce_position(first_exit_size):
+                if self.position is not None:
+                    self.position.first_target_hit = True
+                actions.append("cta:take_profit_2pct")
+
+        if self.position is not None and not self.position.second_target_hit and profit_ratio >= second_take_profit_pct:
+            if self._reduce_position(second_exit_size):
+                if self.position is not None:
+                    self.position.second_target_hit = True
+                actions.append("cta:take_profit_5pct")
+
+        if self.position is None:
+            self._publish_risk_profile(None)
+            return actions, True
+
+        atr_value = self._normalized_atr(signal.price, signal.atr)
+        stop_multiplier = self._resolve_dynamic_stop_loss_multiplier(signal)
+        if self.position.quick_trade_mode:
+            stop_multiplier *= float(getattr(self.config, 'obv_scalp_stop_multiplier_scale', 0.60))
+        self.position.update_dynamic_stop(signal.price, atr_value, stop_multiplier)
+        if self.position.stop_hit(signal.price):
+            self._close_remaining_position(reason="atr_stop")
+            self._publish_risk_profile(None)
+            actions.append("cta:atr_stop_all_out")
+            return actions, True
+
+        self._publish_risk_profile(signal)
+        return actions, False
+
+    def _reduce_position(self, size: float) -> bool:
+        if self.position is None:
+            return False
+
+        amount = min(self.position.remaining_size, self._round_size(size))
+        if amount <= 0:
+            return False
+
+        position = self.position
+        exit_order = self.client.place_market_order(
+            self.symbol,
+            position.exit_side,
+            amount,
+            reduce_only=True,
+        )
+        self._notify_realized_profit(position=position, amount=amount, exit_order=exit_order, reason="partial_take_profit")
+        position.remaining_size = self._round_size(position.remaining_size - amount)
+        if position.remaining_size <= 0:
+            self.position = None
+            self._publish_risk_profile(None)
+        else:
+            self._publish_risk_profile(None)
+        return True
+
+    def _close_remaining_position(self, reason: str) -> None:
+        if self.position is None:
+            return
+
+        position = self.position
+        amount = self._round_size(position.remaining_size)
+        if amount > 0:
+            exit_order = self.client.place_market_order(
+                self.symbol,
+                position.exit_side,
+                amount,
+                reduce_only=True,
+                params={"reason": reason},
+            )
+            self._notify_realized_profit(position=position, amount=amount, exit_order=exit_order, reason=reason)
+        self.position = None
+
+    def _apply_runtime_coordination(self, signal: TrendSignal) -> str | None:
+        if self.runtime_context is None:
+            return None
+        if self.position is None:
+            return None
+
+        grid_state = self.runtime_context.snapshot_grid()
+        if not grid_state.hedge_assist_requested:
+            return None
+        if grid_state.symbol not in {"", self.symbol}:
+            return None
+        if grid_state.hedge_assist_target_side not in {self.position.side, None}:
+            return None
+
+        reduction_ratio = float(getattr(self.config, "cta_assist_trim_ratio", 0.25))
+        reduction_size = self.position.remaining_size * reduction_ratio
+        if reduction_size <= 0:
+            return None
+        if not self._reduce_position(reduction_size):
+            return None
+
+        self._publish_risk_profile(signal)
+        return f"cta:coordination_reduce_{self.position.side if self.position is not None else 'flat'}|reason={grid_state.hedge_assist_reason or 'grid_inventory_heavy'}"
+
+    def _publish_risk_profile(self, signal: TrendSignal | None) -> None:
+        current_side = None
+        current_size = 0.0
+        strong_trend = False
+        trend_strength = 0.0
+        if self.position is not None:
+            current_side = self.position.side
+            current_size = self._round_size(self.position.remaining_size)
+        if signal is not None:
+            trend_strength = abs(float(signal.major_bias_score or 0.0))
+            strong_trend = bool(self.position is not None and signal.direction != 0 and signal.direction == self.position.direction and trend_strength >= float(self.config.strong_bull_bias_score))
+        if self.runtime_context is not None:
+            self.runtime_context.publish_cta_state(
+                symbol=self.symbol,
+                side=current_side,
+                size=current_size,
+                trend_strength=trend_strength,
+                strong_trend=strong_trend,
+                major_direction=int(signal.major_direction) if signal is not None else 0,
+                bullish_ready=bool(signal.bullish_ready) if signal is not None else False,
+            )
+        if self.risk_manager is None:
+            return
+        if self.position is None:
+            self.risk_manager.update_cta_risk(None)
+            return
+
+        atr_value = self.position.atr_value
+        if signal is not None:
+            atr_value = self._normalized_atr(signal.price, signal.atr)
+
+        self.risk_manager.update_cta_risk(
+            CTARiskProfile(
+                symbol=self.symbol,
+                side=self.position.side,
+                stop_price=self.position.stop_price,
+                remaining_size=self._round_size(self.position.remaining_size),
+                atr_value=atr_value,
+                stop_distance=self.position.stop_distance,
+            )
+        )
+
+    def _refresh_ioc_fill(self, order: dict) -> dict:
+        order_id = order.get("id")
+        fetch_order = getattr(self.client, "fetch_order", None)
+        if order_id in (None, "") or not callable(fetch_order):
+            return order
+
+        latest = order
+        for attempt in range(2):
+            if attempt > 0:
+                time.sleep(0.05)
+            refreshed = fetch_order(str(order_id), self.symbol)
+            if refreshed:
+                latest = refreshed
+                filled_amount = self._extract_filled_amount(latest, 0.0, used_limit_order=True)
+                remaining = latest.get("remaining")
+                if filled_amount > 0 or remaining in (0, 0.0, "0"):
+                    break
+        return latest
+
+    def _log_entry_fill(
+        self,
+        *,
+        order: dict | None,
+        limit_price: float | None,
+        fill_price: float | None,
+        fill_qty: float,
+        unfilled_qty: float,
+    ) -> None:
+        order_id = None if not order else order.get("id")
+        logger.info(
+            "CTA entry fill | order_id=%s limit_price=%s fill_price=%s fill_qty=%.12f unfilled_qty=%.12f",
+            order_id,
+            limit_price,
+            fill_price,
+            float(fill_qty),
+            float(unfilled_qty),
+        )
+
+    def _extract_filled_amount(self, order: dict | None, fallback: float, *, used_limit_order: bool) -> float:
+        if not order:
+            return 0.0 if used_limit_order else float(fallback)
+
+        explicit_zero_fill = False
+        filled = order.get("filled")
+        if filled not in (None, ""):
+            filled_value = abs(float(filled))
+            if used_limit_order and filled_value <= 0:
+                explicit_zero_fill = True
+            else:
+                return filled_value
+
+        info = order.get("info") or {}
+        for key in ("accFillSz", "fillSz", "filledSize"):
+            value = info.get(key)
+            if value not in (None, ""):
+                filled_value = abs(float(value))
+                if used_limit_order and filled_value <= 0:
+                    explicit_zero_fill = True
+                    continue
+                return filled_value
+
+        amount = order.get("amount")
+        remaining = order.get("remaining")
+        if amount not in (None, "") and remaining not in (None, ""):
+            inferred_filled = max(0.0, abs(float(amount)) - abs(float(remaining)))
+            if inferred_filled > 0:
+                return inferred_filled
+
+        status = str(order.get("status") or "").lower()
+        if used_limit_order:
+            if explicit_zero_fill:
+                return 0.0
+            if status in {"canceled", "cancelled", "expired", "rejected"}:
+                return 0.0
+
+        if amount not in (None, ""):
+            return abs(float(amount))
+        return float(fallback)
+
+    def _extract_order_price(self, order: dict | None, *, fallback: float) -> float:
+        if not order:
+            return float(fallback)
+
+        for key in ("average", "avgPrice", "price"):
+            value = order.get(key)
+            if value not in (None, "", 0, "0"):
+                return float(value)
+
+        info = order.get("info") or {}
+        for key in ("avgPx", "fillPx", "px"):
+            value = info.get(key)
+            if value not in (None, "", 0, "0"):
+                return float(value)
+        return float(fallback)
+
+    def _notify_realized_profit(self, *, position: ManagedPosition, amount: float, exit_order: dict | None, reason: str | None = None) -> None:
+        exit_amount = self._round_size(amount)
+        if exit_amount <= 0:
+            return
+
+        fallback_price = None
+        if hasattr(self.client, "fetch_last_price"):
+            try:
+                fallback_price = float(self.client.fetch_last_price(self.symbol))
+            except Exception:
+                fallback_price = None
+        if fallback_price in (None, 0):
+            fallback_price = position.entry_price
+
+        exit_price = self._extract_order_price(exit_order, fallback=float(fallback_price))
+        if exit_price <= 0 or position.entry_price <= 0:
+            return
+
+        contract_value = 1.0
+        if hasattr(self.client, "get_contract_value"):
+            try:
+                contract_value = abs(float(self.client.get_contract_value(self.symbol))) or 1.0
+            except Exception:
+                contract_value = 1.0
+
+        price_delta = exit_price - position.entry_price
+        if position.side == "short":
+            price_delta = position.entry_price - exit_price
+        pnl = float(price_delta) * float(exit_amount) * contract_value
+        entry_notional = abs(float(position.entry_price)) * float(exit_amount) * contract_value
+        roi = (pnl / entry_notional * 100.0) if entry_notional > 0 else 0.0
+
+        balance = 0.0
+        if hasattr(self.client, "fetch_total_equity"):
+            try:
+                balance = float(self.client.fetch_total_equity("USDT"))
+            except Exception:
+                balance = 0.0
+
+        logger.info(
+            "[TRADE_CLOSE] side=%s reason=%s entry=%.4f exit=%.4f size=%.8f pnl=%.4f roi=%.4f%% stop=%.4f best=%.4f",
+            position.side,
+            reason or "unspecified",
+            float(position.entry_price),
+            float(exit_price),
+            float(exit_amount),
+            float(pnl),
+            float(roi),
+            float(position.stop_price),
+            float(position.best_price),
+        )
+
+        if self.notifier is None or not hasattr(self.notifier, "notify_profit"):
+            return
+
+        self.notifier.notify_profit(
+            pnl=pnl,
+            roi=roi,
+            balance=balance,
+            strategy=self.strategy_name,
+            symbol=self.symbol,
+            side=position.side.upper(),
+            exit_price=exit_price,
+            size=exit_amount,
+        )
+
+    def _normalize_order_amount(self, amount: float) -> float:
+        normalized = max(0.0, float(amount))
+        if hasattr(self.client, "amount_to_precision"):
+            normalized = float(self.client.amount_to_precision(self.symbol, normalized))
+        minimum_amount = 0.0
+        if hasattr(self.client, "get_min_order_amount"):
+            minimum_amount = float(self.client.get_min_order_amount(self.symbol))
+        normalized = self._round_size(normalized)
+        if normalized < minimum_amount - 1e-12:
+            return 0.0
+        return normalized
+
+    def _normalized_atr(self, price: float, atr: float) -> float:
+        return max(float(atr), float(price) * 0.001)
+
+    def _resolve_risk_percent(self, mtf_signal: MTFSignal) -> float:
+        boosted_risk = max(float(self.config.risk_percent_per_trade), float(self.config.boosted_risk_percent_per_trade))
+        if mtf_signal.fully_aligned and not mtf_signal.weak_bull_bias:
+            return boosted_risk
+        return float(self.config.risk_percent_per_trade)
+
+    @staticmethod
+    def _round_size(size: float) -> float:
+        rounded = round(float(size), 12)
+        return 0.0 if abs(rounded) < 1e-12 else rounded

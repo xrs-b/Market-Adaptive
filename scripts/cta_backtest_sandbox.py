@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -92,6 +93,10 @@ class BacktestDatabaseStub:
 
     def upsert_strategy_runtime_state(self, state):
         self.runtime_states[(state.strategy_name, state.symbol)] = state
+        return None
+
+    def insert_trade_journal(self, record):
+        del record
         return None
 
 
@@ -329,8 +334,16 @@ class CTABacktester:
             'entry_pathway_counts': {},
             'opened_by_pathway': {},
             'opened_by_quality_tier': {},
+            'trigger_family_funnel': {},
             'signal_samples': [],
         }
+
+    def _bump_trigger_family_metric(self, family: str, metric: str) -> None:
+        normalized_family = str(family or '').strip() or 'waiting'
+        if normalized_family == 'waiting':
+            return
+        bucket = self.diagnostics['trigger_family_funnel'].setdefault(normalized_family, {})
+        bucket[metric] = int(bucket.get(metric, 0) or 0) + 1
 
     def _resolve_required_warmup_bars(self, requested_warmup_bars: int) -> int:
         minimum_bars = int(getattr(self.robot.mtf_engine, 'minimum_bars', 100))
@@ -362,8 +375,9 @@ class CTABacktester:
             except Exception:
                 signal = None
             self._collect_diagnostics(signal)
+            previous_position = self.robot.position
             action = self.robot.execute_active_cycle()
-            self._collect_action_diagnostics(action, signal=signal)
+            self._collect_action_diagnostics(action, signal=signal, previous_position=previous_position)
             self.actions.append((int(current_row['timestamp']), action))
             equity = self.client.fetch_total_equity('USDT')
             self.equity_curve.append((int(current_row['timestamp']), equity))
@@ -379,6 +393,9 @@ class CTABacktester:
         direction = int(getattr(signal, 'direction', 0) or 0)
         quality_tier = str(getattr(getattr(signal, 'signal_quality_tier', None), 'name', getattr(signal, 'signal_quality_tier', 'TIER_LOW')) or 'TIER_LOW')
         entry_pathway = str(getattr(getattr(signal, 'entry_pathway', None), 'name', getattr(signal, 'entry_pathway', 'STRICT')) or 'STRICT')
+        trigger_family = str(getattr(signal, 'execution_trigger_family', '') or '')
+        if raw_direction != 0:
+            self._bump_trigger_family_metric(trigger_family, 'appeared')
         if reason == 'waiting_execution_trigger_drift':
             self.diagnostics['waiting_drift'] += 1
         elif reason == 'waiting_execution_trigger_near_breakout':
@@ -397,6 +414,8 @@ class CTABacktester:
             self.diagnostics['raw_directional'] += 1
         if direction != 0:
             self.diagnostics['directional_ready'] += 1
+        if blocker and blocker != 'PASSED':
+            self._bump_trigger_family_metric(trigger_family, 'blocked')
         quality_counts = self.diagnostics['quality_tier_counts']
         quality_counts[quality_tier] = quality_counts.get(quality_tier, 0) + 1
         pathway_counts = self.diagnostics['entry_pathway_counts']
@@ -419,7 +438,7 @@ class CTABacktester:
                 'bearish_score': float(getattr(signal, 'bearish_score', 0.0) or 0.0),
             })
 
-    def _collect_action_diagnostics(self, action: str, signal=None) -> None:
+    def _collect_action_diagnostics(self, action: str, signal=None, previous_position=None) -> None:
         if action.startswith('cta:open_'):
             self.diagnostics['opened_actions'] += 1
             if 'obv_scalp' in action:
@@ -431,8 +450,12 @@ class CTABacktester:
                 opened_by_pathway[entry_pathway] = opened_by_pathway.get(entry_pathway, 0) + 1
                 opened_by_quality = self.diagnostics['opened_by_quality_tier']
                 opened_by_quality[quality_tier] = opened_by_quality.get(quality_tier, 0) + 1
+                trigger_family = str(getattr(signal, 'execution_trigger_family', '') or '')
+                self._bump_trigger_family_metric(trigger_family, 'opened')
         if 'all_out' in action or action.startswith('cta:signal_flip_exit'):
             self.diagnostics['closed_actions'] += 1
+            trigger_family = str(getattr(previous_position, 'origin_trigger_family', '') or '')
+            self._bump_trigger_family_metric(trigger_family, 'closed')
         if action.startswith('cta:order_flow_blocked'):
             self.diagnostics['blocked_order_flow'] += 1
 

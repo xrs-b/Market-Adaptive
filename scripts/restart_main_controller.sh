@@ -13,33 +13,47 @@ ARCHIVE_DIR="$LOG_DIR/archive"
 PLIST_NAME="com.market_adaptive.main_controller"
 CMD=("$PYTHON_BIN" "$ROOT_DIR/scripts/run_main_controller.py" --config "$CONFIG_PATH" --log-level "$LOG_LEVEL")
 
-# Use launchctl to restart the launchd-managed service, avoiding double-instance race
+# Prefer launchd supervision; only fall back to manual start as a last resort.
 restart_via_launchd() {
-  local uid
+  local uid plist_path
   uid=$(id -u)
-  # Bootout stops the service and prevents launchd from auto-restarting it within the window
-  if launchctl bootout "gui/${uid}/${PLIST_NAME}" 2>/dev/null; then
+  plist_path="$HOME/Library/LaunchAgents/${PLIST_NAME}.plist"
+
+  if launchctl print "gui/${uid}/${PLIST_NAME}" >/dev/null 2>&1; then
+    echo "launchd: kickstart ${PLIST_NAME}"
+    if launchctl kickstart -k "gui/${uid}/${PLIST_NAME}" >/dev/null 2>&1; then
+      echo "launchd: restarted ${PLIST_NAME}"
+      return 0
+    fi
+    echo "launchd: kickstart failed, trying bootout/bootstrap"
+  fi
+
+  if launchctl bootout "gui/${uid}/${PLIST_NAME}" >/dev/null 2>&1; then
     echo "launchd: stopped ${PLIST_NAME}"
   else
     echo "launchd: ${PLIST_NAME} not loaded or already stopped"
   fi
 
-  # Small settle time to ensure launchd has unregistered the job
   sleep 2
 
-  # Bootstrap restarts the service under launchd management
-  if launchctl bootstrap "gui/${uid}" ~/Library/LaunchAgents/"${PLIST_NAME}".plist 2>/dev/null; then
+  if launchctl bootstrap "gui/${uid}" "$plist_path" >/dev/null 2>&1; then
     echo "launchd: restarted ${PLIST_NAME}"
-  else
-    echo "launchd: bootstrap failed, starting manually"
-    mkdir -p "$LOG_DIR" "$ARCHIVE_DIR"
-    if [[ -f "$LOG_FILE" && -s "$LOG_FILE" ]]; then
-      ts="$(date +"%Y%m%d-%H%M%S")"
-      mv "$LOG_FILE" "$ARCHIVE_DIR/main_controller-$ts.log"
-    fi
-    nohup "${CMD[@]}" > "$LOG_FILE" 2>&1 &
-    echo "Started main controller: $!"
+    return 0
   fi
+
+  if launchctl kickstart -k "gui/${uid}/${PLIST_NAME}" >/dev/null 2>&1; then
+    echo "launchd: restarted ${PLIST_NAME} via kickstart after bootstrap miss"
+    return 0
+  fi
+
+  echo "launchd: bootstrap/kickstart failed, starting manually"
+  mkdir -p "$LOG_DIR" "$ARCHIVE_DIR"
+  if [[ -f "$LOG_FILE" && -s "$LOG_FILE" ]]; then
+    ts="$(date +"%Y%m%d-%H%M%S")"
+    mv "$LOG_FILE" "$ARCHIVE_DIR/main_controller-$ts.log"
+  fi
+  nohup "${CMD[@]}" > "$LOG_FILE" 2>&1 &
+  echo "Started main controller: $!"
 }
 
 restart_via_launchd

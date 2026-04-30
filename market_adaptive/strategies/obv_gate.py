@@ -33,7 +33,12 @@ _HIGH_QUALITY_LONG_TRIGGER_MARKERS = (
     "triggered via memory window",
 )
 
+_MAJOR_BULL_RETEST_LONG_TRIGGER_MARKERS = (
+    "major_bull_retest_ready",
+)
+
 _POST_TRIGGER_SOFT_OBV_THRESHOLD = 0.50
+_MAJOR_BULL_RETEST_HIGH_SCORE_OBV_THRESHOLD = 0.25
 _SHORT_RECOVERY_OBV_GRACE_ZSCORE_CEILING = 0.26
 _SHORT_RECOVERY_OBV_GRACE_LOOKBACK_BARS = 2
 
@@ -110,6 +115,10 @@ def _is_high_quality_long_post_trigger_context(
     if _contains_any_marker(execution_entry_mode, _LONG_RECOVERY_MARKERS) or _contains_any_marker(trigger_reason, _LONG_RECOVERY_MARKERS):
         return False
     return _contains_any_marker(trigger_reason, _HIGH_QUALITY_LONG_TRIGGER_MARKERS)
+
+
+def _is_major_bull_retest_long_context(*, side: str = "long", trigger_reason: str = "") -> bool:
+    return str(side).lower() == "long" and _contains_any_marker(trigger_reason, _MAJOR_BULL_RETEST_LONG_TRIGGER_MARKERS)
 
 
 def detect_recent_short_obv_confirmation(
@@ -199,7 +208,11 @@ def resolve_dynamic_obv_gate(
         execution_entry_mode=execution_entry_mode,
     )
     strict_threshold = min(float(configured_threshold), 0.60)
-    if float(bullish_score) >= 80.0:
+    major_bull_retest_long_context = _is_major_bull_retest_long_context(
+        side=resolved_side,
+        trigger_reason=trigger_reason,
+    )
+    if float(bullish_score) >= 80.0 and not major_bull_retest_long_context:
         return OBVGateDecision(threshold=-1.0, exempt=True, side=resolved_side)
     recovery_context = _is_recovery_context(
         side=resolved_side,
@@ -221,6 +234,12 @@ def resolve_dynamic_obv_gate(
             exempt=False,
             side=resolved_side,
             short_recovery_grace_active=short_recovery_grace_active,
+        )
+    if major_bull_retest_long_context and float(bullish_score) >= 80.0:
+        return OBVGateDecision(
+            threshold=_MAJOR_BULL_RETEST_HIGH_SCORE_OBV_THRESHOLD,
+            exempt=False,
+            side=resolved_side,
         )
     if bool(execution_frontrun_near_breakout):
         return OBVGateDecision(threshold=-0.1 if resolved_side == "long" else 0.0, exempt=False, side=resolved_side)

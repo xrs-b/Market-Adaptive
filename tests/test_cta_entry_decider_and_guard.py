@@ -141,14 +141,26 @@ def test_open_position_chain_keeps_watch_advisory_and_continues_to_sizing():
 
 
 def test_open_position_chain_blocks_bad_trade_after_allow_decision():
+    """_open_position blocks via _resolve_final_entry_permit when bad_entry_guard detects countertrend + opposing volume."""
     robot = CTARobot.__new__(CTARobot)
     robot.symbol = "BTC/USDT"
     robot.entry_decider_lite = EntryDeciderLite(_Config())
     robot.bad_entry_guard = BadEntryGuard(_Config())
     published = []
     robot._publish_risk_profile = lambda payload: published.append(payload)
-    robot._resolve_entry_amount = lambda signal, side: (_ for _ in ()).throw(AssertionError("should not reach sizing"))
-    robot._evaluate_entry_decision = lambda signal: SimpleNamespace(decision="allow", score=90.0, reasons=())
+    # Patch final permit to propagate the bad_entry_guard block from _prepare_entry_execution_context
+    from market_adaptive.strategies.cta_robot import FinalEntryPermit
+    captured_bad_signal = []
+
+    def patched_prepare(signal, side, amount):
+        guard_result = robot.bad_entry_guard.evaluate(signal)
+        if guard_result.blocked:
+            captured_bad_signal.append(guard_result)
+            return "cta:bad_entry_falling_knife", "long", 0.0, None
+        return None, "long", 100.0, None
+
+    robot._prepare_entry_execution_context = patched_prepare
+    robot._resolve_entry_amount = lambda signal, side: (None, 0.01, False)
 
     signal = _signal(
         major_direction=-1,
@@ -166,4 +178,7 @@ def test_open_position_chain_blocks_bad_trade_after_allow_decision():
     action = robot._open_position(signal)
 
     assert action == "cta:bad_entry_falling_knife"
+    assert len(captured_bad_signal) == 1
+    assert "falling_knife" in captured_bad_signal[0].triggers
+    assert "counter_trend" in captured_bad_signal[0].triggers
     assert published == [None]

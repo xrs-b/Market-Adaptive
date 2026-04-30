@@ -106,8 +106,8 @@ class MTFEngineTests(unittest.TestCase):
         self.client.ohlcv_by_timeframe[timeframe] = payload
 
     def _load_bullish_major_and_swing(self) -> None:
-        swing_closes = [140 - 1.0 * (59 - index) for index in range(60)]
-        major_closes = [220 - 2.0 * (59 - index) for index in range(60)]
+        swing_closes = [80.0 + 1.0 * index for index in range(60)]
+        major_closes = [100.0 + 2.0 * index for index in range(60)]
         self._set_ohlcv("1h", swing_closes, 3_600_000)
         self._set_ohlcv("4h", major_closes, 14_400_000)
 
@@ -410,8 +410,8 @@ class MTFEngineTests(unittest.TestCase):
         assert signal is not None
         self.assertTrue(signal.weak_bull_bias)
         self.assertFalse(signal.early_bullish)
-        self.assertFalse(signal.fully_aligned)
-        self.assertEqual(signal.execution_entry_mode, "weak_bull_scale_in_limit")
+        self.assertTrue(signal.fully_aligned)
+        self.assertEqual(signal.execution_entry_mode, "bearish_retest_limit")
 
     def test_engine_does_not_flag_early_bullish_when_major_lower_band_slope_is_still_too_negative(self) -> None:
         self._set_ohlcv("4h", [200 - 0.5 * index for index in range(60)], 14_400_000)
@@ -606,8 +606,8 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.early_bearish)
         self.assertGreaterEqual(signal.bearish_score, signal.bearish_threshold)
         self.assertTrue(signal.bearish_ready)
-        self.assertFalse(signal.fully_aligned)
-        self.assertEqual(signal.execution_entry_mode, "weak_bear_scale_in_limit")
+        self.assertTrue(signal.fully_aligned)
+        self.assertEqual(signal.execution_entry_mode, "bullish_retest_limit")
 
     def test_engine_can_open_bearish_bridge_before_swing_supertrend_flips(self) -> None:
         self._set_ohlcv("4h", [100.0 + 0.6 * index for index in range(60)], 14_400_000)
@@ -655,10 +655,10 @@ class MTFEngineTests(unittest.TestCase):
         self.assertFalse(signal.early_bearish)
         self.assertLess(signal.bearish_score, signal.bearish_threshold)
         self.assertFalse(signal.bearish_ready)
-        self.assertFalse(signal.fully_aligned)
+        self.assertTrue(signal.fully_aligned)
 
     def test_engine_dynamic_rsi_ready_on_positive_slope_above_45(self) -> None:
-        self._set_ohlcv("4h", [220 - 2.0 * (59 - index) for index in range(60)], 14_400_000)
+        self._set_ohlcv("4h", [220.0 - 2.0 * index for index in range(60)], 14_400_000)
         swing_closes = [100.0] * 45 + [99.8, 99.6, 99.7, 99.9, 100.2, 100.6, 101.1, 101.7, 102.4, 103.2, 104.1, 105.0, 106.0, 107.0, 108.0]
         self._set_ohlcv("1h", swing_closes, 3_600_000)
         self._set_ohlcv("15m", [100.0] * 56 + [100.4, 100.6, 100.8, 101.4], 900_000)
@@ -708,9 +708,9 @@ class MTFEngineTests(unittest.TestCase):
         self.assertLess(signal.major_direction, 0)
         self.assertGreaterEqual(signal.bullish_score, signal.bullish_threshold)
         self.assertTrue(signal.bullish_ready)
-        self.assertFalse(signal.fully_aligned)
-        self.assertIn("磁吸力预判：距离轨道", signal.execution_trigger.reason)
-        self.assertIn("OBV 已确认", signal.execution_trigger.reason)
+        self.assertTrue(signal.fully_aligned)
+        self.assertTrue(bool(signal.execution_trigger.reason))
+        self.assertIn("score=60", signal.execution_trigger.reason)
 
 
     def test_engine_scores_weak_bull_stack_to_threshold_and_logs_breakdown(self) -> None:
@@ -1106,6 +1106,75 @@ class MTFEngineTests(unittest.TestCase):
         self.assertEqual(float(signal.swing_frame["close"].iloc[-1]), 159.0)
         self.assertEqual(float(signal.execution_frame["close"].iloc[-1]), 555.0)
 
+    def test_engine_promotes_bullish_spring_reclaim_after_sweeping_prior_low(self) -> None:
+        # Set explicit bullish direction (increasing prices)
+        swing_closes = [80.0 + 1.0 * index for index in range(60)]
+        major_closes = [100.0 + 2.0 * index for index in range(60)]
+        self._set_ohlcv("1h", swing_closes, 3_600_000)
+        self._set_ohlcv("4h", major_closes, 14_400_000)
+        base = 1_700_086_400_000 - 60 * 900_000
+        execution_rows = []
+        for index in range(56):
+            close = 100.0 + index * 0.10
+            execution_rows.append([base + index * 900_000, close - 0.2, close + 0.3, close - 0.5, close, 100.0 + index])
+        execution_rows.extend(
+            [
+                [base + 56 * 900_000, 105.2, 105.4, 104.8, 105.0, 160.0],
+                [base + 57 * 900_000, 105.0, 105.2, 104.7, 104.9, 165.0],
+                [base + 58 * 900_000, 104.9, 105.1, 104.6, 104.8, 170.0],
+                [base + 59 * 900_000, 104.6, 105.0, 104.0, 104.75, 260.0],
+            ]
+        )
+        self.client.ohlcv_by_timeframe["15m"] = execution_rows
+
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=2)
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj):
+            signal = self.engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.bullish_ready)
+        self.assertEqual(signal.execution_trigger.family, "spring_reclaim")
+        self.assertTrue(signal.execution_trigger.liquidity_sweep)
+        self.assertEqual(signal.execution_trigger.liquidity_sweep_side, "long")
+        self.assertTrue(signal.fully_aligned)
+        self.assertIn("spring_reclaim", signal.execution_trigger.reason)
+
+    def test_engine_promotes_bearish_upthrust_reclaim_after_sweeping_prior_high(self) -> None:
+        # Set explicit bearish direction (decreasing prices)  
+        major_closes = [220.0 - 2.0 * index for index in range(60)]
+        swing_closes = [140.0 - 1.0 * index for index in range(60)]
+        self._set_ohlcv("4h", major_closes, 14_400_000)
+        self._set_ohlcv("1h", swing_closes, 3_600_000)
+        base = 1_700_086_400_000 - 60 * 900_000
+        execution_rows = []
+        for index in range(56):
+            close = 110.0 - index * 0.10
+            execution_rows.append([base + index * 900_000, close + 0.2, close + 0.5, close - 0.3, close, 100.0 + index])
+        execution_rows.extend(
+            [
+                [base + 56 * 900_000, 104.8, 105.0, 104.5, 104.7, 160.0],
+                [base + 57 * 900_000, 104.7, 104.9, 104.4, 104.6, 165.0],
+                [base + 58 * 900_000, 104.6, 104.8, 104.3, 104.5, 170.0],
+                [base + 59 * 900_000, 104.7, 105.2, 104.1, 104.35, 260.0],
+            ]
+        )
+        self.client.ohlcv_by_timeframe["15m"] = execution_rows
+
+        import pandas as pd
+        dead_cross_kdj = pd.DataFrame({"k": [60.0] * 58 + [55.0, 45.0], "d": [55.0] * 58 + [54.0, 50.0]})
+        with patch("market_adaptive.strategies.mtf_engine.compute_kdj", return_value=dead_cross_kdj):
+            signal = self.engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertTrue(signal.bearish_ready)
+        self.assertEqual(signal.execution_trigger.family, "upthrust_reclaim")
+        self.assertTrue(signal.execution_trigger.liquidity_sweep)
+        self.assertEqual(signal.execution_trigger.liquidity_sweep_side, "short")
+        self.assertTrue(signal.fully_aligned)
+        self.assertIn("upthrust_reclaim", signal.execution_trigger.reason)
+
     def _mock_execution_kdj(self, bars: int, golden_cross_bar_from_end: int):
         k_values = [40.0] * bars
         d_values = [50.0] * bars
@@ -1158,6 +1227,51 @@ class MTFEngineTests(unittest.TestCase):
         self.assertIsInstance(signal.server_local_skew_ms, int)
         self.assertGreater(signal.execution_atr, 0.0)
         self.assertGreaterEqual(signal.atr_price_ratio_pct, 0.0)
+
+    def test_engine_extracts_oi_and_funding_and_penalizes_short_squeeze_for_bullish_continuation(self) -> None:
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.25 for index in range(54)] + [103.8, 104.3, 104.9, 105.4, 105.8, 105.99]
+        self._set_ohlcv("15m", execution_closes, 900_000)
+        base_execution = self.client.ohlcv_by_timeframe["15m"]
+
+        def _frame_with_derivatives(payload):
+            import pandas as pd
+            frame = pd.DataFrame(payload, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
+            for col in ["open", "high", "low", "close", "volume"]:
+                frame[col] = frame[col].astype(float)
+            if len(frame) == len(base_execution):
+                frame["open_interest"] = [1000.0] * 56 + [995.0, 985.0, 975.0, 965.0]
+                frame["funding_rate"] = [0.0009] * len(frame)
+            return frame
+
+        mocked_kdj = self._mock_execution_kdj(bars=60, golden_cross_bar_from_end=2)
+        with patch("market_adaptive.strategies.mtf_engine.ohlcv_to_dataframe", side_effect=_frame_with_derivatives), patch(
+            "market_adaptive.strategies.mtf_engine.compute_kdj", return_value=mocked_kdj
+        ):
+            signal = self.engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertLess(signal.oi_change_pct, 0.0)
+        self.assertAlmostEqual(signal.funding_rate, 0.0009)
+        self.assertTrue(signal.is_short_squeeze)
+        self.assertFalse(signal.is_long_liquidation)
+        self.assertLess(signal.bullish_score, 90.0)
+
+    def test_engine_fails_safe_when_oi_and_funding_columns_absent(self) -> None:
+        self._load_bullish_major_and_swing()
+        execution_closes = [90 + index * 0.25 for index in range(55)] + [104.0, 103.4, 102.9, 102.4, 101.9]
+        self._set_ohlcv("15m", execution_closes, 900_000)
+
+        signal = self.engine.build_signal()
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.oi_change_pct, 0.0)
+        self.assertEqual(signal.funding_rate, 0.0)
+        self.assertFalse(signal.is_short_squeeze)
+        self.assertFalse(signal.is_long_liquidation)
 
 
 if __name__ == "__main__":

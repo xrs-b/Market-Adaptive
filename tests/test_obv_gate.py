@@ -70,6 +70,21 @@ class OBVGateTests(unittest.TestCase):
         self.assertEqual((mid.threshold, mid.exempt, mid.side), (0.0, False, "long"))
         self.assertEqual((high.threshold, high.exempt, high.side), (-1.0, True, "long"))
 
+    def test_major_bull_retest_high_score_long_keeps_positive_obv_requirement(self) -> None:
+        gate = resolve_dynamic_obv_gate(
+            bullish_score=80.0,
+            configured_threshold=1.0,
+            trigger_reason="major_bull_retest_ready: gap=0.225% + KDJ memory 2 bars ago",
+        )
+        pass_snapshot = OBVConfirmationSnapshot(1100.0, 1000.0, 5.0, 1.0, 2.0, 0.30)
+        fail_snapshot = OBVConfirmationSnapshot(1100.0, 1000.0, 5.0, 1.0, 2.0, 0.20)
+        below_sma_fail = OBVConfirmationSnapshot(990.0, 1000.0, 5.0, 1.0, 2.0, 0.40)
+
+        self.assertEqual((gate.threshold, gate.exempt, gate.side), (0.25, False, "long"))
+        self.assertTrue(gate.passed(pass_snapshot))
+        self.assertFalse(gate.passed(fail_snapshot))
+        self.assertFalse(gate.passed(below_sma_fail))
+
     def test_long_recovery_context_relaxes_low_score_gate_to_non_negative_obv(self) -> None:
         early = resolve_dynamic_obv_gate(
             bullish_score=40.0,

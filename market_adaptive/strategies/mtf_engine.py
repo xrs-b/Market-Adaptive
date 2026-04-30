@@ -102,6 +102,17 @@ class TimeframeAlignmentCheck:
     valid: bool
 
 
+@dataclass(frozen=True)
+class LiquiditySweepSnapshot:
+    detected: bool = False
+    bullish: bool = False
+    bearish: bool = False
+    reference_price: float | None = None
+    sweep_distance_ratio: float = 0.0
+    close_reclaim_ratio: float = 0.0
+    volume_ratio: float = 0.0
+    trigger_label: str = ""
+
 
 @dataclass
 class ExecutionTriggerSnapshot:
@@ -136,6 +147,16 @@ class ExecutionTriggerSnapshot:
     family: str = "waiting"
     group: str = "waiting"
     reason: str = ""
+    liquidity_sweep: bool = False
+    liquidity_sweep_side: str = ""
+
+
+@dataclass
+class OIFundingSnapshot:
+    oi_change_pct: float = 0.0
+    funding_rate: float = 0.0
+    is_short_squeeze: bool = False
+    is_long_liquidation: bool = False
 
 
 @dataclass
@@ -186,6 +207,10 @@ class MTFSignal:
     stretch_blocked: bool = False
     pending_retest: bool = False
     exhaustion_penalty_applied: bool = False
+    oi_change_pct: float = 0.0
+    funding_rate: float = 0.0
+    is_short_squeeze: bool = False
+    is_long_liquidation: bool = False
 
 
 class MultiTimeframeSignalEngine:
@@ -329,6 +354,84 @@ class MultiTimeframeSignalEngine:
         if violated:
             return False, defended_price, len(execution_frame) - 1 - cross_position
         return True, defended_price, len(execution_frame) - 1 - cross_position
+
+    @staticmethod
+    def _detect_liquidity_sweep(
+        *,
+        execution_frame: pd.DataFrame,
+        reference_price: float | None,
+        atr_value: float,
+        bullish: bool,
+        breakout_lookback: int,
+        min_wick_ratio: float,
+        min_reclaim_ratio: float,
+        min_volume_ratio: float,
+        max_atr_excursion: float,
+    ) -> LiquiditySweepSnapshot:
+        if reference_price is None or reference_price <= 0.0 or atr_value <= 1e-12 or len(execution_frame) < max(5, breakout_lookback + 2):
+            return LiquiditySweepSnapshot()
+
+        candle = execution_frame.iloc[-1]
+        volume_window = execution_frame["volume"].iloc[-max(2, breakout_lookback + 1) : -1]
+        avg_volume = float(volume_window.mean()) if not volume_window.empty else 0.0
+        current_volume = float(candle["volume"])
+        volume_ratio = current_volume / max(avg_volume, 1e-12) if avg_volume > 0.0 else 0.0
+        high = float(candle["high"])
+        low = float(candle["low"])
+        open_price = float(candle["open"])
+        close = float(candle["close"])
+        candle_range = max(high - low, 1e-12)
+
+        if bullish:
+            sweep_distance = max(0.0, reference_price - low)
+            reclaim_distance = max(0.0, close - reference_price)
+            lower_wick = max(0.0, min(open_price, close) - low)
+            wick_ratio = lower_wick / candle_range
+            reclaim_ratio = reclaim_distance / candle_range
+            body_confirmation = close > open_price
+            detected = bool(
+                sweep_distance > 0.0
+                and close > reference_price
+                and body_confirmation
+                and wick_ratio >= min_wick_ratio
+                and reclaim_ratio >= min_reclaim_ratio
+                and volume_ratio >= min_volume_ratio
+                and (sweep_distance / atr_value) <= max_atr_excursion
+            )
+            return LiquiditySweepSnapshot(
+                detected=detected,
+                bullish=detected,
+                reference_price=float(reference_price),
+                sweep_distance_ratio=sweep_distance / max(reference_price, 1e-12),
+                close_reclaim_ratio=reclaim_ratio,
+                volume_ratio=volume_ratio,
+                trigger_label="spring_reclaim" if detected else "",
+            )
+
+        sweep_distance = max(0.0, high - reference_price)
+        reclaim_distance = max(0.0, reference_price - close)
+        upper_wick = max(0.0, high - max(open_price, close))
+        wick_ratio = upper_wick / candle_range
+        reclaim_ratio = reclaim_distance / candle_range
+        body_confirmation = close < open_price
+        detected = bool(
+            sweep_distance > 0.0
+            and close < reference_price
+            and body_confirmation
+            and wick_ratio >= min_wick_ratio
+            and reclaim_ratio >= min_reclaim_ratio
+            and volume_ratio >= min_volume_ratio
+            and (sweep_distance / atr_value) <= max_atr_excursion
+        )
+        return LiquiditySweepSnapshot(
+            detected=detected,
+            bearish=detected,
+            reference_price=float(reference_price),
+            sweep_distance_ratio=sweep_distance / max(reference_price, 1e-12),
+            close_reclaim_ratio=reclaim_ratio,
+            volume_ratio=volume_ratio,
+            trigger_label="upthrust_reclaim" if detected else "",
+        )
 
     def _resolve_bullish_urgency_window(
         self,
@@ -637,6 +740,61 @@ class MultiTimeframeSignalEngine:
         minimum_slope = -float(self.config.early_bullish_lower_band_slope_atr_threshold) * max(current_atr, 1e-12)
         return current_price > current_lower_band and lower_band_slope >= minimum_slope
 
+    @staticmethod
+    def _extract_oi_funding_snapshot(execution_frame: pd.DataFrame) -> OIFundingSnapshot:
+        if execution_frame.empty:
+            return OIFundingSnapshot()
+        columns = set(execution_frame.columns)
+        close = execution_frame["close"].astype(float)
+        price_lookback = min(3, len(close) - 1)
+        price_change_pct = 0.0
+        if price_lookback >= 1:
+            reference_price = float(close.iloc[-1 - price_lookback])
+            if abs(reference_price) > 1e-12:
+                price_change_pct = ((float(close.iloc[-1]) - reference_price) / reference_price) * 100.0
+
+        oi_change_pct = 0.0
+        if "open_interest" in columns and len(execution_frame["open_interest"]) >= 2:
+            oi_series = pd.to_numeric(execution_frame["open_interest"], errors="coerce").astype(float)
+            oi_lookback = min(3, len(oi_series) - 1)
+            reference_oi = float(oi_series.iloc[-1 - oi_lookback]) if oi_lookback >= 1 else float("nan")
+            current_oi = float(oi_series.iloc[-1])
+            if oi_lookback >= 1 and pd.notna(reference_oi) and pd.notna(current_oi) and abs(reference_oi) > 1e-12:
+                oi_change_pct = ((current_oi - reference_oi) / reference_oi) * 100.0
+
+        funding_rate = 0.0
+        for funding_col in ("funding_rate", "funding", "fundingRate"):
+            if funding_col in columns:
+                funding_series = pd.to_numeric(execution_frame[funding_col], errors="coerce").astype(float)
+                if not funding_series.empty and pd.notna(funding_series.iloc[-1]):
+                    funding_rate = float(funding_series.iloc[-1])
+                    break
+
+        oi_drop_fast_threshold_pct = 1.5
+        price_move_threshold_pct = 0.35
+        is_short_squeeze = bool(price_change_pct >= price_move_threshold_pct and oi_change_pct <= -oi_drop_fast_threshold_pct)
+        is_long_liquidation = bool(price_change_pct <= -price_move_threshold_pct and oi_change_pct <= -oi_drop_fast_threshold_pct)
+        return OIFundingSnapshot(
+            oi_change_pct=float(oi_change_pct),
+            funding_rate=float(funding_rate),
+            is_short_squeeze=is_short_squeeze,
+            is_long_liquidation=is_long_liquidation,
+        )
+
+    @staticmethod
+    def _compute_oi_funding_score_adjustment(snapshot: OIFundingSnapshot) -> tuple[float, float]:
+        bullish_adjustment = 0.0
+        bearish_adjustment = 0.0
+        if snapshot.is_short_squeeze:
+            bullish_adjustment -= 5.0
+        if snapshot.is_long_liquidation:
+            bearish_adjustment -= 5.0
+        if snapshot.funding_rate >= 0.0008:
+            bullish_adjustment -= 2.0
+        elif snapshot.funding_rate <= -0.0008:
+            bearish_adjustment -= 2.0
+        return bullish_adjustment, bearish_adjustment
+
     def build_signal(self) -> MTFSignal | None:
         execution_ohlcv = maybe_use_closed_candles(
             self.client.fetch_ohlcv(
@@ -673,6 +831,7 @@ class MultiTimeframeSignalEngine:
         execution_frame = ohlcv_to_dataframe(execution_ohlcv)
         swing_frame = ohlcv_to_dataframe(swing_ohlcv)
         major_frame = ohlcv_to_dataframe(major_ohlcv)
+        oi_funding_snapshot = self._extract_oi_funding_snapshot(execution_frame)
 
         major_supertrend = compute_supertrend(
             major_frame,
@@ -840,6 +999,40 @@ class MultiTimeframeSignalEngine:
             short_frontrun_gap_ratio = max(0.0, (current_price - prior_low) / prior_low)
             short_frontrun_near_breakout = short_frontrun_gap_ratio <= float(getattr(self.config, "starter_frontrun_breakout_buffer_ratio", 0.002))
 
+        liquidity_sweep_wick_ratio = float(getattr(self.config, "liquidity_sweep_min_wick_ratio", 0.35))
+        liquidity_sweep_reclaim_ratio = float(getattr(self.config, "liquidity_sweep_min_reclaim_ratio", 0.15))
+        liquidity_sweep_volume_ratio = float(getattr(self.config, "liquidity_sweep_min_volume_ratio", 1.0))
+        liquidity_sweep_max_atr_excursion = float(getattr(self.config, "liquidity_sweep_max_atr_excursion", 1.25))
+        bullish_liquidity_sweep = self._detect_liquidity_sweep(
+            execution_frame=execution_frame,
+            reference_price=prior_low,
+            atr_value=execution_atr,
+            bullish=True,
+            breakout_lookback=max(1, int(self.config.execution_breakout_lookback)),
+            min_wick_ratio=liquidity_sweep_wick_ratio,
+            min_reclaim_ratio=liquidity_sweep_reclaim_ratio,
+            min_volume_ratio=liquidity_sweep_volume_ratio,
+            max_atr_excursion=liquidity_sweep_max_atr_excursion,
+        )
+        bearish_liquidity_sweep = self._detect_liquidity_sweep(
+            execution_frame=execution_frame,
+            reference_price=prior_high,
+            atr_value=execution_atr,
+            bullish=False,
+            breakout_lookback=max(1, int(self.config.execution_breakout_lookback)),
+            min_wick_ratio=liquidity_sweep_wick_ratio,
+            min_reclaim_ratio=liquidity_sweep_reclaim_ratio,
+            min_volume_ratio=liquidity_sweep_volume_ratio,
+            max_atr_excursion=liquidity_sweep_max_atr_excursion,
+        )
+        liquidity_sweep_score_bonus = max(0.0, float(getattr(self.config, "liquidity_sweep_score_bonus", 8.0)))
+        bullish_liquidity_sweep_active = bool(major_direction > 0 and bullish_liquidity_sweep.detected)
+        bearish_liquidity_sweep_active = bool(major_direction < 0 and bearish_liquidity_sweep.detected)
+        if bullish_liquidity_sweep_active:
+            bullish_score += liquidity_sweep_score_bonus
+        if bearish_liquidity_sweep_active:
+            bearish_score += liquidity_sweep_score_bonus
+
         # 回踩支撑检测（多头）：价格回撤至VAL附近时视为入场机会
         pullback_near_support = False
         pullback_depth_ratio = 0.0
@@ -916,6 +1109,10 @@ class MultiTimeframeSignalEngine:
             bullish_score -= bullish_exhaustion_penalty
         if bearish_exhaustion_applied:
             bearish_score -= bearish_exhaustion_penalty
+
+        oi_bullish_adjustment, oi_bearish_adjustment = self._compute_oi_funding_score_adjustment(oi_funding_snapshot)
+        bullish_score += oi_bullish_adjustment
+        bearish_score += oi_bearish_adjustment
 
         trend_strength_bars = min(20, self._count_bars_since_direction_change(major_supertrend["direction"]))
         trend_strength_bonus = min(
@@ -1131,6 +1328,19 @@ class MultiTimeframeSignalEngine:
             bullish_memory_retest_breakout_buffer_ratio=float(getattr(self.config, "bullish_memory_retest_breakout_buffer_ratio", 0.0026)),
         )
 
+        bullish_spring_reclaim_ready = bool(
+            bullish_liquidity_sweep_active
+            and bullish_ready
+            and not stretch_blocked_bullish
+            and (bullish_memory_active or bullish_latch_active or execution_obv_ready or pullback_near_support)
+        )
+        bearish_upthrust_reclaim_ready = bool(
+            bearish_liquidity_sweep_active
+            and bearish_ready
+            and not stretch_blocked_bearish
+            and (bearish_memory_active or bearish_latch_active or execution_obv_sell_ready or pullback_near_resistance)
+        )
+
         bearish_breakout_ready = bool(major_direction < 0 and bearish_ready and prior_low_break and (bearish_memory_active or kdj_dead_cross or bearish_latch_active))
         bearish_retest_ready = bool(major_direction < 0 and bearish_ready and bearish_memory_active and short_frontrun_near_breakout)
 
@@ -1169,6 +1379,15 @@ class MultiTimeframeSignalEngine:
         elif bearish_retest_release_ready:
             trigger_family = "bearish_retest_entry"
             reason = f"bearish_retest_entry: stretch={bearish_stretch:.2f} + score={bearish_score:.0f}"
+        elif bearish_upthrust_reclaim_ready:
+            trigger_family = "upthrust_reclaim"
+            reason = f"upthrust_reclaim: sweep={bearish_liquidity_sweep.sweep_distance_ratio * 100:.3f}% above prior_high + reclaim={bearish_liquidity_sweep.close_reclaim_ratio:.2f} + vol={bearish_liquidity_sweep.volume_ratio:.2f}x"
+        elif bearish_memory_active and prior_low_break and major_direction < 0 and bearish_ready:
+            trigger_family = "bearish_memory_breakdown"
+            reason = f"Triggered via Bearish Memory Window: KDJ crossed {bearish_cross_bars_ago} bars ago + Price Breakdown NOW"
+        elif bearish_retest_ready:
+            trigger_family = "upthrust_reclaim"
+            reason = f"upthrust_reclaim: sweep={bearish_liquidity_sweep.sweep_distance_ratio * 100:.3f}% above prior_high + reclaim={bearish_liquidity_sweep.close_reclaim_ratio:.2f} + vol={bearish_liquidity_sweep.volume_ratio:.2f}x"
         elif bearish_memory_active and prior_low_break and major_direction < 0 and bearish_ready:
             trigger_family = "bearish_memory_breakdown"
             reason = f"Triggered via Bearish Memory Window: KDJ crossed {bearish_cross_bars_ago} bars ago + Price Breakdown NOW"
@@ -1184,6 +1403,9 @@ class MultiTimeframeSignalEngine:
         elif bullish_retest_release_ready:
             trigger_family = "bullish_retest_entry"
             reason = f"bullish_retest_entry: stretch={bullish_stretch:.2f} + score={bullish_score:.0f}"
+        elif bullish_spring_reclaim_ready:
+            trigger_family = "spring_reclaim"
+            reason = f"spring_reclaim: sweep={bullish_liquidity_sweep.sweep_distance_ratio * 100:.3f}% below prior_low + reclaim={bullish_liquidity_sweep.close_reclaim_ratio:.2f} + vol={bullish_liquidity_sweep.volume_ratio:.2f}x"
         elif bullish_memory_active and prior_high_break:
             trigger_family = "bullish_memory_breakout"
             reason = f"Triggered via Memory Window: KDJ crossed {bullish_cross_bars_ago} bars ago + Price Breakout NOW"
@@ -1287,8 +1509,10 @@ class MultiTimeframeSignalEngine:
             family=trigger_family,
             group=classify_trigger_group(trigger_family),
             reason=reason,
+            liquidity_sweep=bool(bullish_liquidity_sweep.detected or bearish_liquidity_sweep.detected),
+            liquidity_sweep_side=("long" if bullish_liquidity_sweep.detected else "short" if bearish_liquidity_sweep.detected else ""),
         )
-        bullish_fully_aligned = early_bullish or bullish_retest_release_ready or starter_frontrun_ready or high_confidence_price_override or medium_confidence_latch_breakout_ready or trend_continuation_near_breakout_ready or major_bull_retest_ready or major_bull_impulse_reclaim_ready or (
+        bullish_fully_aligned = early_bullish or bullish_retest_release_ready or bullish_spring_reclaim_ready or starter_frontrun_ready or high_confidence_price_override or medium_confidence_latch_breakout_ready or trend_continuation_near_breakout_ready or major_bull_retest_ready or major_bull_impulse_reclaim_ready or (
             major_direction > 0
             and bullish_ready
             and (
@@ -1297,7 +1521,7 @@ class MultiTimeframeSignalEngine:
                 or pullback_near_support
             )
         )
-        bearish_fully_aligned = early_bearish or bearish_retest_release_ready or starter_short_frontrun_ready or bearish_breakout_ready or bearish_retest_ready or (
+        bearish_fully_aligned = early_bearish or bearish_retest_release_ready or bearish_upthrust_reclaim_ready or starter_short_frontrun_ready or bearish_breakout_ready or bearish_retest_ready or (
             major_direction < 0 and pullback_near_resistance and bearish_ready
         )
         fully_aligned = bullish_fully_aligned or bearish_fully_aligned
@@ -1400,4 +1624,8 @@ class MultiTimeframeSignalEngine:
             stretch_blocked=bool(stretch_blocked_bullish or stretch_blocked_bearish),
             pending_retest=bool(pending_retest_bullish or pending_retest_bearish),
             exhaustion_penalty_applied=bool(bullish_exhaustion_applied or bearish_exhaustion_applied),
+            oi_change_pct=oi_funding_snapshot.oi_change_pct,
+            funding_rate=oi_funding_snapshot.funding_rate,
+            is_short_squeeze=oi_funding_snapshot.is_short_squeeze,
+            is_long_liquidation=oi_funding_snapshot.is_long_liquidation,
         )

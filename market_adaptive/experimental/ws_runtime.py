@@ -1,7 +1,7 @@
 """Experimental/isolated websocket runtime.
 
-Kept at the legacy import path for compatibility and test patchability, while the
-same implementation is also exposed from ``market_adaptive.experimental.ws_runtime``.
+Moved under ``market_adaptive.experimental`` to make the non-mainline status explicit.
+Legacy imports from ``market_adaptive.ws_runtime`` are preserved via a compatibility wrapper.
 """
 
 from __future__ import annotations

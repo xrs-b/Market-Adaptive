@@ -4,7 +4,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+DEFAULT_ML_MODEL_PATH = "data/ml_models"
+
 import yaml
+
+
+def _normalize_signed_unit_interval(value: float, *, legacy_divisor: float = 100.0) -> float:
+    normalized = float(value)
+    if abs(normalized) > 1.0:
+        normalized /= legacy_divisor
+    return max(-1.0, min(1.0, normalized))
 
 
 @dataclass
@@ -270,8 +279,10 @@ class CTAConfig:
     near_breakout_release_fraction: float = 0.12
     near_breakout_release_minimum_score: float = 70.0
     near_breakout_release_obv_zscore_floor: float = -0.25
-    disable_near_breakout_release_long: bool = True
+    disable_near_breakout_release_long: bool = False
     disable_price_led_override_long: bool = True
+    disable_trend_continuation_long: bool = False
+    disable_bullish_memory_breakout_long: bool = False
     trend_continuation_minimum_entry_pathway: str = "FAST_TRACK"
     near_breakout_release_standard_min_confidence: float = 0.70
     starter_frontrun_impulse_bars: int = 3
@@ -282,6 +293,7 @@ class CTAConfig:
     stretch_retest_release_min_score: float = 60.0
     stretch_block_atr_threshold: float = 5.0
     stretch_retest_release_threshold: float = 1.5
+    entry_location_score_min: float = -0.60
     exhaustion_lookback_bars: int = 5
     exhaustion_min_trend_bars: int = 4
     exhaustion_rsi_bars: int = 3
@@ -328,6 +340,9 @@ class CTAConfig:
     signal_strength_volatility_bonus_cap: float = 5.0
     signal_strength_obv_bonus_cap: float = 10.0
     fast_track_reuse_cooldown_seconds: int = 300
+    ml_enabled: bool = False
+    ml_model_path: str = DEFAULT_ML_MODEL_PATH
+    ml_min_confidence: float = 0.60
 
     def __post_init__(self) -> None:
         default_execution = "15m"
@@ -434,6 +449,9 @@ class CTAConfig:
         self.signal_strength_volatility_bonus_cap = max(0.0, float(self.signal_strength_volatility_bonus_cap))
         self.signal_strength_obv_bonus_cap = max(0.0, float(self.signal_strength_obv_bonus_cap))
         self.fast_track_reuse_cooldown_seconds = max(0, int(self.fast_track_reuse_cooldown_seconds))
+        self.ml_enabled = bool(self.ml_enabled)
+        self.ml_model_path = str(self.ml_model_path or DEFAULT_ML_MODEL_PATH)
+        self.ml_min_confidence = min(1.0, max(0.0, float(self.ml_min_confidence)))
         self.stretch_ema_period = max(2, int(self.stretch_ema_period))
         self.stretch_block_min_score = max(0.0, float(self.stretch_block_min_score))
         self.stretch_retest_release_min_score = max(0.0, float(self.stretch_retest_release_min_score))
@@ -452,9 +470,18 @@ class CTAConfig:
         self.smart_retest_price_buffer_ratio = max(0.0, float(self.smart_retest_price_buffer_ratio))
         self.early_entry_minimum_score = max(0.0, float(self.early_entry_minimum_score))
         self.starter_frontrun_minimum_score = max(self.early_entry_minimum_score, float(self.starter_frontrun_minimum_score))
+        self.entry_location_score_min = _normalize_signed_unit_interval(self.entry_location_score_min)
         self.early_entry_direction_confirmation_bars = max(1, int(self.early_entry_direction_confirmation_bars))
         self.signal_flip_reduce_ratio = min(1.0, max(0.0, float(self.signal_flip_reduce_ratio)))
         self.cta_assist_trim_ratio = min(1.0, max(0.0, float(self.cta_assist_trim_ratio)))
+
+    @property
+    def entry_location_min_score(self) -> float:
+        return float(self.entry_location_score_min)
+
+    @entry_location_min_score.setter
+    def entry_location_min_score(self, value: float) -> None:
+        self.entry_location_score_min = float(value)
 
     @property
     def obv_slope_window(self) -> int:
@@ -846,6 +873,9 @@ def load_config(config_path: str | Path) -> AppConfig:
         starter_entry_minimum_expected_rr=float(cta_payload.get("starter_entry_minimum_expected_rr", 0.0)),
         standard_entry_minimum_expected_rr=float(cta_payload.get("standard_entry_minimum_expected_rr", 0.0)),
         fast_track_reuse_cooldown_seconds=int(cta_payload.get("fast_track_reuse_cooldown_seconds", 300)),
+        ml_enabled=bool(cta_payload.get("ml_enabled", False)),
+        ml_model_path=str(cta_payload.get("ml_model_path", DEFAULT_ML_MODEL_PATH)),
+        ml_min_confidence=float(cta_payload.get("ml_min_confidence", 0.60)),
         breakout_rr_target_atr_multiplier=float(cta_payload.get("breakout_rr_target_atr_multiplier", 3.0)),
         early_entry_minimum_score=float(cta_payload.get("early_entry_minimum_score", 70.0)),
         starter_frontrun_minimum_score=float(cta_payload.get("starter_frontrun_minimum_score", 80.0)),
@@ -882,13 +912,14 @@ def load_config(config_path: str | Path) -> AppConfig:
         near_breakout_release_fraction=float(cta_payload.get("near_breakout_release_fraction", 0.12)),
         near_breakout_release_minimum_score=float(cta_payload.get("near_breakout_release_minimum_score", 70.0)),
         near_breakout_release_obv_zscore_floor=float(cta_payload.get("near_breakout_release_obv_zscore_floor", -0.25)),
-        disable_near_breakout_release_long=bool(cta_payload.get("disable_near_breakout_release_long", True)),
+        disable_near_breakout_release_long=bool(cta_payload.get("disable_near_breakout_release_long", False)),
         disable_price_led_override_long=bool(cta_payload.get("disable_price_led_override_long", True)),
         trend_continuation_minimum_entry_pathway=str(cta_payload.get("trend_continuation_minimum_entry_pathway", "FAST_TRACK")),
         near_breakout_release_standard_min_confidence=float(cta_payload.get("near_breakout_release_standard_min_confidence", 0.70)),
         starter_frontrun_impulse_bars=int(cta_payload.get("starter_frontrun_impulse_bars", 3)),
         starter_frontrun_volume_window=int(cta_payload.get("starter_frontrun_volume_window", 12)),
         starter_frontrun_volume_multiplier=float(cta_payload.get("starter_frontrun_volume_multiplier", 1.15)),
+        entry_location_score_min=float(cta_payload.get("entry_location_score_min", cta_payload.get("entry_location_min_score", -0.60))),
         signal_flip_reduce_ratio=float(cta_payload.get("signal_flip_reduce_ratio", 0.50)),
         fast_ema=int(cta_payload.get("fast_ema", 7)),
         slow_ema=int(cta_payload.get("slow_ema", 21)),

@@ -141,6 +141,7 @@ cta:
   starter_frontrun_minimum_score: 80.0
   relaxed_entry_require_near_breakout: true
   starter_entry_require_near_breakout: true
+  entry_location_score_min: -0.60  # [-1, 1]，更低更宽松；兼容旧百分比写法会自动归一化
   early_entry_direction_confirmation_bars: 2
   volume_profile_lookback_hours: 24
   volume_profile_bin_count: 24

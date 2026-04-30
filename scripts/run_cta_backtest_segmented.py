@@ -8,6 +8,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 from collections import Counter
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -15,6 +16,15 @@ if str(ROOT) not in sys.path:
 
 from scripts.cta_backtest_sandbox import load_csv, CTABacktester
 from market_adaptive.config import CTAConfig, ExecutionConfig
+
+
+def _merge_nested_counts(target: dict[str, dict[str, int]], source: dict[str, Any]) -> None:
+    for bucket, metrics in (source or {}).items():
+        if not isinstance(metrics, dict):
+            continue
+        merged_bucket = target.setdefault(str(bucket), {})
+        for metric, value in metrics.items():
+            merged_bucket[str(metric)] = int(merged_bucket.get(str(metric), 0) or 0) + int(value or 0)
 
 
 def _build_aggregate(results: list[dict]) -> dict:
@@ -31,12 +41,14 @@ def _build_aggregate(results: list[dict]) -> dict:
     entry_pathway_counts = Counter()
     opened_by_pathway = Counter()
     opened_by_quality_tier = Counter()
+    trigger_family_funnel: dict[str, dict[str, int]] = {}
     for result in results:
         diagnostics = result['report']['diagnostics']
         quality_tier_counts.update(diagnostics.get('quality_tier_counts', {}))
         entry_pathway_counts.update(diagnostics.get('entry_pathway_counts', {}))
         opened_by_pathway.update(diagnostics.get('opened_by_pathway', {}))
         opened_by_quality_tier.update(diagnostics.get('opened_by_quality_tier', {}))
+        _merge_nested_counts(trigger_family_funnel, diagnostics.get('trigger_family_funnel', {}))
     return {
         'avg_segment_return_pct': avg_return,
         'max_segment_drawdown_pct': max_drawdown_pct,
@@ -51,6 +63,7 @@ def _build_aggregate(results: list[dict]) -> dict:
         'entry_pathway_counts': dict(entry_pathway_counts),
         'opened_by_pathway': dict(opened_by_pathway),
         'opened_by_quality_tier': dict(opened_by_quality_tier),
+        'trigger_family_funnel': dict(trigger_family_funnel),
     }
 
 
@@ -122,6 +135,7 @@ def main() -> int:
             'blocked_obv': report.diagnostics.get('blocked_obv'),
             'pathways': report.diagnostics.get('entry_pathway_counts', {}),
             'opened_by_pathway': report.diagnostics.get('opened_by_pathway', {}),
+            'trigger_family_funnel': report.diagnostics.get('trigger_family_funnel', {}),
         }, ensure_ascii=False), flush=True)
         results.append(segment_payload)
         partial_summary = {
