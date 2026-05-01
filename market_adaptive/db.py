@@ -125,6 +125,36 @@ class TradeJournalRecord:
     metadata: dict | None = None
 
 
+@dataclass
+class TriggerFamilyPerformance:
+    trigger_family: str
+    side: str | None
+    sample_count: int
+    close_count: int
+    win_count: int
+    loss_count: int
+    total_pnl: float
+    avg_pnl: float
+    win_rate: float
+
+
+@dataclass
+class TradeJournalRow:
+    timestamp: str
+    strategy_name: str
+    symbol: str
+    event_type: str
+    side: str | None
+    action: str | None
+    trigger_family: str | None
+    trigger_reason: str | None
+    pathway: str | None
+    price: float | None
+    size: float | None
+    pnl: float | None
+    metadata: dict | None = None
+
+
 class DatabaseInitializer:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path).expanduser().resolve()
@@ -407,3 +437,108 @@ class DatabaseInitializer:
                 ),
             )
             conn.commit()
+
+    def fetch_trigger_family_performance(
+        self,
+        strategy_name: str,
+        symbol: str,
+        side: str | None = None,
+        min_samples: int = 3,
+    ) -> list[TriggerFamilyPerformance]:
+        with self.connect() as conn:
+            base_query = """
+                SELECT
+                    trigger_family,
+                    side,
+                    COUNT(*) as sample_count,
+                    SUM(CASE WHEN event_type = 'trade_close' THEN 1 ELSE 0 END) as close_count,
+                    SUM(CASE WHEN pnl > 0 AND event_type = 'trade_close' THEN 1 ELSE 0 END) as win_count,
+                    SUM(CASE WHEN pnl < 0 AND event_type = 'trade_close' THEN 1 ELSE 0 END) as loss_count,
+                    SUM(CASE WHEN event_type = 'trade_close' THEN COALESCE(pnl, 0.0) ELSE 0.0 END) as total_pnl
+                FROM trade_journal
+                WHERE strategy_name = ?
+                  AND symbol = ?
+                  AND trigger_family IS NOT NULL
+                  AND trigger_family != ''
+                  AND trigger_family != 'waiting'
+                  AND event_type IN ('trade_open', 'trade_close', 'blocked_signal')
+            """
+            params: list = [strategy_name, symbol]
+            if side is not None:
+                base_query += " AND side = ?"
+                params.append(side)
+            base_query += " GROUP BY trigger_family, side HAVING close_count >= ? ORDER BY total_pnl DESC"
+            params.append(min_samples)
+            rows = conn.execute(base_query, params).fetchall()
+        results: list[TriggerFamilyPerformance] = []
+        for row in rows:
+            close_count = int(row["close_count"] or 0)
+            win_count = int(row["win_count"] or 0)
+            loss_count = int(row["loss_count"] or 0)
+            total_pnl = float(row["total_pnl"] or 0.0)
+            sample_count = int(row["sample_count"] or 0)
+            results.append(
+                TriggerFamilyPerformance(
+                    trigger_family=str(row["trigger_family"] or "unknown"),
+                    side=str(row["side"]) if row["side"] else None,
+                    sample_count=sample_count,
+                    close_count=close_count,
+                    win_count=win_count,
+                    loss_count=loss_count,
+                    total_pnl=total_pnl,
+                    avg_pnl=total_pnl / close_count if close_count > 0 else 0.0,
+                    win_rate=win_count / close_count if close_count > 0 else 0.0,
+                )
+            )
+        return results
+
+    def fetch_trade_journal_rows(
+        self,
+        strategy_name: str,
+        symbol: str,
+        *,
+        limit: int = 500,
+        event_types: tuple[str, ...] | None = None,
+    ) -> list[TradeJournalRow]:
+        with self.connect() as conn:
+            query = """
+                SELECT timestamp, strategy_name, symbol, event_type, side, action, trigger_family,
+                       trigger_reason, pathway, price, size, pnl, metadata_json
+                FROM trade_journal
+                WHERE strategy_name = ? AND symbol = ?
+            """
+            params: list[object] = [strategy_name, symbol]
+            if event_types:
+                placeholders = ",".join("?" for _ in event_types)
+                query += f" AND event_type IN ({placeholders})"
+                params.extend(event_types)
+            query += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(max(1, int(limit)))
+            rows = conn.execute(query, params).fetchall()
+        result: list[TradeJournalRow] = []
+        for row in rows:
+            metadata = None
+            raw_metadata = row["metadata_json"]
+            if raw_metadata not in (None, ""):
+                try:
+                    metadata = json.loads(str(raw_metadata))
+                except Exception:
+                    metadata = None
+            result.append(
+                TradeJournalRow(
+                    timestamp=str(row["timestamp"]),
+                    strategy_name=str(row["strategy_name"]),
+                    symbol=str(row["symbol"]),
+                    event_type=str(row["event_type"]),
+                    side=str(row["side"]) if row["side"] is not None else None,
+                    action=str(row["action"]) if row["action"] is not None else None,
+                    trigger_family=str(row["trigger_family"]) if row["trigger_family"] is not None else None,
+                    trigger_reason=str(row["trigger_reason"]) if row["trigger_reason"] is not None else None,
+                    pathway=str(row["pathway"]) if row["pathway"] is not None else None,
+                    price=float(row["price"]) if row["price"] is not None else None,
+                    size=float(row["size"]) if row["size"] is not None else None,
+                    pnl=float(row["pnl"]) if row["pnl"] is not None else None,
+                    metadata=metadata,
+                )
+            )
+        return result

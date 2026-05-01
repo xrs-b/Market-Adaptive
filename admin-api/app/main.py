@@ -7,6 +7,7 @@ import signal
 import subprocess
 from collections import deque
 from copy import deepcopy
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 
 from market_adaptive.clients.okx_client import OKXClient
 from market_adaptive.config import AppConfig, load_config
+from market_adaptive.cta_dashboard import build_cta_dashboard_snapshot
 from market_adaptive.db import AccountDailySnapshotRecord, DatabaseInitializer, SystemStateRecord
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -77,6 +79,10 @@ class AppSettings(BaseModel):
 
 class ConfigSavePayload(BaseModel):
     values: dict[str, Any]
+
+
+class ConfigRollbackPayload(BaseModel):
+    snapshotKey: str
 
 
 class InitialEquityPayload(BaseModel):
@@ -140,6 +146,16 @@ CONFIG_SCHEMA: list[dict[str, Any]] = [
             {"path": "cta.early_entry_direction_confirmation_bars", "label": "early 方向确认K数", "group": "RR / 入口过滤", "type": "number", "description": "early/starter 类入口要求方向稳定的连续 K 数。", "mutable": True, "restartRequired": True, "step": 1},
             {"path": "cta.heartbeat_interval_seconds", "label": "CTA 心跳间隔(秒)", "group": "诊断 / 报告", "type": "number", "description": "CTA 诊断心跳输出频率。", "mutable": True, "restartRequired": True, "step": 1},
             {"path": "cta.near_miss_report_interval_seconds", "label": "near-miss 报告间隔(秒)", "group": "诊断 / 报告", "type": "number", "description": "错失信号分析报告的最短间隔。", "mutable": True, "restartRequired": True, "step": 1},
+            {"path": "cta.long_standard_min_confidence", "label": "多头标准最小置信度", "group": "自适应 / 多空分治", "type": "number", "description": "多头标准信号的最小置信度门槛。", "mutable": True, "restartRequired": True, "step": 0.01},
+            {"path": "cta.short_standard_min_confidence", "label": "空头标准最小置信度", "group": "自适应 / 多空分治", "type": "number", "description": "空头标准信号的最小置信度门槛。", "mutable": True, "restartRequired": True, "step": 0.01},
+            {"path": "cta.near_breakout_release_standard_min_confidence", "label": "near-breakout 最小置信度", "group": "自适应 / Family 放行", "type": "number", "description": "near_breakout_release 在标准路径下的最小置信度。", "mutable": True, "restartRequired": True, "step": 0.01},
+            {"path": "cta.trend_continuation_minimum_entry_pathway", "label": "trend continuation 最低路径", "group": "自适应 / Family 放行", "type": "select", "options": ["STRICT", "STANDARD", "FAST_TRACK"], "description": "trend_continuation_near_breakout 允许进入的最低 pathway。", "mutable": True, "restartRequired": True},
+            {"path": "cta.disable_near_breakout_release_long", "label": "禁用 near-breakout long", "group": "自适应 / Family 开关", "type": "boolean", "description": "直接关闭 near_breakout_release 多头 family。", "mutable": True, "restartRequired": True},
+            {"path": "cta.disable_price_led_override_long", "label": "禁用 price-led override long", "group": "自适应 / Family 开关", "type": "boolean", "description": "直接关闭 price_led_override 多头 family。", "mutable": True, "restartRequired": True},
+            {"path": "cta.disable_trend_continuation_long", "label": "禁用 trend continuation long", "group": "自适应 / Family 开关", "type": "boolean", "description": "直接关闭 trend_continuation_near_breakout 多头 family。", "mutable": True, "restartRequired": True},
+            {"path": "cta.disable_bullish_memory_breakout_long", "label": "禁用 bullish memory breakout long", "group": "自适应 / Family 开关", "type": "boolean", "description": "直接关闭 bullish_memory_breakout 多头 family。", "mutable": True, "restartRequired": True},
+            {"path": "cta.family_adaptation_boost_cap", "label": "family 自适应加成上限", "group": "自适应 / 学习速度", "type": "number", "description": "family 级别表现对 entry_decider 的最大加减分。", "mutable": True, "restartRequired": True, "step": 0.01},
+            {"path": "cta.family_adaptation_fast_start_multiplier", "label": "小样本加速倍数", "group": "自适应 / 学习速度", "type": "number", "description": "少量样本时放大家族学习速度。", "mutable": True, "restartRequired": True, "step": 0.05},
         ],
     },
     {
@@ -596,6 +612,44 @@ def read_config_payload(settings: AppSettings) -> dict[str, Any]:
     return payload
 
 
+def build_cta_tuning_snapshot(values: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "cta.long_standard_min_confidence",
+        "cta.short_standard_min_confidence",
+        "cta.near_breakout_release_standard_min_confidence",
+        "cta.trend_continuation_minimum_entry_pathway",
+        "cta.disable_near_breakout_release_long",
+        "cta.disable_price_led_override_long",
+        "cta.disable_trend_continuation_long",
+        "cta.disable_bullish_memory_breakout_long",
+        "cta.family_adaptation_boost_cap",
+        "cta.family_adaptation_fast_start_multiplier",
+    ]
+    return {key: get_by_path(values, key) for key in keys}
+
+
+def save_cta_tuning_snapshot(settings: AppSettings, payload: dict[str, Any]) -> str:
+    database = load_database(settings)
+    snapshot_key = f"cta_tuning_snapshot::{datetime.now().isoformat()}"
+    database.upsert_system_state(SystemStateRecord(snapshot_key, yaml.safe_dump(payload, allow_unicode=True, sort_keys=True), datetime.now().isoformat()))
+    database.upsert_system_state(SystemStateRecord("cta_tuning_snapshot::latest", snapshot_key, datetime.now().isoformat()))
+    return snapshot_key
+
+
+def load_cta_tuning_snapshot(settings: AppSettings, snapshot_key: str) -> dict[str, Any]:
+    database = load_database(settings)
+    resolved_key = snapshot_key
+    if snapshot_key == "cta_tuning_snapshot::latest":
+        latest = database.get_system_state(snapshot_key)
+        if latest is None or not str(latest.state_value or "").strip():
+            raise HTTPException(status_code=404, detail="未找到最近一次 CTA 调参快照")
+        resolved_key = str(latest.state_value)
+    state = database.get_system_state(resolved_key)
+    if state is None:
+        raise HTTPException(status_code=404, detail="未找到指定快照")
+    return yaml.safe_load(state.state_value) or {}
+
+
 def get_by_path(payload: dict[str, Any], path: str) -> Any:
     current: Any = payload
     for key in path.split("."):
@@ -704,6 +758,23 @@ def stop_main_controller() -> tuple[bool, str]:
     return True, f"已发送停止信号：{' '.join(str(pid) for pid in pids)}"
 
 
+PRESET_AUDIT_PATH = ROOT / "admin-api" / "data" / "cta_preset_audit.json"
+
+
+def load_preset_audit() -> list[dict[str, Any]]:
+    try:
+        if not PRESET_AUDIT_PATH.exists():
+            return []
+        return json.loads(PRESET_AUDIT_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def save_preset_audit(rows: list[dict[str, Any]]) -> None:
+    PRESET_AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PRESET_AUDIT_PATH.write_text(json.dumps(rows[:100], ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def start_main_controller() -> tuple[bool, str]:
     try:
         completed = subprocess.run(
@@ -803,6 +874,52 @@ def dashboard_timeline(
     del session
     lines = tail_lines(settings.log_path, limit=max(60, min(limit, 800)))
     return build_timeline(lines)
+
+
+@app.get("/api/dashboard/cta")
+def dashboard_cta(
+    hours: int | None = None,
+    session: dict[str, Any] = Depends(require_auth),
+    settings: AppSettings = Depends(get_settings),
+) -> dict[str, Any]:
+    del session
+    database = load_database(settings)
+    cfg = load_runtime_config(settings)
+    family_records = database.fetch_trigger_family_performance(
+        strategy_name="cta",
+        symbol=cfg.cta.symbol,
+        min_samples=max(1, int(getattr(cfg.cta, "family_adaptation_min_closed_trades", 2))),
+    )
+    journal_rows = database.fetch_trade_journal_rows(
+        strategy_name="cta",
+        symbol=cfg.cta.symbol,
+        limit=400,
+        event_types=("trade_close", "trade_open", "blocked_signal"),
+    )
+    snapshot = build_cta_dashboard_snapshot(family_records=family_records, journal_rows=journal_rows, hours=hours)
+    market_status = database.fetch_latest_market_status(cfg.cta.symbol)
+    current_config = read_config_payload(settings)
+    snapshot["刷新时间"] = now_text()
+    snapshot["交易对"] = cfg.cta.symbol
+    snapshot["windowHours"] = hours or 0
+    snapshot["marketRegime"] = str(market_status.status) if market_status is not None else "unknown"
+    snapshot["tuningSnapshot"] = build_cta_tuning_snapshot(current_config)
+    leaderboard = snapshot.get("leaderboards", {}).get("all", [])[:6]
+    suggestions: list[dict[str, Any]] = []
+    if leaderboard:
+        top = leaderboard[0]
+        if float(top.get("score", 0.0) or 0.0) > 0.18:
+            suggestions.append({"title": "放大优势 family", "detail": f"当前 {top.get('trigger_family')} 分数领先，可考虑延续当前方向。", "action": "keep_winner"})
+        if float(top.get("score", 0.0) or 0.0) < 0.02:
+            suggestions.append({"title": "整体 edge 偏弱", "detail": "当前 family 领先优势不明显，可适度收紧放行。", "action": "tighten"})
+    missed = snapshot.get("decision_audit", {}).get("missed_opportunities", [])
+    if len(missed) >= 3:
+        suggestions.append({"title": "近期错杀偏多", "detail": "可适度降低多空 standard confidence floor，提升开单数量。", "action": "loosen_confidence"})
+    bad = snapshot.get("decision_audit", {}).get("bad_releases", [])
+    if len(bad) >= 3:
+        suggestions.append({"title": "近期放错偏多", "detail": "可收紧 confidence 或降低 family adaptive boost。", "action": "tighten_release"})
+    snapshot["suggestions"] = suggestions[:4]
+    return snapshot
 
 
 @app.get("/api/account/positions")
@@ -948,6 +1065,8 @@ def config_save(
             changed_paths.append("runtime.account_initial_equity")
 
     config_payload = read_config_payload(settings)
+    if submitted_values:
+        save_cta_tuning_snapshot(settings, build_cta_tuning_snapshot(config_payload))
     yaml_changed_paths = apply_config_values(config_payload, submitted_values, allowed)
     changed_paths.extend(yaml_changed_paths)
 
@@ -970,6 +1089,86 @@ def config_save(
         "sections": build_config_sections(config_payload, settings),
         "刷新时间": now_text(),
     }
+
+
+@app.post("/api/config/rollback")
+def config_rollback(
+    payload: ConfigRollbackPayload,
+    session: dict[str, Any] = Depends(require_auth),
+    settings: AppSettings = Depends(get_settings),
+) -> dict[str, Any]:
+    del session
+    config_payload = read_config_payload(settings)
+    snapshot_payload = load_cta_tuning_snapshot(settings, payload.snapshotKey)
+    allowed = {field["path"]: field for section in CONFIG_SCHEMA for field in section["fields"]}
+    changed_paths = apply_config_values(config_payload, snapshot_payload, allowed)
+    if changed_paths:
+        with settings.config_path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(config_payload, handle, allow_unicode=True, sort_keys=False)
+    return {
+        "ok": True,
+        "message": f"已回滚 {len(changed_paths)} 个 CTA 参数",
+        "changedPaths": changed_paths,
+        "sections": build_config_sections(config_payload, settings),
+        "刷新时间": now_text(),
+    }
+
+
+@app.get("/api/cta/preset-audit")
+def cta_preset_audit(
+    session: dict[str, Any] = Depends(require_auth),
+    settings: AppSettings = Depends(get_settings),
+) -> dict[str, Any]:
+    del session
+    rows = load_preset_audit()
+    database = load_database(settings)
+    cfg = load_runtime_config(settings)
+    journal_rows = database.fetch_trade_journal_rows(
+        strategy_name="cta",
+        symbol=cfg.cta.symbol,
+        limit=400,
+        event_types=("trade_close",),
+    )
+    for row in rows:
+        applied_at = row.get("time")
+        if not applied_at:
+            continue
+        try:
+            applied_ts = datetime.fromisoformat(str(applied_at).replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            continue
+        for hours in (24, 72):
+            end_ts = applied_ts + timedelta(hours=hours)
+            scoped = []
+            for journal in journal_rows:
+                try:
+                    journal_ts = datetime.fromisoformat(str(journal.timestamp).replace("Z", "+00:00")).replace(tzinfo=None)
+                except Exception:
+                    continue
+                if applied_ts <= journal_ts <= end_ts:
+                    scoped.append(journal)
+            pnl = sum(float(getattr(item, "pnl", 0.0) or 0.0) for item in scoped)
+            trade_count = len(scoped)
+            row[f"review_{hours}h"] = {
+                "pnl": round(pnl, 6),
+                "trade_count": trade_count,
+                "verdict": "变好" if pnl > 0 else "变差" if pnl < 0 else "持平",
+            }
+    return {"items": rows, "刷新时间": now_text()}
+
+
+@app.post("/api/cta/preset-audit")
+def cta_preset_audit_create(
+    payload: dict[str, Any],
+    session: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    rows = load_preset_audit()
+    item = dict(payload or {})
+    item["username"] = session.get("username")
+    item["time"] = item.get("time") or now_text()
+    rows.insert(0, item)
+    save_preset_audit(rows)
+    return {"ok": True, "item": item, "刷新时间": now_text()}
 
 
 @app.post("/api/system/start")

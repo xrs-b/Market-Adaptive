@@ -138,7 +138,9 @@ class ExecutionTriggerSnapshot:
     frontrun_obv_confirmed: bool = False
     frontrun_ready: bool = False
     pullback_near_support: bool = False
+    pullback_near_resistance: bool = False
     pullback_depth_ratio: float = 0.0
+    pullback_resistance_depth_ratio: float = 0.0
     stretch_value: float = 0.0
     stretch_blocked: bool = False
     pending_retest: bool = False
@@ -551,17 +553,21 @@ class MultiTimeframeSignalEngine:
             rejection_reason=rejection_reason,
         )
 
-    def _resolve_blocker_reason(self, *, data_alignment_valid: bool, major_direction: int, weak_bull_bias: bool, early_bullish: bool, swing_score: float, bullish_ready: bool, fully_aligned: bool, execution_reason: str, bullish_score: float, execution_frontrun_near_breakout: bool, drive_first_tradeable: bool, rsi_rollover_blocked: bool) -> str:
+    def _resolve_blocker_reason(self, *, data_alignment_valid: bool, major_direction: int, weak_bull_bias: bool, early_bullish: bool, swing_score: float, bullish_ready: bool, fully_aligned: bool, execution_reason: str, bullish_score: float, execution_frontrun_near_breakout: bool, drive_first_tradeable: bool, rsi_rollover_blocked: bool, bearish_score: float = 0.0, bearish_ready: bool = False, weak_bear_bias: bool = False, early_bearish: bool = False, short_rsi_blocking_overridden: bool = False) -> str:
         if not data_alignment_valid:
             return "DATA_MISMATCH_WARNING"
-        if not (major_direction > 0 or weak_bull_bias or early_bullish):
+        directional_context_ready = bool(
+            major_direction > 0 or weak_bull_bias or early_bullish or major_direction < 0 or weak_bear_bias or early_bearish
+        )
+        if not directional_context_ready:
             return "Blocked_By_SuperTrend_Regime"
         if rsi_rollover_blocked:
             return "Blocked_By_RSI_ROLLOVER"
         high_momentum_breakout_clearance = bool(float(bullish_score) >= 75.0 and execution_frontrun_near_breakout)
-        if swing_score <= 0.0 and not high_momentum_breakout_clearance and not drive_first_tradeable:
+        high_momentum_breakdown_clearance = bool(float(bearish_score) >= 75.0 and execution_frontrun_near_breakout)
+        if swing_score <= 0.0 and not high_momentum_breakout_clearance and not high_momentum_breakdown_clearance and not drive_first_tradeable and not short_rsi_blocking_overridden:
             return "Blocked_By_RSI_Threshold"
-        if not bullish_ready:
+        if not bullish_ready and not bearish_ready:
             return "Blocked_By_Bullish_Score"
         if not fully_aligned:
             return f"Blocked_By_Trigger:{execution_reason}"
@@ -1033,6 +1039,22 @@ class MultiTimeframeSignalEngine:
         if bearish_liquidity_sweep_active:
             bearish_score += liquidity_sweep_score_bonus
 
+        short_bias_dominance = bool(
+            major_direction < 0
+            and bearish_score >= float(getattr(self.config, "short_bias_dominance_min_bearish_score", 68.0))
+            and bearish_score >= bullish_score + float(getattr(self.config, "short_bias_dominance_score_gap", 8.0))
+            and (
+                bearish_memory_active
+                or bearish_latch_active
+                or short_frontrun_near_breakout
+                or prior_low_break
+                or bearish_liquidity_sweep_active
+            )
+        )
+        if short_bias_dominance and weak_bull_bias:
+            weak_bull_bias = False
+            major_bias_score = 0.0
+
         # 回踩支撑检测（多头）：价格回撤至VAL附近时视为入场机会
         pullback_near_support = False
         pullback_depth_ratio = 0.0
@@ -1346,7 +1368,7 @@ class MultiTimeframeSignalEngine:
 
         execution_entry_mode = "breakout_confirmed"
         entry_size_multiplier = 1.0
-        if weak_bull_bias:
+        if weak_bull_bias and not short_bias_dominance:
             execution_entry_mode = "weak_bull_scale_in_limit"
         if starter_frontrun_ready:
             execution_entry_mode = "starter_frontrun_limit"
@@ -1451,7 +1473,7 @@ class MultiTimeframeSignalEngine:
         elif rail_momentum_ready:
             trigger_family = "rail_momentum"
             reason = "rail_momentum_ready: near major rail + 15m momentum confirmation"
-        elif weak_bull_bias and bullish_memory_active:
+        elif weak_bull_bias and not short_bias_dominance and bullish_memory_active:
             trigger_family = "weak_bull_scale_in"
             reason = f"Weak bull bias active: KDJ crossed {bullish_cross_bars_ago} bars ago + scale-in allowed before breakout"
         elif bullish_magnetism_ready:
@@ -1500,7 +1522,9 @@ class MultiTimeframeSignalEngine:
             frontrun_obv_confirmed=execution_obv_ready,
             frontrun_ready=bool(starter_frontrun_ready or starter_short_frontrun_ready),
             pullback_near_support=pullback_near_support,
+            pullback_near_resistance=pullback_near_resistance,
             pullback_depth_ratio=pullback_depth_ratio,
+            pullback_resistance_depth_ratio=pullback_resistance_depth_ratio,
             stretch_value=bullish_stretch if bullish_score >= bearish_score else bearish_stretch,
             stretch_blocked=bool(stretch_blocked_bullish or stretch_blocked_bearish),
             pending_retest=bool(pending_retest_bullish or pending_retest_bearish),
@@ -1541,6 +1565,21 @@ class MultiTimeframeSignalEngine:
             and bullish_score >= rsi_relax_score
             and not rsi_rollover_blocked
         )
+        short_rsi_blocking_overridden = bool(
+            swing_score <= 0.0
+            and major_direction < 0
+            and bearish_score >= float(getattr(self.config, "short_rsi_relax_score", 70.0))
+            and current_swing_rsi <= float(getattr(self.config, "short_rsi_relax_max_threshold", 68.0))
+            and swing_rsi_slope <= float(getattr(self.config, "short_rsi_relax_max_slope", 0.5))
+            and (
+                early_bearish
+                or bearish_breakout_ready
+                or bearish_retest_ready
+                or bearish_upthrust_reclaim_ready
+                or starter_short_frontrun_ready
+                or bearish_retest_release_ready
+            )
+        )
         if rsi_rollover_blocked:
             fully_aligned = False
         blocker_reason = self._resolve_blocker_reason(
@@ -1556,6 +1595,11 @@ class MultiTimeframeSignalEngine:
             execution_frontrun_near_breakout=frontrun_near_breakout,
             drive_first_tradeable=drive_first_tradeable,
             rsi_rollover_blocked=rsi_rollover_blocked,
+            bearish_score=bearish_score,
+            bearish_ready=bearish_ready,
+            weak_bear_bias=weak_bear_bias,
+            early_bearish=early_bearish,
+            short_rsi_blocking_overridden=short_rsi_blocking_overridden,
         )
 
         dominant_is_bullish = bool(bullish_score >= bearish_score)

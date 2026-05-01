@@ -23,6 +23,7 @@ from market_adaptive.risk import CTARiskProfile, LogicalPositionSnapshot
 from market_adaptive.sentiment import SentimentAnalyst
 from market_adaptive.strategies.base import BaseStrategyRobot
 from market_adaptive.db import TradeJournalRecord
+from market_adaptive.cta_dashboard import build_cta_dashboard_snapshot
 from market_adaptive.ml_signal_engine import MLSignalDecision, MarketAdaptiveMLEngine
 from market_adaptive.strategies.mtf_engine import MTFSignal, MultiTimeframeSignalEngine
 from market_adaptive.strategies.obv_gate import resolve_dynamic_obv_gate_for_signal
@@ -70,6 +71,9 @@ class TrendSignal:
     execution_trigger_group: str = "waiting"
     execution_trigger_reason: str = ""
     pullback_near_support: bool = False
+    pullback_near_resistance: bool = False
+    pullback_depth_ratio: float = 0.0
+    pullback_resistance_depth_ratio: float = 0.0
     volatility_squeeze_breakout: bool = False
     stretch_value: float = 0.0
     stretch_blocked: bool = False
@@ -436,6 +440,11 @@ class CTARobot(BaseStrategyRobot):
         self._entry_zone_anchor_price: dict[str, float | None] = {"long": None, "short": None}
         self._entry_zone_trigger_family: dict[str, str | None] = {"long": None, "short": None}
         self._recent_watch_samples: dict[str, dict[str, float | str]] = {}
+        self._family_adaptation_cache: dict[str, float] = {}
+        self._family_adaptation_meta: dict[str, dict[str, float | str | int]] = {}
+        self._family_adaptation_cache_at: float = 0.0
+        self._family_adaptation_ttl: float = float(getattr(config, "family_adaptation_ttl_seconds", 600.0))
+        self._last_family_summary_log_at: float = 0.0
 
     def _resolve_obv_gate(self, signal: MTFSignal):
         return resolve_dynamic_obv_gate_for_signal(
@@ -867,6 +876,10 @@ class CTARobot(BaseStrategyRobot):
                     "ml_reason": str(signal.ml_reason),
                     "entry_location_score": float(signal.entry_location_score),
                     "entry_location_reasons": list(signal.entry_location_reasons),
+                    "entry_decider_decision": str(signal.entry_decider_decision),
+                    "entry_decider_score": float(signal.entry_decider_score),
+                    "entry_decider_reasons": list(signal.entry_decider_reasons),
+                    "market_regime": self._current_market_regime(),
                 },
             )
 
@@ -1066,8 +1079,41 @@ class CTARobot(BaseStrategyRobot):
         elif raw_direction < 0:
             obv_confirmation_passed = volume_filter_passed
             if not volume_filter_passed:
+                bearish_score = float(getattr(mtf_signal, "bearish_score", 0.0))
+                bullish_score = float(getattr(mtf_signal, "bullish_score", 0.0))
+                entry_reason = str(getattr(mtf_signal.execution_trigger, "reason", "") or "")
+                entry_family = str(getattr(mtf_signal.execution_trigger, "family", "") or "")
+                rr_value = 0.0
+                try:
+                    rr_value = float(getattr(mtf_signal, "estimated_reward_risk", 0.0) or 0.0)
+                except Exception:
+                    rr_value = 0.0
+                short_obv_override = bool(
+                    bool(obv_confirmation.above_sma)
+                    and (standard_path or entry_pathway is EntryPathway.FAST_TRACK)
+                    and signal_quality_tier in {"TIER_MEDIUM", "TIER_HIGH"}
+                    and signal_confidence >= float(getattr(self.config, "short_obv_override_min_confidence", 0.55))
+                    and bearish_score >= float(getattr(self.config, "short_obv_override_min_bearish_score", 68.0))
+                    and bullish_score <= float(getattr(self.config, "short_obv_override_max_bullish_score", 65.0))
+                    and float(obv_confirmation.zscore) <= float(getattr(self.config, "short_obv_override_max_obv_zscore", 1.25))
+                    and (
+                        float(obv_confirmation.zscore) <= float(getattr(self.config, "short_obv_override_preferred_negative_obv_zscore", -0.05))
+                        or signal_confidence >= float(getattr(self.config, "short_obv_override_high_confidence", 0.68))
+                    )
+                    and rr_value >= float(getattr(self.config, "short_obv_override_min_rr", 3.0))
+                    and (
+                        entry_family in {"bearish_memory_breakdown", "upthrust_reclaim", "waiting_execution_trigger"}
+                        or "Breakdown" in entry_reason
+                        or "breakdown" in entry_reason
+                        or "upthrust" in entry_reason.lower()
+                    )
+                )
                 if resonance_allowed:
                     relaxed_reasons.append(resonance_reason or "SWEEP_RESONANCE_SHORT_OBV_BYPASS")
+                elif short_obv_override:
+                    relaxed_reasons.append(
+                        f"SHORT_OBV_ABOVE_SMA_OVERRIDE(conf={float(signal_confidence):.2f},bear={bearish_score:.1f},bull={bullish_score:.1f},obv_z={float(obv_confirmation.zscore):.2f},rr={rr_value:.2f})"
+                    )
                 else:
                     final_direction = 0
                     long_setup_blocked = True
@@ -1091,6 +1137,29 @@ class CTARobot(BaseStrategyRobot):
             if long_setup_blocked and long_setup_reason == "obv_strength_not_confirmed":
                 bearish_score = float(getattr(mtf_signal, "bearish_score", 0.0))
                 bullish_score = float(getattr(mtf_signal, "bullish_score", 0.0))
+                entry_reason = str(getattr(mtf_signal.execution_trigger, "reason", "") or "")
+                entry_family = str(getattr(mtf_signal.execution_trigger, "family", "") or "")
+                rr_value = 0.0
+                try:
+                    rr_value = float(getattr(mtf_signal, "estimated_reward_risk", 0.0) or 0.0)
+                except Exception:
+                    rr_value = 0.0
+                short_obv_strength_override = bool(
+                    not bool(obv_confirmation.above_sma)
+                    and standard_path
+                    and signal_quality_tier in {"TIER_MEDIUM", "TIER_HIGH"}
+                    and signal_confidence >= float(getattr(self.config, "short_obv_strength_override_min_confidence", 0.58))
+                    and bearish_score >= float(getattr(self.config, "short_obv_strength_override_min_bearish_score", 70.0))
+                    and bullish_score <= float(getattr(self.config, "short_obv_strength_override_max_bullish_score", 42.0))
+                    and float(obv_confirmation.zscore) >= float(getattr(self.config, "short_obv_strength_override_min_obv_zscore", -0.20))
+                    and rr_value >= float(getattr(self.config, "short_obv_strength_override_min_rr", 3.0))
+                    and (
+                        entry_family in {"bearish_memory_breakdown", "upthrust_reclaim", "waiting_execution_trigger"}
+                        or "Breakdown" in entry_reason
+                        or "breakdown" in entry_reason
+                        or "upthrust" in entry_reason.lower()
+                    )
+                )
                 obv_scalp_candidate = bool(
                     bearish_score >= float(getattr(self.config, "obv_scalp_min_bearish_score", 52.0))
                     and bullish_score <= float(getattr(self.config, "obv_scalp_max_bullish_score", 62.0))
@@ -1107,7 +1176,13 @@ class CTARobot(BaseStrategyRobot):
                     and not bool(obv_confirmation.above_sma)
                     and float(obv_confirmation.zscore) <= float(getattr(self.config, "obv_scalp_max_positive_obv_zscore", 0.15))
                 )
-                if obv_scalp_candidate:
+                if short_obv_strength_override:
+                    long_setup_blocked = False
+                    final_direction = raw_direction
+                    relaxed_reasons.append(
+                        f"SHORT_OBV_STRENGTH_OVERRIDE(conf={float(signal_confidence):.2f},bear={bearish_score:.1f},bull={bullish_score:.1f},obv_z={float(obv_confirmation.zscore):.2f},rr={rr_value:.2f})"
+                    )
+                elif obv_scalp_candidate:
                     quick_trade_mode = True
                     long_setup_blocked = False
                     final_direction = raw_direction
@@ -1183,6 +1258,9 @@ class CTARobot(BaseStrategyRobot):
             execution_trigger_group=str(getattr(mtf_signal.execution_trigger, "group", "waiting")),
             execution_trigger_reason=(f"OBV_SCALP|{mtf_signal.execution_trigger.reason}" if quick_trade_mode else mtf_signal.execution_trigger.reason),
             pullback_near_support=bool(getattr(mtf_signal.execution_trigger, 'pullback_near_support', False)),
+            pullback_near_resistance=bool(getattr(mtf_signal.execution_trigger, 'pullback_near_resistance', False)),
+            pullback_depth_ratio=float(getattr(mtf_signal.execution_trigger, 'pullback_depth_ratio', 0.0) or 0.0),
+            pullback_resistance_depth_ratio=float(getattr(mtf_signal.execution_trigger, 'pullback_resistance_depth_ratio', 0.0) or 0.0),
             volatility_squeeze_breakout=bool(getattr(mtf_signal, "execution_trigger", None) and getattr(mtf_signal.execution_trigger, "family", "") in {"starter_frontrun", "bullish_memory_breakout"} and not bool(getattr(mtf_signal.execution_trigger, "pending_retest", False))),
             stretch_value=float(getattr(mtf_signal, "stretch_value", 0.0) or 0.0),
             stretch_blocked=bool(getattr(mtf_signal, "stretch_blocked", False)),
@@ -1234,6 +1312,10 @@ class CTARobot(BaseStrategyRobot):
         signal.entry_location_score = float(entry_location_score)
         signal.entry_location_reasons = tuple(entry_location_reasons)
         signal = self._quality_filter_short_signal(signal)
+        entry_decider_decision, entry_decider_score, entry_decider_reasons = self._score_entry_decider(signal)
+        signal.entry_decider_decision = str(entry_decider_decision)
+        signal.entry_decider_score = float(entry_decider_score)
+        signal.entry_decider_reasons = tuple(entry_decider_reasons)
         candidate_state, candidate_reason = self._derive_candidate_state(signal)
         signal.candidate_state = candidate_state
         signal.candidate_reason = candidate_reason
@@ -1388,6 +1470,8 @@ class CTARobot(BaseStrategyRobot):
                 or getattr(signal, "blocker_reason", "")
                 or "watch"
             )
+        if decision == "probe" and int(signal.raw_direction) == ready_side:
+            return "armed", str(signal.execution_trigger_reason or signal.long_setup_reason or signal.blocker_reason or "probe")
         if int(signal.raw_direction) == ready_side:
             return "trigger_ready", str(signal.execution_trigger_reason or signal.long_setup_reason or signal.blocker_reason or "trigger_ready")
         if self._is_execution_near_ready(signal):
@@ -1461,6 +1545,7 @@ class CTARobot(BaseStrategyRobot):
             "entry_decider_decision": str(signal.entry_decider_decision),
             "entry_decider_score": float(signal.entry_decider_score),
             "entry_decider_reasons": list(signal.entry_decider_reasons),
+            "market_regime": self._current_market_regime(),
             "watch_sample_promoted": bool(getattr(signal, "watch_sample_promoted", False)),
             "watch_sample_age_seconds": getattr(signal, "watch_sample_age_seconds", None),
             "watch_sample_origin_reason": str(getattr(signal, "watch_sample_origin_reason", "") or ""),
@@ -1675,12 +1760,25 @@ class CTARobot(BaseStrategyRobot):
         volume_profile = signal.volume_profile
         price = float(getattr(signal, "price", 0.0) or 0.0)
         atr = max(float(getattr(signal, "atr", 0.0) or 0.0), price * 0.001, 1e-9)
+        trigger_family = str(getattr(signal, "execution_trigger_family", "") or "")
         breakout_confirmed = bool(signal.execution_breakout) if signal.direction > 0 else bool(signal.execution_breakdown)
         near_breakout = bool(breakout_confirmed or signal.execution_frontrun_near_breakout)
+        pullback_entry = bool(
+            (signal.direction > 0 and getattr(signal, "pullback_near_support", False))
+            or (signal.direction < 0 and getattr(signal, "pullback_near_resistance", False))
+            or trigger_family in {"pullback_support_entry", "pullback_resistance_entry"}
+        )
+        sweep_reclaim_entry = bool(trigger_family in {"spring_reclaim", "upthrust_reclaim"})
 
         if near_breakout:
             score += 0.45
             reasons.append("near_breakout")
+        elif pullback_entry:
+            score += 0.35
+            reasons.append("pullback_location")
+        elif sweep_reclaim_entry:
+            score += 0.30
+            reasons.append("sweep_reclaim_location")
         else:
             score -= 0.65
             reasons.append("far_from_breakout")
@@ -1689,8 +1787,12 @@ class CTARobot(BaseStrategyRobot):
             reasons.append("no_volume_profile")
         else:
             inside_value_area = bool(volume_profile.contains_price(price))
+            vah = float(volume_profile.value_area_high)
+            val = float(volume_profile.value_area_low)
+            poc = float(volume_profile.poc_price)
             if signal.direction > 0:
-                poc_gap_atr = (float(volume_profile.poc_price) - price) / atr
+                poc_gap_atr = (poc - price) / atr
+                val_gap_atr = abs(price - val) / atr
                 if bool(volume_profile.above_poc(price)):
                     score += 0.35
                     reasons.append("above_poc")
@@ -1700,13 +1802,39 @@ class CTARobot(BaseStrategyRobot):
                 else:
                     score -= min(0.45, 0.18 + max(0.0, poc_gap_atr - 0.35) * 0.12)
                     reasons.append("below_poc")
+                if pullback_entry and val_gap_atr <= 1.1:
+                    score += 0.22
+                    reasons.append("val_support_pullback")
+                elif inside_value_area and not near_breakout and not sweep_reclaim_entry:
+                    score -= 0.10
+                    reasons.append("long_inside_value_area")
+                if price >= vah:
+                    score += 0.08
+                    reasons.append("above_vah")
             else:
-                if inside_value_area:
+                poc_gap_atr = (price - poc) / atr
+                vah_gap_atr = abs(price - vah) / atr
+                if price <= poc:
+                    score += 0.35
+                    reasons.append("below_poc")
+                elif poc_gap_atr <= 0.35:
+                    score += 0.10
+                    reasons.append("near_poc_reject")
+                else:
+                    score -= min(0.45, 0.18 + max(0.0, poc_gap_atr - 0.35) * 0.12)
+                    reasons.append("above_poc")
+                if pullback_entry and vah_gap_atr <= 1.1:
+                    score += 0.22
+                    reasons.append("vah_resistance_pullback")
+                elif inside_value_area and not near_breakout and not sweep_reclaim_entry:
                     score -= 0.20
                     reasons.append("short_inside_value_area")
                 else:
-                    score += 0.10
+                    score += 0.08
                     reasons.append("short_outside_value_area")
+                if price <= val:
+                    score += 0.08
+                    reasons.append("below_val")
 
         obv_z = float(getattr(signal.obv_confirmation, "zscore", 0.0) or 0.0)
         obv_threshold = float(self._effective_signal_obv_threshold(signal))
@@ -1725,6 +1853,9 @@ class CTARobot(BaseStrategyRobot):
                 score -= 0.15
                 reasons.append("obv_weak")
 
+        if sweep_reclaim_entry and bool(getattr(signal, "liquidity_sweep", False)):
+            score += 0.12
+            reasons.append("liquidity_sweep")
         if signal.relaxed_entry:
             score -= 0.10
             reasons.append("relaxed_entry")
@@ -1739,14 +1870,28 @@ class CTARobot(BaseStrategyRobot):
 
     def _resolve_entry_location_block_reason(self, signal: TrendSignal) -> str | None:
         entry_mode = str(signal.execution_entry_mode or "").lower()
+        trigger_family = str(getattr(signal, "execution_trigger_family", "") or "")
         structure_confirmed = bool(signal.execution_breakout) if signal.direction > 0 else bool(signal.execution_breakdown)
         near_breakout = bool(structure_confirmed or signal.execution_frontrun_near_breakout)
+        pullback_entry = bool(
+            (signal.direction > 0 and getattr(signal, "pullback_near_support", False))
+            or (signal.direction < 0 and getattr(signal, "pullback_near_resistance", False))
+            or trigger_family in {"pullback_support_entry", "pullback_resistance_entry"}
+        )
+        sweep_reclaim_entry = bool(trigger_family in {"spring_reclaim", "upthrust_reclaim"})
+        location_exception = bool(pullback_entry or sweep_reclaim_entry)
         resonance_allowance, _resonance_tag = self._resonance_execution_allowance(signal)
-        if signal.relaxed_entry and bool(getattr(self.config, "relaxed_entry_require_near_breakout", True)) and not near_breakout:
+        if signal.relaxed_entry and bool(getattr(self.config, "relaxed_entry_require_near_breakout", True)) and not near_breakout and not location_exception:
             return "relaxed_entry_chasing"
-        if any(marker in entry_mode for marker in ("starter", "frontrun", "scale_in", "early_")) and bool(getattr(self.config, "starter_entry_require_near_breakout", True)) and not near_breakout:
+        if any(marker in entry_mode for marker in ("starter", "frontrun", "scale_in", "early_")) and bool(getattr(self.config, "starter_entry_require_near_breakout", True)) and not near_breakout and not location_exception:
             return "starter_entry_chasing"
-        worst_location_floor = float(getattr(self.config, "entry_location_score_min", -0.60))
+        worst_location_floor = float(
+            getattr(
+                self.config,
+                "long_entry_location_score_min" if signal.direction > 0 else "short_entry_location_score_min",
+                getattr(self.config, "entry_location_score_min", -0.60),
+            )
+        )
         location_score = float(getattr(signal, "entry_location_score", 0.0) or 0.0)
         if location_score <= worst_location_floor:
             if resonance_allowance:
@@ -1881,6 +2026,241 @@ class CTARobot(BaseStrategyRobot):
                 return "near_breakout_release_obv_relaxed"
         return None
 
+    def _current_market_regime(self) -> str:
+        try:
+            market_status = self.database.fetch_latest_market_status(self.symbol)
+            if market_status is not None and str(getattr(market_status, "status", "") or ""):
+                return str(market_status.status)
+        except Exception:
+            logger.exception("CTA market regime fetch failed")
+        return "unknown"
+
+    def _market_regime_family_bias(self, signal: TrendSignal, regime: str) -> float:
+        if not bool(getattr(self.config, "market_regime_adaptation_enabled", True)):
+            return 0.0
+        family = str(getattr(signal, "execution_trigger_family", "") or "")
+        regime = str(regime or "unknown")
+        continuation_families = {
+            "bullish_memory_breakout", "bearish_memory_breakdown", "starter_frontrun",
+            "starter_short_frontrun", "trend_continuation_near_breakout", "near_breakout_release",
+            "price_led_override", "major_bull_impulse_reclaim",
+        }
+        reversal_reclaim_families = {
+            "spring_reclaim", "upthrust_reclaim", "pullback_support_entry",
+            "pullback_resistance_entry", "bullish_retest_entry", "bearish_retest_entry",
+        }
+        if regime in {"trend", "trend_impulse"}:
+            if family in continuation_families:
+                return 0.06 if regime == "trend" else 0.10
+            if family in reversal_reclaim_families:
+                return 0.02
+        if regime == "sideways":
+            if family in reversal_reclaim_families:
+                return 0.08
+            if family in continuation_families:
+                return -0.06
+        return 0.0
+
+    def _build_dashboard_snapshot(self) -> dict[str, object] | None:
+        try:
+            min_samples = int(getattr(self.config, "family_adaptation_min_closed_trades", 2))
+            family_records = self.database.fetch_trigger_family_performance(
+                strategy_name=self.strategy_name,
+                symbol=self.symbol,
+                min_samples=min_samples,
+            )
+            journal_rows = self.database.fetch_trade_journal_rows(
+                strategy_name=self.strategy_name,
+                symbol=self.symbol,
+                limit=400,
+                event_types=("trade_close", "trade_open", "blocked_signal"),
+            )
+            return build_cta_dashboard_snapshot(family_records=family_records, journal_rows=journal_rows)
+        except Exception:
+            logger.exception("CTA dashboard snapshot build failed")
+            return None
+
+    def _maybe_log_family_adaptation_summary(self) -> None:
+        interval = float(getattr(self.config, "family_summary_log_interval_seconds", 1800.0) or 0.0)
+        if interval <= 0:
+            return
+        now = float(self._time_provider())
+        if now - float(self._last_family_summary_log_at) < interval:
+            return
+        if not self._family_adaptation_meta:
+            return
+        self._last_family_summary_log_at = now
+        top_items = sorted(
+            self._family_adaptation_meta.items(),
+            key=lambda item: float(item[1].get("score", 0.0)),
+            reverse=True,
+        )[:5]
+        payload = [
+            {
+                "family": key,
+                "score": round(float(meta.get("score", 0.0)), 4),
+                "win_rate": round(float(meta.get("win_rate", 0.0)), 4),
+                "close_count": int(meta.get("close_count", 0)),
+                "avg_pnl": round(float(meta.get("avg_pnl", 0.0)), 4),
+            }
+            for key, meta in top_items
+        ]
+        dashboard = self._build_dashboard_snapshot()
+        if dashboard is None:
+            logger.info("CTA family adaptation summary | regime=%s top=%s", self._current_market_regime(), payload)
+            return
+        logger.info(
+            "CTA dashboard snapshot | regime=%s overview=%s leaders=%s decision_audit=%s",
+            self._current_market_regime(),
+            dashboard.get("overview", {}),
+            (dashboard.get("leaderboards", {}) or {}).get("all", [])[:5],
+            dashboard.get("decision_audit", {}),
+        )
+
+    def _refresh_family_adaptation_cache(self) -> None:
+        now = float(self._time_provider())
+        if now - self._family_adaptation_cache_at < self._family_adaptation_ttl:
+            self._maybe_log_family_adaptation_summary()
+            return
+        try:
+            min_samples = int(getattr(self.config, "family_adaptation_min_closed_trades", 2))
+            boost_cap = float(getattr(self.config, "family_adaptation_boost_cap", 0.20))
+            fast_start_trades = int(getattr(self.config, "family_adaptation_fast_start_trades", 3))
+            fast_start_multiplier = float(getattr(self.config, "family_adaptation_fast_start_multiplier", 1.35))
+            records = self.database.fetch_trigger_family_performance(
+                strategy_name=self.strategy_name,
+                symbol=self.symbol,
+                min_samples=min_samples,
+            )
+            self._family_adaptation_cache = {}
+            self._family_adaptation_meta = {}
+            for rec in records:
+                key = f"{rec.trigger_family}:{rec.side or 'any'}"
+                base_edge = rec.win_rate - 0.45
+                expectancy_term = rec.avg_pnl * 0.05
+                perf_score = base_edge + expectancy_term
+                if int(rec.close_count) <= fast_start_trades:
+                    perf_score *= fast_start_multiplier
+                perf_score = max(-boost_cap, min(boost_cap, perf_score))
+                self._family_adaptation_cache[key] = perf_score
+                self._family_adaptation_meta[key] = {
+                    "score": perf_score,
+                    "win_rate": float(rec.win_rate),
+                    "avg_pnl": float(rec.avg_pnl),
+                    "close_count": int(rec.close_count),
+                    "sample_count": int(rec.sample_count),
+                }
+            self._family_adaptation_cache_at = now
+            logger.info(
+                "CTA family adaptation cache refreshed | families=%d ttl=%.0fs min_samples=%d",
+                len(self._family_adaptation_cache),
+                self._family_adaptation_ttl,
+                min_samples,
+            )
+            self._maybe_log_family_adaptation_summary()
+        except Exception:
+            logger.exception("CTA family adaptation cache refresh failed")
+
+    def _get_family_adaptation_score(self, signal: TrendSignal) -> tuple[float, tuple[str, ...]]:
+        self._refresh_family_adaptation_cache()
+        side = "long" if signal.direction > 0 else "short" if signal.direction < 0 else "any"
+        trigger_family = str(getattr(signal, "execution_trigger_family", "") or "unknown")
+        key_exact = f"{trigger_family}:{side}"
+        key_any = f"{trigger_family}:any"
+        score = self._family_adaptation_cache.get(key_exact, 0.0)
+        source_key = key_exact
+        if score == 0.0:
+            score = self._family_adaptation_cache.get(key_any, 0.0)
+            source_key = key_any
+        reasons: list[str] = []
+        if score != 0.0:
+            meta = self._family_adaptation_meta.get(source_key, {})
+            reasons.append(f"family_perf={trigger_family}({float(score):+.2f})")
+            reasons.append(f"family_wr={float(meta.get('win_rate', 0.0)):.2f}")
+            reasons.append(f"family_n={int(meta.get('close_count', 0))}")
+        regime = self._current_market_regime()
+        regime_bias = self._market_regime_family_bias(signal, regime)
+        if regime_bias != 0.0:
+            score += regime_bias
+            reasons.append(f"regime={regime}({regime_bias:+.2f})")
+        boost_cap = float(getattr(self.config, "family_adaptation_boost_cap", 0.20))
+        return max(-boost_cap, min(boost_cap, float(score))), tuple(reasons)
+
+    def _score_entry_decider(self, signal: TrendSignal) -> tuple[str, float, tuple[str, ...]]:
+        if not bool(getattr(self.config, "entry_decider_enabled", True)):
+            return "open", 1.0, ("entry_decider_disabled",)
+
+        reasons: list[str] = []
+        score = 0.0
+        direction = 1 if signal.direction > 0 else -1 if signal.direction < 0 else self._candidate_ready_side(signal)
+        dominant_score = float(signal.bullish_score if direction > 0 else signal.bearish_score)
+        threshold = float(signal.bullish_threshold if direction > 0 else signal.bearish_threshold)
+        confidence = float(getattr(signal, "signal_confidence", 0.0) or 0.0)
+        location_score = float(getattr(signal, "entry_location_score", 0.0) or 0.0)
+        rr_floor = float(self._resolve_minimum_expected_rr_for_pathway(signal))
+        expected_rr = self._expected_reward_risk_ratio(
+            signal,
+            reference_price=float(signal.price),
+            stop_distance=max(1e-9, self._normalized_atr(signal.price, signal.atr) * self._resolve_dynamic_stop_loss_multiplier(signal)),
+        )
+        rr_score = 0.5 if expected_rr is None or rr_floor <= 0 else max(0.0, min(1.0, expected_rr / max(rr_floor, 1e-9)))
+        near_ready = bool(
+            (direction > 0 and (signal.execution_breakout or signal.execution_frontrun_near_breakout or signal.pullback_near_support))
+            or (direction < 0 and (signal.execution_breakdown or signal.execution_frontrun_near_breakout or signal.pullback_near_resistance))
+            or str(getattr(signal, "execution_trigger_family", "") or "") in {"spring_reclaim", "upthrust_reclaim"}
+        )
+
+        score += max(0.0, min(1.0, confidence)) * 0.30
+        reasons.append(f"confidence={confidence:.2f}")
+        if threshold > 0:
+            score_ratio = max(0.0, min(1.3, dominant_score / threshold))
+            score += min(1.0, score_ratio) * 0.20
+            reasons.append(f"score_ratio={score_ratio:.2f}")
+        score += ((location_score + 1.0) / 2.0) * 0.25
+        reasons.append(f"location={location_score:.2f}")
+        score += rr_score * 0.15
+        reasons.append(f"rr={'n/a' if expected_rr is None else f'{expected_rr:.2f}'}")
+        if near_ready:
+            score += 0.10
+            reasons.append("timing_ready")
+        else:
+            reasons.append("timing_not_ready")
+
+        if signal.relaxed_entry:
+            score -= 0.06
+            reasons.append("relaxed_penalty")
+        if bool(getattr(signal, "reverse_intercepted", False)):
+            score -= 0.20
+            reasons.append("reverse_intercept_penalty")
+        if bool(getattr(signal, "resonance_allowed", False)):
+            score += 0.05
+            reasons.append("resonance_bonus")
+
+        family_score, family_reasons = self._get_family_adaptation_score(signal)
+        if family_score != 0.0 and bool(getattr(self.config, "entry_decider_use_family_adaptation", True)):
+            score += family_score
+            reasons.extend(family_reasons)
+
+        if direction > 0:
+            confidence_floor = float(getattr(self.config, "long_standard_min_confidence", 0.58))
+        else:
+            confidence_floor = float(getattr(self.config, "short_standard_min_confidence", 0.55))
+        if confidence < confidence_floor:
+            score -= 0.08
+            reasons.append(f"below_conf_floor={confidence_floor:.2f}")
+
+        score = max(0.0, min(1.0, score))
+        open_floor = float(getattr(self.config, "entry_decider_open_score", 0.55))
+        probe_floor = float(getattr(self.config, "entry_decider_probe_score", 0.35))
+        watch_floor = float(getattr(self.config, "entry_decider_watch_score", 0.20))
+        if score >= open_floor:
+            return "open", score, tuple(reasons)
+        if score >= probe_floor and near_ready:
+            return "probe", score, tuple(reasons)
+        if score >= watch_floor:
+            return "watch", score, tuple(reasons)
+        return "reject", score, tuple(reasons)
+
     def _apply_standard_checks(self, signal: TrendSignal) -> str | None:
         trigger_family_gate_reason = self._resolve_trigger_family_gate_reason(signal)
         if trigger_family_gate_reason is not None:
@@ -1927,12 +2307,36 @@ class CTARobot(BaseStrategyRobot):
                 int(signal.major_direction),
             )
             return "cta:entry_quality_blocked"
+        entry_decider_decision = str(getattr(signal, "entry_decider_decision", "open") or "open")
+        if entry_decider_decision == "watch":
+            logger.info(
+                "CTA entry decider watch | symbol=%s side=%s pathway=%s score=%.2f reasons=%s",
+                self.symbol,
+                "buy" if signal.direction > 0 else "sell",
+                signal.entry_pathway.name,
+                float(getattr(signal, "entry_decider_score", 0.0)),
+                ",".join(getattr(signal, "entry_decider_reasons", ()) or ()),
+            )
+            return "cta:entry_watch"
+        if entry_decider_decision == "reject":
+            logger.info(
+                "CTA entry decider rejected | symbol=%s side=%s pathway=%s score=%.2f reasons=%s",
+                self.symbol,
+                "buy" if signal.direction > 0 else "sell",
+                signal.entry_pathway.name,
+                float(getattr(signal, "entry_decider_score", 0.0)),
+                ",".join(getattr(signal, "entry_decider_reasons", ()) or ()),
+            )
+            return "cta:entry_quality_blocked"
         return None
 
     def _assess_order_flow(self, *, side: str, amount: float) -> OrderFlowAssessment | None:
-        if side != "buy" or not self.config.order_flow_enabled:
+        if not self.config.order_flow_enabled:
             return None
-        return self.order_flow_sentinel.assess_entry(self.symbol, side, amount)
+        normalized_side = str(side).strip().lower()
+        if normalized_side not in {"buy", "sell"}:
+            return None
+        return self.order_flow_sentinel.assess_entry(self.symbol, normalized_side, amount)
 
     def _apply_standard_order_flow_checks(
         self,
@@ -2130,6 +2534,13 @@ class CTARobot(BaseStrategyRobot):
         sentiment_halved = False
 
         amount *= max(0.0, min(1.0, float(signal.entry_size_multiplier)))
+        entry_decider_decision = str(getattr(signal, "entry_decider_decision", "open") or "open")
+        if entry_decider_decision == "probe":
+            amount *= max(0.1, min(1.0, float(getattr(self.config, "entry_decider_probe_size_ratio", 0.60))))
+        elif entry_decider_decision == "watch":
+            return "cta:entry_watch", 0.0, False
+        elif entry_decider_decision == "reject":
+            return "cta:entry_quality_blocked", 0.0, False
         if signal.quick_trade_mode:
             amount *= max(0.0, min(1.0, float(getattr(self.config, 'obv_scalp_entry_fraction', 0.35))))
         amount = self._normalize_order_amount(amount)
@@ -2501,6 +2912,10 @@ class CTARobot(BaseStrategyRobot):
                 "reverse_intercepted": bool(signal.reverse_intercepted),
                 "reverse_intercept_reason": str(signal.reverse_intercept_reason),
                 "sweep_extreme_price": signal.sweep_extreme_price,
+                "entry_decider_decision": str(signal.entry_decider_decision),
+                "entry_decider_score": float(signal.entry_decider_score),
+                "entry_decider_reasons": list(signal.entry_decider_reasons),
+                "market_regime": self._current_market_regime(),
             },
         )
         self._arm_fast_track_reuse_cooldown(signal)
@@ -3224,6 +3639,7 @@ class CTARobot(BaseStrategyRobot):
                 "origin_trigger_family": str(position.origin_trigger_family or "waiting"),
                 "origin_trigger_reason": str(position.origin_trigger_reason or ""),
                 "origin_pathway": str(position.origin_pathway or ""),
+                "market_regime": self._current_market_regime(),
             },
         )
 

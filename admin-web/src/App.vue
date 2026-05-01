@@ -41,9 +41,18 @@ const initialEquityMeta = ref({ source: '--', updatedAt: '' })
 const initialEquitySaving = ref(false)
 const financeMonth = ref(currentMonthKey())
 const financeCalendar = ref({ month: currentMonthKey(), monthTotalPnl: 0, dayCount: 0, items: [], initialEquity: 0 })
+const ctaWindowHours = ref(24)
+const ctaSelectedFamily = ref('')
+const ctaSelectedRegime = ref('')
+const ctaHeatmapMode = ref('bias')
+const ctaHeatmapSortMode = ref('bias_abs')
+const ctaFamilyTrendMode = ref('cum_pnl')
+const ctaPresetAudit = ref([])
+const ctaDashboard = ref({ overview: {}, leaderboards: { all: [], long: [], short: [] }, family_catalog: [], regime_matrix: [], regime_transitions: [], family_score_timeseries: [], decision_audit: { missed_opportunities: [], bad_releases: [] }, suggestions: [], tuningSnapshot: {} })
 
 const viewTabs = [
   { id: 'overview', label: '总览' },
+  { id: 'cta-dashboard', label: 'CTA 驾驶舱' },
   { id: 'control', label: '系统控制' },
   { id: 'trading', label: '交易执行' },
   { id: 'logs', label: '日志审计' },
@@ -208,6 +217,200 @@ const equityChartStats = computed(() => {
   }
 })
 const equityChart = computed(() => buildEquityChart(equityPoints.value))
+const ctaTopFamilies = computed(() => ctaDashboard.value?.leaderboards?.all || [])
+const ctaLongFamilies = computed(() => ctaDashboard.value?.leaderboards?.long || [])
+const ctaShortFamilies = computed(() => ctaDashboard.value?.leaderboards?.short || [])
+const ctaRegimeMatrix = computed(() => ctaDashboard.value?.regime_matrix || [])
+const ctaRegimeTransitions = computed(() => ctaDashboard.value?.regime_transitions || [])
+const ctaFamilyScoreTimeseries = computed(() => ctaDashboard.value?.family_score_timeseries || [])
+const ctaFamilyRegimeActions = computed(() => ctaDashboard.value?.family_regime_actions || [])
+const ctaMissedRows = computed(() => ctaDashboard.value?.decision_audit?.missed_opportunities || [])
+const ctaBadReleaseRows = computed(() => ctaDashboard.value?.decision_audit?.bad_releases || [])
+const ctaSuggestions = computed(() => ctaDashboard.value?.suggestions || [])
+const ctaTuningSnapshot = computed(() => ctaDashboard.value?.tuningSnapshot || {})
+const ctaOverviewCards = computed(() => {
+  const overviewData = ctaDashboard.value?.overview || {}
+  return [
+    { label: 'Family 总数', value: overviewData.family_count ?? 0, hint: '当前纳入统计的 trigger family 数量' },
+    { label: 'Long Family', value: overviewData.long_family_count ?? 0, hint: '做多 family 样本' },
+    { label: 'Short Family', value: overviewData.short_family_count ?? 0, hint: '做空 family 样本' },
+    { label: '最近平仓', value: overviewData.recent_close_count ?? 0, hint: '用于适配学习的 recent close 样本' },
+    { label: '最近阻断', value: overviewData.recent_blocked_count ?? 0, hint: '最近 blocked_signal 数量' },
+  ]
+})
+const ctaLeaderboardChart = computed(() => buildBarChart(ctaTopFamilies.value.slice(0, 8), (row) => Number(row.score || 0), (row) => row.trigger_family))
+const ctaLongWinrateChart = computed(() => buildBarChart(ctaLongFamilies.value.slice(0, 8), (row) => Number(row.win_rate || 0), (row) => row.trigger_family))
+const ctaShortWinrateChart = computed(() => buildBarChart(ctaShortFamilies.value.slice(0, 8), (row) => Number(row.win_rate || 0), (row) => row.trigger_family))
+const ctaRegimeHeatRows = computed(() => (ctaRegimeMatrix.value || []).slice(0, 12))
+const ctaRegimeFamilies = computed(() => {
+  const set = new Set()
+  ctaRegimeMatrix.value.forEach((row) => set.add(String(row.trigger_family || '--')))
+  return [...set]
+})
+const ctaRegimeNames = computed(() => {
+  const set = new Set()
+  ctaRegimeMatrix.value.forEach((row) => set.add(String(row.market_regime || 'unknown')))
+  return [...set]
+})
+const ctaRegimeHeatMatrix = computed(() => {
+  const families = ctaRegimeFamilies.value
+  const regimes = ctaRegimeNames.value
+  const source = ctaRegimeMatrix.value || []
+
+  const modeValue = (bucket) => {
+    if (ctaHeatmapMode.value === 'long') return Number(bucket.longPnl || 0)
+    if (ctaHeatmapMode.value === 'short') return Number(bucket.shortPnl || 0)
+    if (ctaHeatmapMode.value === 'net') return Number(bucket.netPnl || 0)
+    return Number(bucket.biasPnl || 0)
+  }
+
+  const buckets = families.map((family) => ({
+    family,
+    cells: regimes.map((regime) => {
+      const matched = source.filter((row) => String(row.trigger_family || '--') === family && String(row.market_regime || 'unknown') === regime)
+      const longRows = matched.filter((row) => String(row.side || '').toLowerCase() === 'long')
+      const shortRows = matched.filter((row) => String(row.side || '').toLowerCase() === 'short')
+      const longTrades = longRows.reduce((sum, row) => sum + (Number(row.trade_count) || 0), 0)
+      const shortTrades = shortRows.reduce((sum, row) => sum + (Number(row.trade_count) || 0), 0)
+      const longPnl = longRows.reduce((sum, row) => sum + (Number(row.total_pnl) || 0), 0)
+      const shortPnl = shortRows.reduce((sum, row) => sum + (Number(row.total_pnl) || 0), 0)
+      const netPnl = longPnl + shortPnl
+      const biasPnl = longPnl - shortPnl
+      const longWinBase = longRows.reduce((sum, row) => sum + (Number(row.win_rate) || 0) * (Number(row.trade_count) || 0), 0)
+      const shortWinBase = shortRows.reduce((sum, row) => sum + (Number(row.win_rate) || 0) * (Number(row.trade_count) || 0), 0)
+      const totalTrades = longTrades + shortTrades
+      const totalWinBase = longWinBase + shortWinBase
+      const netWinRate = totalTrades ? totalWinBase / totalTrades : 0
+      return {
+        regime,
+        longTrades,
+        shortTrades,
+        totalTrades,
+        longPnl,
+        shortPnl,
+        netPnl,
+        biasPnl,
+        netWinRate,
+      }
+    }),
+  }))
+
+  const flattened = buckets.flatMap((row) => row.cells)
+  const maxAbsValue = Math.max(1e-9, ...flattened.map((cell) => Math.abs(modeValue(cell))))
+  const rows = buckets
+    .map((row) => {
+      const familyBiasAbs = Math.max(...row.cells.map((cell) => Math.abs(cell.biasPnl)), 0)
+      const familyNet = row.cells.reduce((sum, cell) => sum + Number(cell.netPnl || 0), 0)
+      const familyLong = row.cells.reduce((sum, cell) => sum + Number(cell.longPnl || 0), 0)
+      const familyShort = row.cells.reduce((sum, cell) => sum + Number(cell.shortPnl || 0), 0)
+      return {
+        family: row.family,
+        familyBiasAbs,
+        familyNet,
+        familyLong,
+        familyShort,
+        cells: row.cells.map((cell) => {
+          const value = modeValue(cell)
+          const intensity = Math.min(1, Math.abs(value) / maxAbsValue)
+          return {
+            ...cell,
+            value,
+            intensity,
+            tone: value > 0 ? 'emerald' : value < 0 ? 'rose' : 'slate',
+          }
+        }),
+      }
+    })
+    .sort((a, b) => {
+      if (ctaHeatmapSortMode.value === 'net') return Math.abs(b.familyNet) - Math.abs(a.familyNet)
+      if (ctaHeatmapSortMode.value === 'long') return Math.abs(b.familyLong) - Math.abs(a.familyLong)
+      if (ctaHeatmapSortMode.value === 'short') return Math.abs(b.familyShort) - Math.abs(a.familyShort)
+      return b.familyBiasAbs - a.familyBiasAbs
+    })
+
+  return { families, regimes, rows, maxAbsValue }
+})
+const ctaFamilyRegimeBands = computed(() => {
+  const rows = ctaActiveFamilySeries.value || []
+  if (!rows.length) return []
+  const total = Math.max(rows.length - 1, 1)
+  const width = 520
+  const padding = 18
+  const bands = []
+  let start = 0
+  let current = String(rows[0]?.market_regime || 'unknown')
+  const pushBand = (endIndex, regime) => {
+    const x1 = padding + (start * (width - padding * 2)) / total
+    const x2 = padding + (endIndex * (width - padding * 2)) / total
+    bands.push({ regime, x: x1, width: Math.max(6, x2 - x1) })
+  }
+  rows.forEach((item, index) => {
+    const regime = String(item?.market_regime || 'unknown')
+    if (regime !== current) {
+      pushBand(Math.max(index - 1, start), current)
+      start = index
+      current = regime
+    }
+  })
+  pushBand(rows.length - 1, current)
+  return bands
+})
+const ctaFamilyOptions = computed(() => {
+  const catalog = Array.isArray(ctaDashboard.value?.family_catalog) ? ctaDashboard.value.family_catalog : []
+  const options = []
+  const seen = new Set()
+  catalog.forEach((item) => {
+    const family = String(item || '').trim()
+    if (!family || seen.has(family)) return
+    seen.add(family)
+    options.push(family)
+  })
+  ;(ctaTopFamilies.value || []).forEach((row) => {
+    const family = String(row.trigger_family || '').trim()
+    if (!family || seen.has(family)) return
+    seen.add(family)
+    options.push(family)
+  })
+  ;(ctaFamilyScoreTimeseries.value || []).forEach((point) => {
+    const family = String(point?.family || '').trim()
+    if (!family || seen.has(family)) return
+    seen.add(family)
+    options.push(family)
+  })
+  return options
+})
+const ctaActiveFamily = computed(() => {
+  if (ctaSelectedFamily.value && ctaFamilyOptions.value.includes(ctaSelectedFamily.value)) return ctaSelectedFamily.value
+  return ctaFamilyOptions.value[0] || ''
+})
+const ctaActiveFamilySeries = computed(() => {
+  const family = ctaActiveFamily.value
+  if (!family) return []
+  return (ctaFamilyScoreTimeseries.value || []).filter((item) => String(item?.family || '') === family)
+})
+const ctaActiveFamilyMeta = computed(() => {
+  const family = ctaActiveFamily.value
+  const boardRow = (ctaTopFamilies.value || []).find((item) => item.trigger_family === family)
+  const series = ctaActiveFamilySeries.value
+  const latestPoint = series[series.length - 1] || null
+  const latestCumPnl = latestPoint ? Number(latestPoint.cum_pnl || 0) : 0
+  const latestTradePnl = latestPoint ? Number(latestPoint.trade_pnl || 0) : 0
+  const latestRollingWr = latestPoint ? Number(latestPoint.rolling_wr || 0) : 0
+  return { family, boardRow, latestCumPnl, latestTradePnl, latestRollingWr, points: series.length }
+})
+const ctaFamilyTrendChart = computed(() => {
+  const family = ctaActiveFamily.value
+  const rows = ctaActiveFamilySeries.value || []
+  const selector = (item) => {
+    if (ctaFamilyTrendMode.value === 'trade_pnl') return Number(item.trade_pnl || 0)
+    if (ctaFamilyTrendMode.value === 'rolling_wr') return Number(item.rolling_wr || 0)
+    return Number(item.cum_pnl || 0)
+  }
+  const color = ctaFamilyTrendMode.value === 'rolling_wr' ? '#8b5cf6' : ctaFamilyTrendMode.value === 'trade_pnl' ? '#f97316' : '#0ea5e9'
+  const metricLabel = ctaFamilyTrendMode.value === 'rolling_wr' ? 'WR 滚动' : ctaFamilyTrendMode.value === 'trade_pnl' ? '单笔 PnL' : '累计 PnL'
+  if (!family) return { family: '', color, metricLabel, chart: buildMiniTrendChart([], () => 0) }
+  return { family, color, metricLabel, chart: buildMiniTrendChart(rows, selector) }
+})
 const controlCards = computed(() => {
   if (!overview.value) return []
   return [
@@ -763,6 +966,49 @@ function freshnessClass(text) {
   return 'text-slate-500 dark:text-slate-400'
 }
 
+function buildMiniTrendChart(points, selector) {
+  const width = 520
+  const height = 180
+  const padding = 18
+  const valid = (points || []).filter((item) => Number.isFinite(Number(selector(item))))
+  if (!valid.length) {
+    return { width, height, path: '', area: '', points: [], labels: [] }
+  }
+  const values = valid.map((item) => Number(selector(item)))
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  const range = max - min || 1
+  const chartPoints = valid.map((item, index) => ({
+    raw: item,
+    value: Number(selector(item)),
+    x: padding + (index * (width - padding * 2)) / Math.max(valid.length - 1, 1),
+    y: height - padding - ((Number(selector(item)) - min) / range) * (height - padding * 2),
+  }))
+  const path = buildLinePath(valid, selector, width, height, padding)
+  const area = buildAreaPath(valid, selector, width, height, padding)
+  const labels = valid.filter((_, index) => index % Math.max(1, Math.ceil(valid.length / 6)) === 0 || index === valid.length - 1)
+  return { width, height, path, area, points: chartPoints, labels }
+}
+
+function buildBarChart(rows, selector, labelSelector) {
+  const width = 520
+  const height = 220
+  const padding = 24
+  const list = (rows || []).map((row) => ({ label: String(labelSelector(row) || '--'), value: Number(selector(row) || 0) }))
+  const maxAbs = Math.max(0.0001, ...list.map((item) => Math.abs(item.value)))
+  const innerWidth = width - padding * 2
+  const barGap = 10
+  const barWidth = list.length ? Math.max(18, (innerWidth - barGap * Math.max(list.length - 1, 0)) / Math.max(list.length, 1)) : 0
+  const baseline = height - padding
+  const bars = list.map((item, index) => {
+    const x = padding + index * (barWidth + barGap)
+    const h = Math.max(4, Math.abs(item.value) / maxAbs * (height - padding * 2 - 24))
+    const y = item.value >= 0 ? baseline - h : baseline
+    return { ...item, x, y, width: barWidth, height: h }
+  })
+  return { width, height, padding, baseline, bars }
+}
+
 function buildLinePath(points, selector, width = 760, height = 220, padding = 22) {
   if (!points.length) return ''
   const values = points.map((item) => Number(selector(item))).filter((value) => Number.isFinite(value))
@@ -891,6 +1137,13 @@ function logout(options = {}) {
   orders.value = []
   logs.value = []
   timeline.value = { activity: [], equityPoints: [], ctaEvents: [], riskEvents: [] }
+  ctaSelectedFamily.value = ''
+  ctaSelectedRegime.value = ''
+  ctaHeatmapMode.value = 'bias'
+  ctaHeatmapSortMode.value = 'bias_abs'
+  ctaFamilyTrendMode.value = 'cum_pnl'
+  ctaPresetAudit.value = []
+  ctaDashboard.value = { overview: {}, leaderboards: { all: [], long: [], short: [] }, family_catalog: [], regime_matrix: [], decision_audit: { missed_opportunities: [], bad_releases: [] } }
   lastSuccessfulRefreshAt.value = ''
   refreshFailureCount.value = 0
   configSections.value = []
@@ -916,7 +1169,7 @@ async function refreshAll(options = {}) {
   loading.value = true
   if (!silent) actionMessage.value = ''
   try {
-    const [overviewRes, botsRes, positionsRes, ordersRes, logsRes, timelineRes, initialEquityRes, financeCalendarRes] = await Promise.all([
+    const [overviewRes, botsRes, positionsRes, ordersRes, logsRes, timelineRes, initialEquityRes, financeCalendarRes, ctaDashboardRes] = await Promise.all([
       api('/api/dashboard/overview', { headers: authHeaders.value }),
       api('/api/bots/status', { headers: authHeaders.value }),
       api('/api/account/positions', { headers: authHeaders.value }),
@@ -925,6 +1178,7 @@ async function refreshAll(options = {}) {
       api('/api/dashboard/timeline?limit=240', { headers: authHeaders.value }),
       api('/api/account/initial-equity', { headers: authHeaders.value }),
       api(`/api/account/daily-calendar?month=${financeMonth.value}`, { headers: authHeaders.value }),
+      api(`/api/dashboard/cta?hours=${ctaWindowHours.value}`, { headers: authHeaders.value }),
     ])
     overview.value = overviewRes
     bots.value = botsRes
@@ -938,6 +1192,7 @@ async function refreshAll(options = {}) {
       initialEquityInput.value = initialEquity.value ? String(initialEquity.value) : ''
     }
     financeCalendar.value = financeCalendarRes || financeCalendar.value
+    ctaDashboard.value = ctaDashboardRes || ctaDashboard.value
     lastSuccessfulRefreshAt.value = new Date().toISOString()
     refreshFailureCount.value = 0
     if (silent) {
@@ -1002,6 +1257,18 @@ async function sendSystemAction(path, confirmText, successText) {
   } catch (error) {
     actionMessage.value = '系统控制操作失败。'
     recordControlAction(path.replace('/api/system/', '').toUpperCase(), '失败', error?.message || '系统控制操作失败')
+  }
+}
+
+async function loadPresetAudit() {
+  if (!token.value) return
+  try {
+    const result = await api('/api/cta/preset-audit', { headers: authHeaders.value })
+    ctaPresetAudit.value = result.items || []
+  } catch (error) {
+    if (error?.status === 401) {
+      logout({ expired: true })
+    }
   }
 }
 
@@ -1117,6 +1384,83 @@ function rebuildConfigBaseline() {
   configBaseline.value = next
 }
 
+function buildPresetDiff(values) {
+  return Object.entries(values || {}).map(([path, nextValue]) => ({
+    path,
+    before: configBaseline.value[path],
+    after: nextValue,
+  }))
+}
+
+async function applyCtaPreset(values, successMessage, meta = {}) {
+  if (!token.value) return
+  const diffRows = buildPresetDiff(values)
+  const diffText = diffRows.map((row) => `${row.path}: ${JSON.stringify(row.before)} -> ${JSON.stringify(row.after)}`).join('\n')
+  const confirmed = confirm(`确认应用 CTA preset？\n\n${diffText || '（未检测到 diff）'}`)
+  if (!confirmed) {
+    recordControlAction('CTA 驾驶舱调参', '取消', successMessage)
+    return
+  }
+  try {
+    const result = await api('/api/config/save', {
+      method: 'POST',
+      headers: authHeaders.value,
+      body: JSON.stringify({ values }),
+    })
+    configSections.value = result.sections || configSections.value
+    rebuildConfigBaseline()
+    ensureConfigSelection()
+    actionMessage.value = result.message || successMessage
+    recordControlAction('CTA 驾驶舱调参', '成功', `${successMessage}\n${diffText}`)
+    const auditItem = {
+      time: new Date().toISOString(),
+      successMessage,
+      meta,
+      diffRows,
+      review24hAt: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+      review72hAt: new Date(Date.now() + 72 * 3600 * 1000).toISOString(),
+    }
+    await api('/api/cta/preset-audit', {
+      method: 'POST',
+      headers: authHeaders.value,
+      body: JSON.stringify(auditItem),
+    })
+    await loadPresetAudit()
+    await refreshAll({ silent: true })
+  } catch (error) {
+    if (error?.status === 401) {
+      logout({ expired: true })
+      return
+    }
+    actionMessage.value = 'CTA 驾驶舱调参失败。'
+    recordControlAction('CTA 驾驶舱调参', '失败', error?.message || '接口调用失败')
+  }
+}
+
+async function rollbackCtaTuning() {
+  if (!token.value) return
+  try {
+    const result = await api('/api/config/rollback', {
+      method: 'POST',
+      headers: authHeaders.value,
+      body: JSON.stringify({ snapshotKey: 'cta_tuning_snapshot::latest' }),
+    })
+    configSections.value = result.sections || configSections.value
+    rebuildConfigBaseline()
+    ensureConfigSelection()
+    actionMessage.value = result.message || 'CTA 参数已回滚'
+    recordControlAction('CTA 驾驶舱回滚', '成功', result.message || 'CTA 参数已回滚')
+    await refreshAll({ silent: true })
+  } catch (error) {
+    if (error?.status === 401) {
+      logout({ expired: true })
+      return
+    }
+    actionMessage.value = 'CTA 驾驶舱回滚失败。'
+    recordControlAction('CTA 驾驶舱回滚', '失败', error?.message || '接口调用失败')
+  }
+}
+
 async function saveConfigSections() {
   if (!token.value || configSaving.value) return
   configSaving.value = true
@@ -1177,6 +1521,7 @@ onMounted(async () => {
   if (token.value) {
     await refreshAll()
     await loadConfigSections()
+    await loadPresetAudit()
     startAutoRefresh()
   }
 })
@@ -1488,6 +1833,374 @@ onBeforeUnmount(() => {
                     </div>
                     <div class="mt-2 text-center text-[10px] text-slate-400">{{ formatShortTime(item.time) }}</div>
                   </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section v-if="currentView === 'cta-dashboard'" id="cta-dashboard" class="mt-4 space-y-3">
+          <div class="elevated-panel p-4">
+            <div class="panel-header">
+              <div>
+                <div class="panel-kicker">CTA Adaptive Cockpit</div>
+                <h3 class="panel-title">CTA 驾驶舱</h3>
+                <p class="panel-desc">集中看 family 排行、多空分布、regime 表现和错杀/放错审计。</p>
+              </div>
+              <div class="flex items-center gap-2 flex-wrap justify-end">
+                <button v-for="hours in [24, 72, 168]" :key="`cta-window-${hours}`" :class="['filter-pill', ctaWindowHours === hours ? 'filter-pill-sky-active' : 'filter-pill-muted']" @click="ctaWindowHours = hours; refreshAll()">{{ hours === 168 ? '7d' : `${hours}h` }}</button>
+                <span class="result-badge">{{ ctaDashboard?.['交易对'] || overview?.['交易对'] || '--' }}</span>
+                <span class="result-badge">{{ ctaDashboard?.marketRegime || 'unknown' }}</span>
+              </div>
+            </div>
+            <div class="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+              <div v-for="item in ctaOverviewCards" :key="item.label" class="metric-tile p-3.5">
+                <div class="text-[11px] text-slate-400">{{ item.label }}</div>
+                <div class="mt-2 text-[20px] font-semibold tracking-tight">{{ item.value }}</div>
+                <div class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">{{ item.hint }}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid gap-3 xl:grid-cols-3">
+            <div class="elevated-panel overflow-hidden">
+              <div class="toolbar-strip"><div><h4 class="subpanel-title">Top Family Score 图</h4><p class="subpanel-desc">观察当前 strongest family 的综合 score。</p></div></div>
+              <div class="p-3">
+                <svg :viewBox="`0 0 ${ctaLeaderboardChart.width} ${ctaLeaderboardChart.height}`" class="h-56 w-full">
+                  <line :x1="ctaLeaderboardChart.padding" :x2="ctaLeaderboardChart.width - ctaLeaderboardChart.padding" :y1="ctaLeaderboardChart.baseline" :y2="ctaLeaderboardChart.baseline" stroke="#cbd5e1" stroke-width="1" />
+                  <g v-for="bar in ctaLeaderboardChart.bars" :key="`score-${bar.label}`">
+                    <rect :x="bar.x" :y="bar.y" :width="bar.width" :height="bar.height" rx="6" fill="#0ea5e9" fill-opacity="0.85" />
+                    <text :x="bar.x + bar.width / 2" :y="ctaLeaderboardChart.height - 6" text-anchor="middle" font-size="10" fill="#64748b">{{ bar.label.slice(0, 10) }}</text>
+                  </g>
+                </svg>
+              </div>
+            </div>
+            <div class="elevated-panel overflow-hidden">
+              <div class="toolbar-strip"><div><h4 class="subpanel-title">Family 总榜</h4><p class="subpanel-desc">当前综合 score 最高的 trigger family。</p></div></div>
+              <div class="table-wrap m-3 overflow-auto max-h-[360px]">
+                <table class="data-table min-w-full divide-y divide-slate-200 text-sm dark:divide-slate-800">
+                  <thead class="sticky top-0 bg-slate-50 dark:bg-slate-950/95"><tr><th class="text-left font-medium text-slate-500">Family</th><th class="text-left font-medium text-slate-500">方向</th><th class="text-right font-medium text-slate-500">Score</th><th class="text-right font-medium text-slate-500">WR</th></tr></thead>
+                  <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+                    <tr v-for="row in ctaTopFamilies.slice(0, 10)" :key="`${row.trigger_family}-${row.side}`"><td class="font-medium">{{ row.trigger_family }}</td><td>{{ row.side }}</td><td class="text-right tabular-nums">{{ formatNumber(row.score, 4) }}</td><td class="text-right tabular-nums">{{ percentText(row.win_rate) }}</td></tr>
+                    <tr v-if="!ctaTopFamilies.length"><td colspan="4" class="py-6 text-center text-[13px] text-slate-500 dark:text-slate-400">暂无 family 数据</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="elevated-panel overflow-hidden">
+              <div class="toolbar-strip"><div><h4 class="subpanel-title">Long Family</h4><p class="subpanel-desc">做多侧表现最好的 family。</p></div></div>
+              <div class="px-3 pt-3">
+                <svg :viewBox="`0 0 ${ctaLongWinrateChart.width} ${ctaLongWinrateChart.height}`" class="h-40 w-full">
+                  <line :x1="ctaLongWinrateChart.padding" :x2="ctaLongWinrateChart.width - ctaLongWinrateChart.padding" :y1="ctaLongWinrateChart.baseline" :y2="ctaLongWinrateChart.baseline" stroke="#cbd5e1" stroke-width="1" />
+                  <g v-for="bar in ctaLongWinrateChart.bars" :key="`long-${bar.label}`">
+                    <rect :x="bar.x" :y="bar.y" :width="bar.width" :height="bar.height" rx="5" fill="#10b981" fill-opacity="0.85" />
+                  </g>
+                </svg>
+              </div>
+              <div class="table-wrap m-3 overflow-auto max-h-[360px]">
+                <table class="data-table min-w-full divide-y divide-slate-200 text-sm dark:divide-slate-800">
+                  <thead class="sticky top-0 bg-slate-50 dark:bg-slate-950/95"><tr><th class="text-left font-medium text-slate-500">Family</th><th class="text-right font-medium text-slate-500">PnL</th><th class="text-right font-medium text-slate-500">WR</th></tr></thead>
+                  <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+                    <tr v-for="row in ctaLongFamilies.slice(0, 8)" :key="`${row.trigger_family}-${row.side}`"><td class="font-medium">{{ row.trigger_family }}</td><td class="text-right tabular-nums">{{ signedNumber(row.total_pnl) }}</td><td class="text-right tabular-nums">{{ percentText(row.win_rate) }}</td></tr>
+                    <tr v-if="!ctaLongFamilies.length"><td colspan="3" class="py-6 text-center text-[13px] text-slate-500 dark:text-slate-400">暂无 long family 数据</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="elevated-panel overflow-hidden">
+              <div class="toolbar-strip"><div><h4 class="subpanel-title">Short Family</h4><p class="subpanel-desc">做空侧表现最好的 family。</p></div></div>
+              <div class="px-3 pt-3">
+                <svg :viewBox="`0 0 ${ctaShortWinrateChart.width} ${ctaShortWinrateChart.height}`" class="h-40 w-full">
+                  <line :x1="ctaShortWinrateChart.padding" :x2="ctaShortWinrateChart.width - ctaShortWinrateChart.padding" :y1="ctaShortWinrateChart.baseline" :y2="ctaShortWinrateChart.baseline" stroke="#cbd5e1" stroke-width="1" />
+                  <g v-for="bar in ctaShortWinrateChart.bars" :key="`short-${bar.label}`">
+                    <rect :x="bar.x" :y="bar.y" :width="bar.width" :height="bar.height" rx="5" fill="#f97316" fill-opacity="0.85" />
+                  </g>
+                </svg>
+              </div>
+              <div class="table-wrap m-3 overflow-auto max-h-[360px]">
+                <table class="data-table min-w-full divide-y divide-slate-200 text-sm dark:divide-slate-800">
+                  <thead class="sticky top-0 bg-slate-50 dark:bg-slate-950/95"><tr><th class="text-left font-medium text-slate-500">Family</th><th class="text-right font-medium text-slate-500">PnL</th><th class="text-right font-medium text-slate-500">WR</th></tr></thead>
+                  <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+                    <tr v-for="row in ctaShortFamilies.slice(0, 8)" :key="`${row.trigger_family}-${row.side}`"><td class="font-medium">{{ row.trigger_family }}</td><td class="text-right tabular-nums">{{ signedNumber(row.total_pnl) }}</td><td class="text-right tabular-nums">{{ percentText(row.win_rate) }}</td></tr>
+                    <tr v-if="!ctaShortFamilies.length"><td colspan="3" class="py-6 text-center text-[13px] text-slate-500 dark:text-slate-400">暂无 short family 数据</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="elevated-panel p-4">
+            <div class="panel-header">
+              <div>
+                <div class="panel-kicker">Quick Tuning</div>
+                <h4 class="panel-title">Family 快速调参</h4>
+                <p class="panel-desc">直接在驾驶舱里做常用调参，不用手动翻配置页。</p>
+              </div>
+            </div>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <button class="rounded-md bg-sky-600 px-3 py-2 text-[12.5px] font-medium text-white transition hover:bg-sky-700" @click="applyCtaPreset({ 'cta.disable_trend_continuation_long': false, 'cta.trend_continuation_minimum_entry_pathway': 'FAST_TRACK' }, '已偏向放大趋势延续 family')">放大趋势延续</button>
+              <button class="rounded-md bg-amber-500 px-3 py-2 text-[12.5px] font-medium text-white transition hover:bg-amber-600" @click="applyCtaPreset({ 'cta.disable_trend_continuation_long': true, 'cta.disable_near_breakout_release_long': true }, '已压制追突破型 family')">压制追突破</button>
+              <button class="rounded-md bg-emerald-600 px-3 py-2 text-[12.5px] font-medium text-white transition hover:bg-emerald-700" @click="applyCtaPreset({ 'cta.long_standard_min_confidence': 0.55, 'cta.short_standard_min_confidence': 0.53 }, '已适度放宽多空标准置信度')">适度放宽置信度</button>
+              <button class="rounded-md bg-rose-600 px-3 py-2 text-[12.5px] font-medium text-white transition hover:bg-rose-700" @click="applyCtaPreset({ 'cta.long_standard_min_confidence': 0.62, 'cta.short_standard_min_confidence': 0.60, 'cta.family_adaptation_boost_cap': 0.14 }, '已收紧放行并降低 family 自适应加成')">收紧放行</button>
+              <button class="rounded-md border border-slate-300 px-3 py-2 text-[12.5px] font-medium transition hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800" @click="rollbackCtaTuning">一键回滚 CTA 参数</button>
+              <button class="rounded-md border border-slate-300 px-3 py-2 text-[12.5px] font-medium transition hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800" @click="currentView = 'config'; activeConfigSection = 'cta'; activeConfigGroup = '自适应 / Family 开关'">打开 CTA 配置</button>
+            </div>
+            <div class="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-[12px] text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
+              当前 CTA 快照：{{ JSON.stringify(ctaTuningSnapshot) }}
+            </div>
+          </div>
+
+          <div class="grid gap-3 xl:grid-cols-[1.15fr,0.85fr]">
+            <div class="elevated-panel overflow-hidden">
+              <div class="toolbar-strip"><div><h4 class="subpanel-title">Family 历史切换器</h4><p class="subpanel-desc">按 family 单独切换，观察累计 PnL 轨迹，而不是只盯固定前三。</p></div></div>
+              <div class="p-3">
+                <div class="mb-3 flex flex-wrap gap-2">
+                  <button :class="['filter-pill', ctaFamilyTrendMode === 'cum_pnl' ? 'filter-pill-sky-active' : 'filter-pill-muted']" @click="ctaFamilyTrendMode = 'cum_pnl'">累计 PnL</button>
+                  <button :class="['filter-pill', ctaFamilyTrendMode === 'trade_pnl' ? 'filter-pill-sky-active' : 'filter-pill-muted']" @click="ctaFamilyTrendMode = 'trade_pnl'">单笔 PnL</button>
+                  <button :class="['filter-pill', ctaFamilyTrendMode === 'rolling_wr' ? 'filter-pill-sky-active' : 'filter-pill-muted']" @click="ctaFamilyTrendMode = 'rolling_wr'">WR 滚动</button>
+                </div>
+                <div class="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/40">
+                  <div class="mb-2 text-[11px] text-slate-400">全量 Family 选择（不受 topN 限制）</div>
+                  <select v-model="ctaSelectedFamily" class="config-input w-full">
+                    <option v-for="family in ctaFamilyOptions" :key="`family-option-${family}`" :value="family">{{ family }}</option>
+                  </select>
+                  <div class="mt-2 flex flex-wrap gap-2">
+                    <button
+                      v-for="family in ctaFamilyOptions.slice(0, 12)"
+                      :key="`family-switch-${family}`"
+                      :class="['filter-pill', ctaActiveFamily === family ? 'filter-pill-sky-active' : 'filter-pill-muted']"
+                      @click="ctaSelectedFamily = family"
+                    >
+                      {{ family }}
+                    </button>
+                  </div>
+                </div>
+                <div v-if="ctaActiveFamily" class="mb-3 grid gap-2 md:grid-cols-5">
+                  <div class="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/40">
+                    <div class="text-[11px] text-slate-400">当前 Family</div>
+                    <div class="mt-1 text-[14px] font-semibold">{{ ctaActiveFamilyMeta.family }}</div>
+                  </div>
+                  <div class="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/40">
+                    <div class="text-[11px] text-slate-400">累计 PnL</div>
+                    <div class="mt-1 text-[14px] font-semibold" :class="pnlClass(ctaActiveFamilyMeta.latestCumPnl)">{{ signedNumber(ctaActiveFamilyMeta.latestCumPnl, 4) }}</div>
+                  </div>
+                  <div class="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/40">
+                    <div class="text-[11px] text-slate-400">最近单笔</div>
+                    <div class="mt-1 text-[14px] font-semibold" :class="pnlClass(ctaActiveFamilyMeta.latestTradePnl)">{{ signedNumber(ctaActiveFamilyMeta.latestTradePnl, 4) }}</div>
+                  </div>
+                  <div class="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/40">
+                    <div class="text-[11px] text-slate-400">滚动 WR</div>
+                    <div class="mt-1 text-[14px] font-semibold">{{ percentText(ctaActiveFamilyMeta.latestRollingWr) }}</div>
+                  </div>
+                  <div class="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/40">
+                    <div class="text-[11px] text-slate-400">历史点数</div>
+                    <div class="mt-1 text-[14px] font-semibold">{{ ctaActiveFamilyMeta.points }}</div>
+                  </div>
+                </div>
+                <svg v-if="ctaActiveFamily && ctaFamilyTrendChart.chart.path" :viewBox="`0 0 520 180`" class="h-48 w-full">
+                  <g v-for="(band, idx) in ctaFamilyRegimeBands" :key="`regime-band-${idx}`">
+                    <rect :x="band.x" y="18" :width="band.width" height="144" :fill="band.regime === 'trend' || band.regime === 'trend_impulse' ? 'rgba(16,185,129,0.08)' : band.regime === 'sideways' ? 'rgba(148,163,184,0.10)' : 'rgba(14,165,233,0.08)'" />
+                    <text :x="band.x + 4" y="30" font-size="9" fill="#64748b">{{ band.regime }}</text>
+                  </g>
+                  <path :d="ctaFamilyTrendChart.chart.area" :fill="ctaFamilyTrendChart.color" fill-opacity="0.08" />
+                  <path :d="ctaFamilyTrendChart.chart.path" fill="none" :stroke="ctaFamilyTrendChart.color" stroke-width="2.5" stroke-linecap="round" />
+                  <g v-for="(point, idx) in ctaFamilyTrendChart.chart.points" :key="`trend-point-${idx}`" class="group">
+                    <circle :cx="point.x" :cy="point.y" r="3.2" :fill="ctaFamilyTrendChart.color" />
+                    <g class="pointer-events-none opacity-0 transition group-hover:opacity-100">
+                      <rect :x="Math.max(8, Math.min(point.x - 62, 520 - 132))" :y="Math.max(8, point.y - 74)" width="124" height="64" rx="8" fill="rgba(15,23,42,0.94)" />
+                      <text :x="Math.max(16, Math.min(point.x - 54, 520 - 124))" :y="Math.max(24, point.y - 56)" font-size="10" fill="#e2e8f0">{{ formatDateTime(point.raw.timestamp) }}</text>
+                      <text :x="Math.max(16, Math.min(point.x - 54, 520 - 124))" :y="Math.max(38, point.y - 42)" font-size="10" fill="#f8fafc">{{ ctaFamilyTrendChart.metricLabel }}: {{ ctaFamilyTrendMode === 'rolling_wr' ? percentText(point.raw.rolling_wr) : signedNumber(ctaFamilyTrendMode === 'trade_pnl' ? point.raw.trade_pnl : point.raw.cum_pnl, 4) }}</text>
+                      <text :x="Math.max(16, Math.min(point.x - 54, 520 - 124))" :y="Math.max(52, point.y - 28)" font-size="10" fill="#cbd5e1">trade_count: {{ point.raw.trade_count }}</text>
+                      <text :x="Math.max(16, Math.min(point.x - 54, 520 - 124))" :y="Math.max(66, point.y - 14)" font-size="10" fill="#cbd5e1">single: {{ signedNumber(point.raw.trade_pnl, 4) }}</text>
+                    </g>
+                  </g>
+                </svg>
+                <div v-else class="py-8 text-center text-[13px] text-slate-500 dark:text-slate-400">暂无可切换的 family 历史数据</div>
+              </div>
+            </div>
+            <div class="elevated-panel overflow-hidden">
+              <div class="toolbar-strip"><div><h4 class="subpanel-title">Regime 切换对比</h4><p class="subpanel-desc">对比不同 market regime 段内的胜率和 PnL。</p></div></div>
+              <div class="table-wrap m-3 overflow-auto max-h-[240px]">
+                <table class="data-table min-w-full divide-y divide-slate-200 text-sm dark:divide-slate-800">
+                  <thead class="sticky top-0 bg-slate-50 dark:bg-slate-950/95"><tr><th class="text-left font-medium text-slate-500">Regime</th><th class="text-right font-medium text-slate-500">次数</th><th class="text-right font-medium text-slate-500">WR</th><th class="text-right font-medium text-slate-500">PnL</th></tr></thead>
+                  <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+                    <tr v-for="(row, idx) in ctaRegimeTransitions" :key="`${row.market_regime}-${idx}`"><td class="font-medium">{{ row.market_regime }}</td><td class="text-right tabular-nums">{{ row.trade_count }}</td><td class="text-right tabular-nums">{{ percentText(row.win_rate) }}</td><td class="text-right tabular-nums">{{ signedNumber(row.total_pnl) }}</td></tr>
+                    <tr v-if="!ctaRegimeTransitions.length"><td colspan="4" class="py-6 text-center text-[13px] text-slate-500 dark:text-slate-400">暂无 regime 切换对比数据</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid gap-3 xl:grid-cols-[1.15fr,0.85fr]">
+            <div class="elevated-panel overflow-hidden">
+              <div class="toolbar-strip"><div><h4 class="subpanel-title">Family × Regime 二维热力矩阵</h4><p class="subpanel-desc">支持 net / long / short / bias 四种视图，bias 专门看多空偏移，默认按偏移绝对值排序。</p></div></div>
+              <div class="px-3 pt-3 flex flex-wrap gap-2">
+                <button :class="['filter-pill', ctaHeatmapMode === 'bias' ? 'filter-pill-rose-active' : 'filter-pill-muted']" @click="ctaHeatmapMode = 'bias'">偏移最大</button>
+                <button :class="['filter-pill', ctaHeatmapMode === 'net' ? 'filter-pill-sky-active' : 'filter-pill-muted']" @click="ctaHeatmapMode = 'net'">净表现</button>
+                <button :class="['filter-pill', ctaHeatmapMode === 'long' ? 'filter-pill-sky-active' : 'filter-pill-muted']" @click="ctaHeatmapMode = 'long'">Long</button>
+                <button :class="['filter-pill', ctaHeatmapMode === 'short' ? 'filter-pill-sky-active' : 'filter-pill-muted']" @click="ctaHeatmapMode = 'short'">Short</button>
+              </div>
+              <div class="px-3 pt-2 flex flex-wrap gap-2">
+                <button :class="['filter-pill', ctaHeatmapSortMode === 'bias_abs' ? 'filter-pill-rose-active' : 'filter-pill-muted']" @click="ctaHeatmapSortMode = 'bias_abs'">按偏移 abs 排序</button>
+                <button :class="['filter-pill', ctaHeatmapSortMode === 'net' ? 'filter-pill-sky-active' : 'filter-pill-muted']" @click="ctaHeatmapSortMode = 'net'">按净 pnl 排序</button>
+                <button :class="['filter-pill', ctaHeatmapSortMode === 'long' ? 'filter-pill-sky-active' : 'filter-pill-muted']" @click="ctaHeatmapSortMode = 'long'">按 long 排序</button>
+                <button :class="['filter-pill', ctaHeatmapSortMode === 'short' ? 'filter-pill-sky-active' : 'filter-pill-muted']" @click="ctaHeatmapSortMode = 'short'">按 short 排序</button>
+              </div>
+              <div class="m-3 overflow-auto">
+                <table class="min-w-full border-separate border-spacing-1.5 text-sm">
+                  <thead>
+                    <tr>
+                      <th class="sticky left-0 z-10 rounded-lg bg-slate-50 px-3 py-2 text-left text-[12px] font-medium text-slate-500 shadow-sm dark:bg-slate-950/95">Family \ Regime</th>
+                      <th v-for="regime in ctaRegimeHeatMatrix.regimes" :key="`heat-head-${regime}`" :class="['rounded-lg px-3 py-2 text-center text-[12px] font-medium shadow-sm', ctaSelectedRegime === regime ? 'bg-sky-100 text-sky-700 ring-1 ring-sky-300 dark:bg-sky-950/40 dark:text-sky-300 dark:ring-sky-800' : 'bg-slate-50 text-slate-500 dark:bg-slate-950/95']">{{ regime }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="row in ctaRegimeHeatMatrix.rows" :key="`heat-row-${row.family}`">
+                      <td class="sticky left-0 z-10 rounded-lg bg-white px-3 py-2 font-medium shadow-sm dark:bg-slate-900">
+                        <div>{{ row.family }}</div>
+                        <div class="mt-1 text-[10px] text-slate-400">bias abs {{ formatNumber(row.familyBiasAbs, 4) }}</div>
+                      </td>
+                      <td v-for="cell in row.cells" :key="`heat-cell-${row.family}-${cell.regime}`" class="min-w-[136px] cursor-pointer rounded-xl border px-3 py-2 align-top shadow-sm transition hover:scale-[1.01] hover:shadow-md"
+                        @click="ctaSelectedFamily = row.family; ctaSelectedRegime = cell.regime"
+                        :class="[
+                          cell.tone === 'emerald' ? 'border-emerald-200 dark:border-emerald-900/50' : cell.tone === 'rose' ? 'border-rose-200 dark:border-rose-900/50' : 'border-slate-200 dark:border-slate-800',
+                          ctaSelectedFamily === row.family && ctaSelectedRegime === cell.regime ? 'ring-2 ring-sky-400 ring-offset-1 dark:ring-sky-500' : ''
+                        ]"
+                        :style="cell.tone === 'emerald'
+                          ? { backgroundColor: `rgba(16,185,129,${0.10 + cell.intensity * 0.38})` }
+                          : cell.tone === 'rose'
+                            ? { backgroundColor: `rgba(244,63,94,${0.10 + cell.intensity * 0.38})` }
+                            : { backgroundColor: `rgba(148,163,184,${0.08 + cell.intensity * 0.18})` }">
+                        <div class="flex items-start justify-between gap-2">
+                          <div>
+                            <div class="text-[11px] text-slate-500 dark:text-slate-300">总 {{ cell.totalTrades }} 笔</div>
+                            <div class="mt-1 text-[13px] font-semibold" :class="pnlClass(cell.value)">{{ signedNumber(cell.value, 4) }}</div>
+                          </div>
+                          <div class="rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-950/40 dark:text-slate-200">{{ percentText(cell.netWinRate) }}</div>
+                        </div>
+                        <div class="mt-2 grid grid-cols-2 gap-2 text-[10px] text-slate-600 dark:text-slate-200">
+                          <div>Long {{ signedNumber(cell.longPnl, 3) }} / {{ cell.longTrades }}</div>
+                          <div>Short {{ signedNumber(cell.shortPnl, 3) }} / {{ cell.shortTrades }}</div>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr v-if="!ctaRegimeHeatMatrix.rows.length">
+                      <td colspan="99" class="py-6 text-center text-[13px] text-slate-500 dark:text-slate-400">暂无热力矩阵数据</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="px-3 pb-3 text-[11px] text-slate-500 dark:text-slate-400">
+                bias = long pnl - short pnl；正值代表更偏多头有效，负值代表更偏空头有效。默认模式就是拿它来找“多空偏移最大”。
+              </div>
+            </div>
+
+            <div class="space-y-3">
+              <div class="elevated-panel overflow-hidden">
+                <div class="toolbar-strip"><div><h4 class="subpanel-title">Family × Regime 动作标签</h4><p class="subpanel-desc">把热力矩阵结果直接翻译成提升 / 压制 / 偏多 / 偏空 / 观察标签，方便直接做决策。</p></div></div>
+                <div class="space-y-2 p-3">
+                  <div v-for="item in ctaFamilyRegimeActions.slice(0, 10)" :key="`family-action-${item.trigger_family}-${item.market_regime}`" class="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/40">
+                    <div class="flex items-center justify-between gap-3">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <span class="text-[13px] font-semibold">{{ item.trigger_family }}</span>
+                        <span class="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-200">{{ item.market_regime }}</span>
+                        <span :class="[
+                          'rounded-full px-2 py-0.5 text-[10px] font-medium',
+                          item.action === 'promote' ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300' :
+                          item.action === 'suppress' ? 'bg-rose-500/15 text-rose-600 dark:text-rose-300' :
+                          item.action === 'favor_long' ? 'bg-sky-500/15 text-sky-600 dark:text-sky-300' :
+                          item.action === 'favor_short' ? 'bg-orange-500/15 text-orange-600 dark:text-orange-300' :
+                          'bg-slate-500/15 text-slate-600 dark:text-slate-300'
+                        ]">{{ item.label }}</span>
+                      </div>
+                      <button class="filter-pill filter-pill-muted" @click="ctaSelectedFamily = item.trigger_family; ctaSelectedRegime = item.market_regime">查看</button>
+                    </div>
+                    <div class="mt-2 text-[12px] text-slate-600 dark:text-slate-300">{{ item.detail }}</div>
+                    <div class="mt-2 grid grid-cols-2 gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                      <div>net {{ signedNumber(item.net_pnl, 4) }}</div>
+                      <div>bias {{ signedNumber(item.bias_pnl, 4) }}</div>
+                      <div>long {{ signedNumber(item.long_pnl, 4) }}</div>
+                      <div>short {{ signedNumber(item.short_pnl, 4) }}</div>
+                    </div>
+                    <div v-if="item.preset_patch && Object.keys(item.preset_patch).length" class="mt-3 rounded-lg border border-dashed border-slate-300 p-2.5 dark:border-slate-700">
+                      <div class="text-[11px] font-medium text-slate-500 dark:text-slate-400">Preset 候选：{{ item.preset_label }}</div>
+                      <div class="mt-1 text-[11px] break-all text-slate-500 dark:text-slate-400">{{ JSON.stringify(item.preset_patch) }}</div>
+                      <div class="mt-2 flex flex-wrap gap-2">
+                        <button class="rounded-md bg-sky-600 px-3 py-1.5 text-[12px] font-medium text-white transition hover:bg-sky-700" @click="applyCtaPreset(item.preset_patch, `已应用建议 preset：${item.trigger_family} / ${item.market_regime} / ${item.preset_label || item.label}`, { trigger_family: item.trigger_family, market_regime: item.market_regime, action: item.action, preset_label: item.preset_label })">应用候选</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div v-if="!ctaFamilyRegimeActions.length" class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-[12px] text-slate-500 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400">当前暂无 family × regime 动作标签。</div>
+                </div>
+              </div>
+              <div class="elevated-panel overflow-hidden">
+                <div class="toolbar-strip"><div><h4 class="subpanel-title">Preset 应用记录 / 效果回看</h4><p class="subpanel-desc">记录最近应用过的 CTA preset，并给出 24h / 72h 回看时间点。</p></div></div>
+                <div class="space-y-2 p-3">
+                  <div v-for="(item, idx) in ctaPresetAudit.slice(0, 6)" :key="`preset-audit-${idx}`" class="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/40">
+                    <div class="flex items-center justify-between gap-3">
+                      <div class="text-[13px] font-semibold">{{ item.meta?.trigger_family || 'CTA preset' }}</div>
+                      <div class="text-[11px] text-slate-400">{{ formatDateTime(item.time) }}</div>
+                    </div>
+                    <div class="mt-1 text-[12px] text-slate-600 dark:text-slate-300">{{ item.successMessage }}</div>
+                    <div class="mt-2 grid grid-cols-1 gap-1 text-[11px] text-slate-500 dark:text-slate-400">
+                      <div v-for="row in item.diffRows" :key="row.path">{{ row.path }}: {{ JSON.stringify(row.before) }} → {{ JSON.stringify(row.after) }}</div>
+                    </div>
+                    <div class="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                      <span class="rounded-full bg-slate-200 px-2 py-0.5 dark:bg-slate-800">24h 回看：{{ formatDateTime(item.review24hAt) }}</span>
+                      <span v-if="item.review_24h" :class="['rounded-full px-2 py-0.5', item.review_24h.verdict === '变好' ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300' : item.review_24h.verdict === '变差' ? 'bg-rose-500/15 text-rose-600 dark:text-rose-300' : 'bg-slate-200 dark:bg-slate-800']">24h {{ item.review_24h.verdict }} / pnl {{ signedNumber(item.review_24h.pnl, 4) }} / {{ item.review_24h.trade_count }} 笔</span>
+                    </div>
+                    <div class="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                      <span class="rounded-full bg-slate-200 px-2 py-0.5 dark:bg-slate-800">72h 回看：{{ formatDateTime(item.review72hAt) }}</span>
+                      <span v-if="item.review_72h" :class="['rounded-full px-2 py-0.5', item.review_72h.verdict === '变好' ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300' : item.review_72h.verdict === '变差' ? 'bg-rose-500/15 text-rose-600 dark:text-rose-300' : 'bg-slate-200 dark:bg-slate-800']">72h {{ item.review_72h.verdict }} / pnl {{ signedNumber(item.review_72h.pnl, 4) }} / {{ item.review_72h.trade_count }} 笔</span>
+                    </div>
+                    <div class="mt-2 flex flex-wrap gap-2">
+                      <button class="filter-pill filter-pill-muted" @click="ctaWindowHours = 24; refreshAll()">看 24h</button>
+                      <button class="filter-pill filter-pill-muted" @click="ctaWindowHours = 72; refreshAll()">看 72h</button>
+                    </div>
+                  </div>
+                  <div v-if="!ctaPresetAudit.length" class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-[12px] text-slate-500 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400">还没有应用过 CTA preset。</div>
+                </div>
+              </div>
+              <div class="elevated-panel overflow-hidden">
+                <div class="toolbar-strip"><div><h4 class="subpanel-title">自动调参建议</h4><p class="subpanel-desc">基于当前 family 排名、错杀和放错结果给出建议。</p></div></div>
+                <div class="space-y-2 p-3">
+                  <div v-for="item in ctaSuggestions" :key="item.title" class="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/40">
+                    <div class="text-[13px] font-semibold">{{ item.title }}</div>
+                    <div class="mt-1 text-[12px] text-slate-600 dark:text-slate-300">{{ item.detail }}</div>
+                    <div class="mt-2 flex flex-wrap gap-2">
+                      <button v-if="item.action === 'loosen_confidence'" class="rounded-md bg-emerald-600 px-3 py-1.5 text-[12px] font-medium text-white transition hover:bg-emerald-700" @click="applyCtaPreset({ 'cta.long_standard_min_confidence': 0.55, 'cta.short_standard_min_confidence': 0.53 }, '已按建议放宽 confidence floor')">按建议执行</button>
+                      <button v-else-if="item.action === 'tighten' || item.action === 'tighten_release'" class="rounded-md bg-rose-600 px-3 py-1.5 text-[12px] font-medium text-white transition hover:bg-rose-700" @click="applyCtaPreset({ 'cta.long_standard_min_confidence': 0.62, 'cta.short_standard_min_confidence': 0.60, 'cta.family_adaptation_boost_cap': 0.14 }, '已按建议收紧 CTA 放行')">按建议执行</button>
+                    </div>
+                  </div>
+                  <div v-if="!ctaSuggestions.length" class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-[12px] text-slate-500 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400">当前暂无自动调参建议。</div>
+                </div>
+              </div>
+              <div class="elevated-panel overflow-hidden">
+                <div class="toolbar-strip"><div><h4 class="subpanel-title">最近错杀</h4><p class="subpanel-desc">值得复盘的 watch / probe / block 候选。</p></div></div>
+                <div class="table-wrap m-3 overflow-auto max-h-[200px]">
+                  <table class="data-table min-w-full divide-y divide-slate-200 text-sm dark:divide-slate-800">
+                    <thead class="sticky top-0 bg-slate-50 dark:bg-slate-950/95"><tr><th class="text-left font-medium text-slate-500">Family</th><th class="text-left font-medium text-slate-500">方向</th><th class="text-left font-medium text-slate-500">Decider</th><th class="text-right font-medium text-slate-500">Conf</th></tr></thead>
+                    <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+                      <tr v-for="row in ctaMissedRows.slice(0, 8)" :key="`${row.timestamp}-${row.trigger_family}`"><td class="font-medium">{{ row.trigger_family }}</td><td>{{ row.side }}</td><td>{{ row.decider }}</td><td class="text-right tabular-nums">{{ formatNumber(row.confidence, 4) }}</td></tr>
+                      <tr v-if="!ctaMissedRows.length"><td colspan="4" class="py-6 text-center text-[13px] text-slate-500 dark:text-slate-400">暂无错杀记录</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="elevated-panel overflow-hidden">
+                <div class="toolbar-strip"><div><h4 class="subpanel-title">最近放错</h4><p class="subpanel-desc">被系统放行但最终亏损的代表样本。</p></div></div>
+                <div class="table-wrap m-3 overflow-auto max-h-[200px]">
+                  <table class="data-table min-w-full divide-y divide-slate-200 text-sm dark:divide-slate-800">
+                    <thead class="sticky top-0 bg-slate-50 dark:bg-slate-950/95"><tr><th class="text-left font-medium text-slate-500">Family</th><th class="text-left font-medium text-slate-500">方向</th><th class="text-right font-medium text-slate-500">PnL</th><th class="text-right font-medium text-slate-500">Conf</th></tr></thead>
+                    <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+                      <tr v-for="row in ctaBadReleaseRows.slice(0, 8)" :key="`${row.timestamp}-${row.trigger_family}`"><td class="font-medium">{{ row.trigger_family }}</td><td>{{ row.side }}</td><td class="text-right tabular-nums">{{ signedNumber(row.pnl) }}</td><td class="text-right tabular-nums">{{ formatNumber(row.confidence, 4) }}</td></tr>
+                      <tr v-if="!ctaBadReleaseRows.length"><td colspan="4" class="py-6 text-center text-[13px] text-slate-500 dark:text-slate-400">暂无放错记录</td></tr>
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
