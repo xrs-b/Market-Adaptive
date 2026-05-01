@@ -1,5 +1,7 @@
 # Market-Adaptive
 
+[English](./README.md) | [简体中文](./README.zh-CN.md)
+
 Market-Adaptive is a modular trading system for **OKX-first crypto execution**, built around:
 
 - **CTA trend trading**
