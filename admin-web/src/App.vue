@@ -30,6 +30,8 @@ const lastSuccessfulRefreshAt = ref('')
 const refreshFailureCount = ref(0)
 const controlHistory = ref([])
 const configSections = ref([])
+const positionProfiles = ref({ active: 'original', profiles: {} })
+const positionProfileApplying = ref(false)
 const configSaving = ref(false)
 const currentView = ref('overview')
 const activeConfigSection = ref('')
@@ -48,6 +50,7 @@ const ctaHeatmapMode = ref('bias')
 const ctaHeatmapSortMode = ref('bias_abs')
 const ctaFamilyTrendMode = ref('cum_pnl')
 const ctaPresetAudit = ref([])
+const positionProfileCards = computed(() => Object.entries(positionProfiles.value?.profiles || {}).map(([key, profile]) => ({ key, ...(profile || {}) })))
 const ctaDashboard = ref({ overview: {}, leaderboards: { all: [], long: [], short: [] }, family_catalog: [], regime_matrix: [], regime_transitions: [], family_score_timeseries: [], decision_audit: { missed_opportunities: [], bad_releases: [] }, suggestions: [], tuningSnapshot: {} })
 
 const viewTabs = [
@@ -1118,6 +1121,7 @@ async function login() {
     localStorage.setItem('admin-user', result.username)
     await refreshAll()
     await loadConfigSections()
+    await loadPositionProfiles()
     startAutoRefresh()
   } catch (error) {
     loginError.value = '登录失败，请检查账号密码'
@@ -1257,6 +1261,48 @@ async function sendSystemAction(path, confirmText, successText) {
   } catch (error) {
     actionMessage.value = '系统控制操作失败。'
     recordControlAction(path.replace('/api/system/', '').toUpperCase(), '失败', error?.message || '系统控制操作失败')
+  }
+}
+
+
+async function loadPositionProfiles() {
+  if (!token.value) return
+  try {
+    const result = await api('/api/position-profiles', { headers: authHeaders.value })
+    positionProfiles.value = { active: result.active || 'original', profiles: result.profiles || {} }
+  } catch (error) {
+    if (error?.status === 401) logout({ expired: true })
+  }
+}
+
+async function applyPositionProfile(profileKey) {
+  if (!token.value || positionProfileApplying.value) return
+  const profile = positionProfiles.value?.profiles?.[profileKey] || {}
+  const confirmed = confirm(`确认切换仓位方案到 ${profileKey} ${profile.label || ''}？\n\nCTA margin=${profile.cta?.margin_fraction_per_trade}, leverage=${profile.cta?.nominal_leverage}\nGrid allocation=${profile.grid?.equity_allocation_ratio}, leverage=${profile.grid?.leverage}\n\n保存后需要重启主控生效。`)
+  if (!confirmed) return
+  positionProfileApplying.value = true
+  try {
+    const result = await api('/api/position-profiles/apply', {
+      method: 'POST',
+      headers: authHeaders.value,
+      body: JSON.stringify({ profile: profileKey }),
+    })
+    positionProfiles.value = { active: result.active || profileKey, profiles: result.profiles || positionProfiles.value.profiles }
+    configSections.value = result.sections || configSections.value
+    rebuildConfigBaseline()
+    ensureConfigSelection()
+    actionMessage.value = result.message || `已切换仓位方案到 ${profileKey}`
+    recordControlAction('仓位方案切换', '成功', actionMessage.value)
+    await refreshAll({ silent: true })
+  } catch (error) {
+    if (error?.status === 401) {
+      logout({ expired: true })
+      return
+    }
+    actionMessage.value = '仓位方案切换失败。'
+    recordControlAction('仓位方案切换', '失败', error?.message || '接口调用失败')
+  } finally {
+    positionProfileApplying.value = false
   }
 }
 
@@ -2845,6 +2891,37 @@ onBeforeUnmount(() => {
               <div class="flex flex-wrap items-center gap-2">
                 <button class="rounded-md border border-slate-300 px-3.5 py-2 text-[13px] font-medium transition hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800" @click="loadConfigSections">重新加载</button>
                 <button class="rounded-md bg-slate-900 px-3.5 py-2 text-[13px] font-medium text-white transition hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300" :disabled="configSaving" @click="saveConfigSections">{{ configSaving ? '保存中...' : '保存配置' }}</button>
+              </div>
+            </div>
+
+            <div class="px-4 pb-4">
+              <div class="rounded-2xl border border-rose-200 bg-rose-50/70 p-4 dark:border-rose-900/50 dark:bg-rose-950/20">
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div class="text-[11px] font-semibold uppercase tracking-[0.2em] text-rose-500">Position Profile</div>
+                    <div class="mt-1 text-[15px] font-semibold text-slate-900 dark:text-slate-100">仓位方案：{{ positionProfiles.active }}</div>
+                    <div class="mt-1 text-[12px] text-slate-500 dark:text-slate-400">original / A / B / C 可随时切换；保存后重启主控生效。</div>
+                  </div>
+                  <button class="rounded-md border border-rose-300 px-3 py-2 text-[12.5px] font-medium text-rose-700 transition hover:bg-rose-100 disabled:opacity-60 dark:border-rose-800 dark:text-rose-200 dark:hover:bg-rose-900/40" :disabled="positionProfileApplying" @click="loadPositionProfiles">刷新方案</button>
+                </div>
+                <div class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                  <button
+                    v-for="profile in positionProfileCards"
+                    :key="profile.key"
+                    :class="['rounded-xl border p-3 text-left transition', positionProfiles.active === profile.key ? 'border-rose-500 bg-white shadow-sm dark:bg-slate-900' : 'border-rose-200 bg-white/60 hover:bg-white dark:border-rose-900/50 dark:bg-slate-900/40']"
+                    :disabled="positionProfileApplying"
+                    @click="applyPositionProfile(profile.key)"
+                  >
+                    <div class="flex items-center justify-between gap-2">
+                      <div class="text-[13px] font-semibold text-slate-900 dark:text-slate-100">{{ profile.key }} · {{ profile.label }}</div>
+                      <span v-if="positionProfiles.active === profile.key" class="rounded-full bg-rose-500 px-2 py-0.5 text-[10px] font-medium text-white">当前</span>
+                    </div>
+                    <div class="mt-2 text-[11px] leading-5 text-slate-500 dark:text-slate-400">
+                      <div>CTA：margin {{ profile.cta?.margin_fraction_per_trade }} × {{ profile.cta?.nominal_leverage }}x</div>
+                      <div>Grid：allocation {{ profile.grid?.equity_allocation_ratio }} × {{ profile.grid?.leverage }}x</div>
+                    </div>
+                  </button>
+                </div>
               </div>
             </div>
 

@@ -85,6 +85,10 @@ class ConfigRollbackPayload(BaseModel):
     snapshotKey: str
 
 
+class PositionProfilePayload(BaseModel):
+    profile: str
+
+
 class InitialEquityPayload(BaseModel):
     initialEquity: float
 
@@ -108,6 +112,14 @@ WORKER_NAME_MAP = {
 }
 
 CONFIG_SCHEMA: list[dict[str, Any]] = [
+    {
+        "section": "position_profile",
+        "label": "仓位方案",
+        "description": "一键切换 CTA 与网格仓位火力；保存后需重启主控生效。",
+        "fields": [
+            {"path": "position_profile.active", "label": "当前仓位方案", "group": "方案切换", "highImpact": True, "type": "select", "options": ["original", "A", "B", "C"], "description": "original=原始；A=温和激进；B=明显激进；C=高进攻。切换会同步 CTA margin/leverage 与 Grid allocation/leverage。", "mutable": True, "restartRequired": True},
+        ],
+    },
     {
         "section": "runtime",
         "label": "运行参数",
@@ -137,6 +149,8 @@ CONFIG_SCHEMA: list[dict[str, Any]] = [
             {"path": "cta.relaxed_entry_minimum_expected_rr", "label": "relaxed 入口最小 RR", "group": "RR / 入口过滤", "type": "number", "description": "宽松入口额外 RR 门槛。", "mutable": True, "restartRequired": True, "step": 0.01},
             {"path": "cta.starter_entry_minimum_expected_rr", "label": "starter 入口最小 RR", "group": "RR / 入口过滤", "type": "number", "description": "starter / early 类入口 RR 门槛。", "mutable": True, "restartRequired": True, "step": 0.01},
             {"path": "cta.breakout_rr_target_atr_multiplier", "label": "突破 RR ATR 倍数", "group": "RR / 入口过滤", "type": "number", "description": "突破形态目标价的 ATR 扩展倍数。", "mutable": True, "restartRequired": True, "step": 0.1},
+            {"path": "cta.fast_track_min_entry_decider_score", "label": "FAST_TRACK 最小决策分", "group": "RR / 入口过滤", "type": "number", "description": "FAST_TRACK 额外 entry_decider 分数门槛；0 表示关闭额外硬门槛。", "mutable": True, "restartRequired": True, "step": 0.01},
+            {"path": "cta.fast_track_minimum_expected_rr", "label": "FAST_TRACK 最小 RR", "group": "RR / 入口过滤", "type": "number", "description": "FAST_TRACK 额外 RR 门槛；0 表示关闭额外硬门槛。", "mutable": True, "restartRequired": True, "step": 0.01},
             {"path": "cta.risk_percent_per_trade", "label": "单笔风险比例", "group": "风险仓位", "highImpact": True, "type": "number", "description": "普通信号每笔风险占比。", "mutable": True, "restartRequired": True, "step": 0.001},
             {"path": "cta.boosted_risk_percent_per_trade", "label": "高质量单笔风险比例", "group": "风险仓位", "highImpact": True, "type": "number", "description": "高质量信号的提升风险占比。", "mutable": True, "restartRequired": True, "step": 0.001},
             {"path": "cta.first_take_profit_pct", "label": "第一止盈比例", "group": "止盈设置", "type": "number", "description": "第一档止盈百分比。", "mutable": True, "restartRequired": True, "step": 0.001},
@@ -156,6 +170,16 @@ CONFIG_SCHEMA: list[dict[str, Any]] = [
             {"path": "cta.disable_bullish_memory_breakout_long", "label": "禁用 bullish memory breakout long", "group": "自适应 / Family 开关", "type": "boolean", "description": "直接关闭 bullish_memory_breakout 多头 family。", "mutable": True, "restartRequired": True},
             {"path": "cta.family_adaptation_boost_cap", "label": "family 自适应加成上限", "group": "自适应 / 学习速度", "type": "number", "description": "family 级别表现对 entry_decider 的最大加减分。", "mutable": True, "restartRequired": True, "step": 0.01},
             {"path": "cta.family_adaptation_fast_start_multiplier", "label": "小样本加速倍数", "group": "自适应 / 学习速度", "type": "number", "description": "少量样本时放大家族学习速度。", "mutable": True, "restartRequired": True, "step": 0.05},
+            {"path": "cta.loss_acceleration_decay_enabled", "label": "启用连亏衰减", "group": "自适应 / 连亏保护", "type": "boolean", "description": "连续亏损后临时降低对应 family 的 entry_decider 分数。", "mutable": True, "restartRequired": True},
+            {"path": "cta.loss_acceleration_consecutive_losses", "label": "连亏触发笔数", "group": "自适应 / 连亏保护", "type": "number", "description": "达到该连续亏损次数后触发 family 衰减。", "mutable": True, "restartRequired": True, "step": 1},
+            {"path": "cta.loss_acceleration_decay_score", "label": "连亏衰减分", "group": "自适应 / 连亏保护", "type": "number", "description": "触发连亏保护时扣减的 entry_decider 分数。", "mutable": True, "restartRequired": True, "step": 0.01},
+            {"path": "cta.loss_acceleration_decay_ttl_seconds", "label": "连亏衰减有效期(秒)", "group": "自适应 / 连亏保护", "type": "number", "description": "连亏衰减缓存有效时间。", "mutable": True, "restartRequired": True, "step": 60},
+            {"path": "cta.pre_signal_observation_log_enabled", "label": "记录预信号观察", "group": "诊断 / 报告", "type": "boolean", "description": "记录未完全成型但值得观察的 CTA 信号。", "mutable": True, "restartRequired": True},
+            {"path": "cta.market_regime_adaptation_enabled", "label": "启用市场状态系数", "group": "自适应 / 市场状态", "type": "boolean", "description": "按趋势/震荡与顺逆势调整 entry_decider 分数。", "mutable": True, "restartRequired": True},
+            {"path": "cta.entry_decider_trend_follow_regime_coefficient", "label": "顺趋势系数", "group": "自适应 / 市场状态", "type": "number", "description": "趋势同向信号的 entry_decider 乘数。", "mutable": True, "restartRequired": True, "step": 0.01},
+            {"path": "cta.entry_decider_countertrend_regime_coefficient", "label": "逆趋势系数", "group": "自适应 / 市场状态", "type": "number", "description": "趋势逆向信号的 entry_decider 乘数。", "mutable": True, "restartRequired": True, "step": 0.01},
+            {"path": "cta.entry_decider_sideways_reversal_regime_coefficient", "label": "震荡反转系数", "group": "自适应 / 市场状态", "type": "number", "description": "震荡反转类 family 的 entry_decider 乘数。", "mutable": True, "restartRequired": True, "step": 0.01},
+            {"path": "cta.entry_decider_sideways_breakout_regime_coefficient", "label": "震荡突破系数", "group": "自适应 / 市场状态", "type": "number", "description": "震荡突破类 family 的 entry_decider 乘数。", "mutable": True, "restartRequired": True, "step": 0.01},
         ],
     },
     {
@@ -622,8 +646,20 @@ def build_cta_tuning_snapshot(values: dict[str, Any]) -> dict[str, Any]:
         "cta.disable_price_led_override_long",
         "cta.disable_trend_continuation_long",
         "cta.disable_bullish_memory_breakout_long",
+        "cta.fast_track_min_entry_decider_score",
+        "cta.fast_track_minimum_expected_rr",
         "cta.family_adaptation_boost_cap",
         "cta.family_adaptation_fast_start_multiplier",
+        "cta.loss_acceleration_decay_enabled",
+        "cta.loss_acceleration_consecutive_losses",
+        "cta.loss_acceleration_decay_score",
+        "cta.loss_acceleration_decay_ttl_seconds",
+        "cta.pre_signal_observation_log_enabled",
+        "cta.market_regime_adaptation_enabled",
+        "cta.entry_decider_trend_follow_regime_coefficient",
+        "cta.entry_decider_countertrend_regime_coefficient",
+        "cta.entry_decider_sideways_reversal_regime_coefficient",
+        "cta.entry_decider_sideways_breakout_regime_coefficient",
     ]
     return {key: get_by_path(values, key) for key in keys}
 
@@ -671,6 +707,23 @@ def set_by_path(payload: dict[str, Any], path: str, value: Any) -> None:
     current[parts[-1]] = value
 
 
+def apply_position_profile(payload: dict[str, Any], profile_key: str) -> list[str]:
+    profiles = (payload.get("position_profile") or {}).get("profiles") or {}
+    profile = profiles.get(str(profile_key))
+    if not isinstance(profile, dict):
+        raise HTTPException(status_code=400, detail=f"未知仓位方案: {profile_key}")
+    changed_paths: list[str] = []
+    desired = {"position_profile.active": str(profile_key)}
+    for section in ("cta", "grid"):
+        for key, value in (profile.get(section) or {}).items():
+            desired[f"{section}.{key}"] = value
+    for path, value in desired.items():
+        if get_by_path(payload, path) != value:
+            set_by_path(payload, path, value)
+            changed_paths.append(path)
+    return changed_paths
+
+
 def apply_config_values(payload: dict[str, Any], values: dict[str, Any], allowed: dict[str, dict[str, Any]]) -> list[str]:
     changed_paths: list[str] = []
     for path, raw_value in values.items():
@@ -683,6 +736,11 @@ def apply_config_values(payload: dict[str, Any], values: dict[str, Any], allowed
             # 避免保存整页配置时把缺省字段错误写成 null 或触发数字转换报错。
             continue
         value = cast_config_value(raw_value, meta.get("type", "text"))
+        if path == "position_profile.active":
+            for changed in apply_position_profile(payload, str(value)):
+                if changed not in changed_paths:
+                    changed_paths.append(changed)
+            continue
         set_by_path(payload, path, value)
         changed_paths.append(path)
     return changed_paths
@@ -1046,6 +1104,44 @@ def config_schema(
     del session
     payload = read_config_payload(settings)
     return {"sections": build_config_sections(payload, settings), "刷新时间": now_text()}
+
+
+@app.get("/api/position-profiles")
+def position_profiles(
+    session: dict[str, Any] = Depends(require_auth),
+    settings: AppSettings = Depends(get_settings),
+) -> dict[str, Any]:
+    del session
+    payload = read_config_payload(settings)
+    profile_payload = payload.get("position_profile") or {}
+    return {
+        "active": profile_payload.get("active", "original"),
+        "profiles": profile_payload.get("profiles", {}),
+        "刷新时间": now_text(),
+    }
+
+
+@app.post("/api/position-profiles/apply")
+def position_profile_apply(
+    payload: PositionProfilePayload,
+    session: dict[str, Any] = Depends(require_auth),
+    settings: AppSettings = Depends(get_settings),
+) -> dict[str, Any]:
+    del session
+    config_payload = read_config_payload(settings)
+    changed_paths = apply_position_profile(config_payload, payload.profile)
+    if changed_paths:
+        with settings.config_path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(config_payload, handle, allow_unicode=True, sort_keys=False)
+    return {
+        "ok": True,
+        "message": f"已切换仓位方案到 {payload.profile}，变更 {len(changed_paths)} 项",
+        "changedPaths": changed_paths,
+        "active": get_by_path(config_payload, "position_profile.active"),
+        "profiles": get_by_path(config_payload, "position_profile.profiles") or {},
+        "sections": build_config_sections(config_payload, settings),
+        "刷新时间": now_text(),
+    }
 
 
 @app.post("/api/config/save")
