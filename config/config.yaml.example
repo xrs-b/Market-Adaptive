@@ -165,6 +165,18 @@ cta:
   starter_frontrun_impulse_bars: 3
   starter_frontrun_volume_window: 12
   starter_frontrun_volume_multiplier: 1.15
+  loss_acceleration_decay_enabled: true
+  loss_acceleration_consecutive_losses: 3
+  loss_acceleration_decay_score: 0.12
+  loss_acceleration_decay_ttl_seconds: 3600.0
+  pre_signal_observation_log_enabled: true
+  market_regime_adaptation_enabled: true
+  entry_decider_trend_follow_regime_coefficient: 1.06
+  entry_decider_countertrend_regime_coefficient: 0.92
+  entry_decider_sideways_reversal_regime_coefficient: 1.05
+  entry_decider_sideways_breakout_regime_coefficient: 0.94
+  fast_track_min_entry_decider_score: 0.0
+  fast_track_minimum_expected_rr: 0.0
   polling_interval_seconds: 60
   cta_assist_trim_ratio: 0.25
   # 兼容旧配置，留空即可

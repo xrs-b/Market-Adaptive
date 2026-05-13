@@ -23,8 +23,6 @@ from market_adaptive.oracles.market_oracle import indicator_confirms_trend, snap
 from market_adaptive.strategies.mtf_engine import classify_waiting_execution_trigger, resolve_execution_trigger_proximity_budget_ratio
 from scripts.cta_backtest_sandbox import BacktestDatabaseStub, MockExchangeClient, load_csv
 
-if not hasattr(BacktestDatabaseStub, 'insert_trade_journal'):
-    BacktestDatabaseStub.insert_trade_journal = lambda *a, **k: None
 
 CSV = ROOT / 'data/okx/BTC-USDT-SWAP/1m.csv'
 OUT = ROOT / 'data/ml_replay_compare_latest.json'

@@ -99,6 +99,18 @@ class BacktestDatabaseStub:
         del record
         return None
 
+    def fetch_trigger_family_performance(self, *args, **kwargs):
+        del args, kwargs
+        return []
+
+    def fetch_consecutive_trigger_family_losses(self, *args, **kwargs):
+        del args, kwargs
+        return 0
+
+    def fetch_trade_journal_rows(self, *args, **kwargs):
+        del args, kwargs
+        return []
+
 
 class MockExchangeClient:
     def __init__(
