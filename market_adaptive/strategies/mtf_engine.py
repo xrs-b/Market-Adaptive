@@ -51,14 +51,20 @@ def classify_trigger_group(family: str) -> str:
         return "confirmed"
     if family_value in {"bearish_retest", "major_bull_retest"}:
         return "retest"
-    if family_value in {"trend_continuation_near_breakout", "major_bull_impulse_reclaim"}:
-        return "continuation"
-    if family_value in {"price_led_override", "soft_latch_breakout"}:
-        return "override"
+    if family_value in {
+        "near_breakout_release",
+        "trend_continuation_near_breakout",
+        "major_bull_impulse_reclaim",
+        "price_led_override",
+        "soft_latch_breakout",
+        "starter_frontrun",
+        "starter_short_frontrun",
+        "rail_momentum",
+        "magnetism",
+    }:
+        return "breakout_momentum"
     if family_value in {"weak_bull_scale_in", "weak_bear_scale_in"}:
         return "scale_in"
-    if family_value in {"starter_frontrun", "starter_short_frontrun", "rail_momentum", "magnetism"}:
-        return "momentum"
     return "other"
 
 
@@ -725,6 +731,23 @@ class MultiTimeframeSignalEngine:
         supported_volume = bool((recent["volume"] >= volume_mean * volume_multiplier).all())
         return bearish_bars and supported_volume
 
+    def _has_near_breakout_release_confirmation(self, execution_frame: pd.DataFrame, prior_high: float | None) -> bool:
+        if prior_high is None or prior_high <= 0.0 or len(execution_frame) < 2:
+            return False
+        impulse_bars = max(1, int(getattr(self.config, "near_breakout_release_confirmation_bars", 1)))
+        volume_window = max(impulse_bars + 1, int(getattr(self.config, "starter_frontrun_volume_window", 12)))
+        if len(execution_frame) < volume_window:
+            return False
+        recent = execution_frame.tail(impulse_bars)
+        baseline = execution_frame.iloc[:-impulse_bars].tail(volume_window)
+        volume_mean = float(baseline["volume"].mean()) if not baseline.empty else 0.0
+        if volume_mean <= 0.0:
+            return False
+        volume_multiplier = float(getattr(self.config, "near_breakout_release_volume_multiplier", getattr(self.config, "starter_frontrun_volume_multiplier", 1.15)))
+        supported_volume = bool((recent["volume"] >= volume_mean * volume_multiplier).all())
+        prior_high_reclaimed = bool((recent["high"] > float(prior_high)).any() and float(recent["close"].iloc[-1]) > float(prior_high))
+        return supported_volume and prior_high_reclaimed
+
     def _resolve_early_bullish(self, major_frame: pd.DataFrame, swing_frame: pd.DataFrame, major_supertrend: pd.DataFrame) -> bool:
         if len(major_frame) < 2 or len(swing_frame) < 1 or len(major_supertrend) < 2:
             return False
@@ -1282,20 +1305,22 @@ class MultiTimeframeSignalEngine:
             and self._has_direction_confirmation(swing_supertrend["direction"], -1)
             and (bearish_memory_active or kdj_dead_cross)
         )
+        near_breakout_release_confirmed = self._has_near_breakout_release_confirmation(execution_frame, prior_high)
         near_breakout_release_ready = bool(
             getattr(self.config, "near_breakout_release_enabled", True)
             and bullish_ready
             and not stretch_blocked_bullish
             and bullish_score >= float(getattr(self.config, "near_breakout_release_minimum_score", 70.0))
-            and frontrun_near_breakout
-            and not prior_high_break
+            and (frontrun_near_breakout or prior_high_break)
+            and near_breakout_release_confirmed
             and not kdj_dead_cross
             and self._has_direction_confirmation(swing_supertrend["direction"], 1)
             and (bullish_memory_active or bullish_latch_active)
         )
-        high_confidence_price_override = bool(bullish_score >= 75.0 and frontrun_near_breakout and not kdj_dead_cross and not stretch_blocked_bullish)
+        high_confidence_price_override = bool(bullish_score >= 75.0 and frontrun_near_breakout and not bullish_memory_active and not kdj_dead_cross and not stretch_blocked_bullish)
         trend_continuation_near_breakout_ready = (
             not stretch_blocked_bullish
+            and not bullish_memory_active
             and self._trend_continuation_near_breakout_ready(
                 major_direction=major_direction,
                 bullish_score=bullish_score,
@@ -1445,7 +1470,7 @@ class MultiTimeframeSignalEngine:
             reason = f"pullback_support_entry: depth={pullback_depth_ratio*100:.2f}% near VAL support"
         elif near_breakout_release_ready:
             trigger_family = "near_breakout_release"
-            reason = f"near_breakout_release: bullish_score={bullish_score:.0f} + gap={frontrun_gap_ratio * 100:.3f}% + latch_or_memory_active"
+            reason = f"near_breakout_release: bullish_score={bullish_score:.0f} + gap={frontrun_gap_ratio * 100:.3f}% + volume_confirmed + prior_high_reclaimed + latch_or_memory_active"
         elif trend_continuation_near_breakout_ready:
             trigger_family = "trend_continuation_near_breakout"
             reason = f"trend_continuation_near_breakout_ready: bullish_score={bullish_score:.0f} + gap={frontrun_gap_ratio * 100:.3f}% + obv_support={'confirmed' if execution_obv_ready else 'positive_zscore'}"

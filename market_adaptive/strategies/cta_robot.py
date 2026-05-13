@@ -3,6 +3,7 @@ import math
 
 import logging
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
@@ -345,6 +346,10 @@ class ManagedPosition:
     origin_trigger_family: str | None = None
     origin_trigger_reason: str | None = None
     origin_pathway: str | None = None
+    position_id: str = ""
+    entry_order_id: str | None = None
+    position_size_before: float | None = None
+    position_size_after: float | None = None
 
     @property
     def direction(self) -> int:
@@ -370,9 +375,25 @@ class ManagedPosition:
         self.atr_value = float(atr)
         self.stop_distance = current_stop_distance
 
+        fast_track_origin = str(self.origin_pathway or "").upper() == "FAST_TRACK"
+        breakout_origin = str(self.origin_trigger_family or "") in {
+            "near_breakout_release",
+            "trend_continuation_near_breakout",
+            "bullish_memory_breakout",
+            "bearish_memory_breakdown",
+            "price_led_override",
+        }
+        breakeven_profit_pct = 0.20 if fast_track_origin else 0.35
+        lock_profit_pct = 0.35 if fast_track_origin or breakout_origin else 0.55
+        locked_profit_pct = 0.10 if fast_track_origin or breakout_origin else 0.15
+
         if self.side == "long":
             self.best_price = max(self.best_price, price)
             candidate = self.best_price - current_stop_distance
+            if self.max_unrealized_profit_pct >= breakeven_profit_pct:
+                candidate = max(candidate, float(self.entry_price))
+            if self.max_unrealized_profit_pct >= lock_profit_pct:
+                candidate = max(candidate, float(self.entry_price) * (1.0 + locked_profit_pct / 100.0))
             if self.max_unrealized_profit_pct > 2.0:
                 candidate = max(candidate, float(self.entry_price))
             self.stop_price = max(self.stop_price, candidate)
@@ -380,6 +401,10 @@ class ManagedPosition:
 
         self.best_price = min(self.best_price, price)
         candidate = self.best_price + current_stop_distance
+        if self.max_unrealized_profit_pct >= breakeven_profit_pct:
+            candidate = min(candidate, float(self.entry_price))
+        if self.max_unrealized_profit_pct >= lock_profit_pct:
+            candidate = min(candidate, float(self.entry_price) * (1.0 - locked_profit_pct / 100.0))
         if self.max_unrealized_profit_pct > 2.0:
             candidate = min(candidate, float(self.entry_price))
         self.stop_price = min(self.stop_price, candidate)
@@ -444,7 +469,13 @@ class CTARobot(BaseStrategyRobot):
         self._family_adaptation_meta: dict[str, dict[str, float | str | int]] = {}
         self._family_adaptation_cache_at: float = 0.0
         self._family_adaptation_ttl: float = float(getattr(config, "family_adaptation_ttl_seconds", 600.0))
+        if bool(getattr(config, "loss_acceleration_decay_enabled", True)):
+            self._family_adaptation_ttl = min(
+                self._family_adaptation_ttl,
+                float(getattr(config, "loss_acceleration_decay_ttl_seconds", self._family_adaptation_ttl)),
+            )
         self._last_family_summary_log_at: float = 0.0
+        self._last_pre_signal_observation_key: tuple[object, ...] | None = None
 
     def _resolve_obv_gate(self, signal: MTFSignal):
         return resolve_dynamic_obv_gate_for_signal(
@@ -901,7 +932,15 @@ class CTARobot(BaseStrategyRobot):
             zscore_window=self.config.obv_zscore_window,
         )
         obv_bias = 1 if obv_confirmation.above_sma else -1 if obv_confirmation.below_sma else 0
-        bullish_raw_direction = 1 if (mtf_signal.fully_aligned and int(mtf_signal.major_direction) >= 0 and not bool(getattr(mtf_signal, "bearish_ready", False))) else 0
+        bullish_raw_direction = 1 if (
+            mtf_signal.fully_aligned
+            and bool(getattr(mtf_signal, "bullish_ready", False))
+            and (
+                int(mtf_signal.major_direction) > 0
+                or bool(getattr(mtf_signal, "weak_bull_bias", False))
+                or bool(getattr(mtf_signal, "early_bullish", False))
+            )
+        ) else 0
         bearish_raw_direction = -1 if (
             mtf_signal.fully_aligned
             and bool(getattr(mtf_signal, "bearish_ready", False))
@@ -911,7 +950,12 @@ class CTARobot(BaseStrategyRobot):
                 or bool(getattr(mtf_signal, "early_bearish", False))
             )
         ) else 0
-        raw_direction = bullish_raw_direction if bullish_raw_direction != 0 else bearish_raw_direction
+        if bullish_raw_direction and bearish_raw_direction:
+            bullish_edge = float(getattr(mtf_signal, "bullish_score", 0.0) or 0.0) - float(getattr(mtf_signal, "bullish_threshold", 0.0) or 0.0)
+            bearish_edge = float(getattr(mtf_signal, "bearish_score", 0.0) or 0.0) - float(getattr(mtf_signal, "bearish_threshold", 0.0) or 0.0)
+            raw_direction = bearish_raw_direction if bearish_edge > bullish_edge else bullish_raw_direction
+        else:
+            raw_direction = bullish_raw_direction if bullish_raw_direction != 0 else bearish_raw_direction
         entry_pathway = self._resolve_entry_pathway(mtf_signal)
         signal_quality_tier = str(getattr(getattr(mtf_signal, "signal_quality_tier", None), "name", "TIER_LOW"))
         signal_confidence = float(getattr(mtf_signal, "signal_confidence", 0.0) or 0.0)
@@ -1249,11 +1293,27 @@ class CTARobot(BaseStrategyRobot):
             execution_golden_cross=mtf_signal.execution_trigger.kdj_golden_cross,
             execution_breakout=mtf_signal.execution_trigger.prior_high_break,
             execution_breakdown=mtf_signal.execution_trigger.prior_low_break,
-            execution_memory_active=mtf_signal.execution_trigger.bullish_memory_active,
-            execution_latch_active=mtf_signal.execution_trigger.bullish_latch_active,
-            execution_latch_price=mtf_signal.execution_trigger.latch_low_price,
+            execution_memory_active=(
+                mtf_signal.execution_trigger.bullish_memory_active
+                if raw_direction >= 0
+                else bool(getattr(mtf_signal.execution_trigger, "bearish_memory_active", False))
+            ),
+            execution_latch_active=(
+                mtf_signal.execution_trigger.bullish_latch_active
+                if raw_direction >= 0
+                else bool(getattr(mtf_signal.execution_trigger, "bearish_latch_active", False))
+            ),
+            execution_latch_price=(
+                mtf_signal.execution_trigger.latch_low_price
+                if raw_direction >= 0
+                else getattr(mtf_signal.execution_trigger, "latch_high_price", None)
+            ),
             execution_frontrun_near_breakout=mtf_signal.execution_trigger.frontrun_near_breakout,
-            execution_memory_bars_ago=mtf_signal.execution_trigger.bullish_cross_bars_ago,
+            execution_memory_bars_ago=(
+                mtf_signal.execution_trigger.bullish_cross_bars_ago
+                if raw_direction >= 0
+                else getattr(mtf_signal.execution_trigger, "bearish_cross_bars_ago", None)
+            ),
             execution_trigger_family=("obv_scalp" if quick_trade_mode else str(getattr(mtf_signal.execution_trigger, "family", "waiting"))),
             execution_trigger_group=str(getattr(mtf_signal.execution_trigger, "group", "waiting")),
             execution_trigger_reason=(f"OBV_SCALP|{mtf_signal.execution_trigger.reason}" if quick_trade_mode else mtf_signal.execution_trigger.reason),
@@ -1316,6 +1376,7 @@ class CTARobot(BaseStrategyRobot):
         signal.entry_decider_decision = str(entry_decider_decision)
         signal.entry_decider_score = float(entry_decider_score)
         signal.entry_decider_reasons = tuple(entry_decider_reasons)
+        self._log_pre_signal_observation(signal)
         candidate_state, candidate_reason = self._derive_candidate_state(signal)
         signal.candidate_state = candidate_state
         signal.candidate_reason = candidate_reason
@@ -1860,7 +1921,11 @@ class CTARobot(BaseStrategyRobot):
             score -= 0.10
             reasons.append("relaxed_entry")
         if signal.entry_pathway is EntryPathway.FAST_TRACK:
-            score += 0.10
+            # 2026-05-11 replay: FAST_TRACK underperformed STANDARD over the last 7d.
+            # Keep it as a timing label, but do not let it inflate location quality.
+            fast_track_bonus = float(getattr(self.config, "fast_track_location_bonus", 0.0))
+            if fast_track_bonus != 0.0:
+                score += fast_track_bonus
             reasons.append("fast_track")
         elif signal.entry_pathway is EntryPathway.STANDARD:
             score += 0.05
@@ -1951,6 +2016,39 @@ class CTARobot(BaseStrategyRobot):
                 float(self._effective_signal_obv_threshold(signal)),
             )
             return "cta:fast_track_blocked"
+
+        # 2026-05-11 7d signal replay showed FAST_TRACK had weaker forward returns
+        # than STANDARD, so require genuinely high-conviction fast-track entries.
+        min_score = float(getattr(self.config, "fast_track_min_entry_decider_score", 0.0))
+        score = float(getattr(signal, "entry_decider_score", 0.0) or 0.0)
+        if min_score > 0.0 and score < min_score:
+            logger.info(
+                "CTA fast-track blocked | symbol=%s side=%s reason=fast_track_low_decider_score score=%.3f threshold=%.3f trigger_family=%s confidence=%.2f",
+                self.symbol,
+                "buy" if signal.direction > 0 else "sell",
+                score,
+                min_score,
+                str(getattr(signal, "execution_trigger_family", "") or ""),
+                float(getattr(signal, "signal_confidence", 0.0) or 0.0),
+            )
+            return "cta:fast_track_blocked"
+
+        min_rr = float(getattr(self.config, "fast_track_minimum_expected_rr", 0.0))
+        expected_rr = self._expected_reward_risk_ratio(
+            signal,
+            reference_price=float(signal.price),
+            stop_distance=max(1e-9, self._normalized_atr(signal.price, signal.atr) * self._resolve_dynamic_stop_loss_multiplier(signal)),
+        )
+        if min_rr > 0.0 and expected_rr is not None and expected_rr < min_rr:
+            logger.info(
+                "CTA fast-track blocked | symbol=%s side=%s reason=fast_track_low_rr expected_rr=%.2f threshold=%.2f trigger_family=%s",
+                self.symbol,
+                "buy" if signal.direction > 0 else "sell",
+                float(expected_rr),
+                min_rr,
+                str(getattr(signal, "execution_trigger_family", "") or ""),
+            )
+            return "cta:fast_track_blocked"
         return None
 
     def _resolve_trigger_family_gate_reason(self, signal: TrendSignal) -> str | None:
@@ -2035,6 +2133,71 @@ class CTARobot(BaseStrategyRobot):
             logger.exception("CTA market regime fetch failed")
         return "unknown"
 
+    def _log_pre_signal_observation(self, signal: TrendSignal) -> None:
+        if not bool(getattr(self.config, "pre_signal_observation_log_enabled", True)):
+            return
+        if self.position is not None:
+            return
+        candidate_state, candidate_reason = self._derive_candidate_state(signal)
+        if signal.direction == 0 and candidate_state in {"idle", "blocked"} and not (signal.bullish_ready or getattr(signal, "bearish_ready", False)):
+            return
+        key = (
+            int(getattr(signal, "raw_direction", 0)),
+            str(getattr(signal, "execution_trigger_family", "waiting") or "waiting"),
+            str(candidate_state),
+            str(getattr(signal, "entry_decider_decision", "")),
+            int(getattr(signal, "execution_timestamp_ms", 0) or 0),
+        )
+        if key == getattr(self, "_last_pre_signal_observation_key", None):
+            return
+        self._last_pre_signal_observation_key = key
+        side = "long" if int(getattr(signal, "raw_direction", 0)) > 0 else "short" if int(getattr(signal, "raw_direction", 0)) < 0 else None
+        self._journal_event(
+            event_type="pre_signal_observation",
+            side=side,
+            action=str(candidate_state),
+            trigger_family=str(getattr(signal, "execution_trigger_family", "waiting") or "waiting"),
+            trigger_reason=str(getattr(signal, "execution_trigger_reason", "") or ""),
+            pathway=getattr(getattr(signal, "entry_pathway", None), "name", str(getattr(signal, "entry_pathway", ""))),
+            price=float(signal.price),
+            metadata={
+                "candidate_state": str(candidate_state),
+                "candidate_reason": str(candidate_reason),
+                "raw_direction": int(signal.raw_direction),
+                "final_direction": int(signal.direction),
+                "signal_confidence": float(signal.signal_confidence),
+                "signal_quality_tier": str(signal.signal_quality_tier),
+                "bullish_score": float(signal.bullish_score),
+                "bearish_score": float(signal.bearish_score),
+                "entry_decider_decision": str(getattr(signal, "entry_decider_decision", "")),
+                "entry_decider_score": float(getattr(signal, "entry_decider_score", 0.0) or 0.0),
+                "entry_decider_reasons": list(getattr(signal, "entry_decider_reasons", ())),
+                "blocker_reason": str(signal.blocker_reason or ""),
+                "obv_zscore": float(getattr(signal, "execution_obv_zscore", 0.0) or 0.0),
+                "obv_threshold": float(getattr(signal, "execution_obv_threshold", 0.0) or 0.0),
+                "market_regime": self._current_market_regime(),
+            },
+        )
+
+    def _market_regime_entry_decider_coefficient(self, signal: TrendSignal, direction: int) -> float:
+        if not bool(getattr(self.config, "market_regime_adaptation_enabled", True)):
+            return 1.0
+        regime = self._current_market_regime()
+        family = str(getattr(signal, "execution_trigger_family", "") or "")
+        coef = 1.0
+        if regime in {"trend", "trend_impulse"}:
+            major_direction = int(getattr(signal, "major_direction", 0) or 0)
+            if major_direction != 0 and int(direction) == major_direction:
+                coef *= float(getattr(self.config, "entry_decider_trend_follow_regime_coefficient", 1.06))
+            elif major_direction != 0:
+                coef *= float(getattr(self.config, "entry_decider_countertrend_regime_coefficient", 0.92))
+        elif regime == "sideways":
+            if family in {"spring_reclaim", "upthrust_reclaim", "bullish_retest_entry", "bearish_retest_entry", "pullback_support_entry", "pullback_resistance_entry"}:
+                coef *= float(getattr(self.config, "entry_decider_sideways_reversal_regime_coefficient", 1.05))
+            elif family in {"bullish_memory_breakout", "bearish_memory_breakdown", "starter_frontrun", "starter_short_frontrun", "trend_continuation_near_breakout", "near_breakout_release", "price_led_override"}:
+                coef *= float(getattr(self.config, "entry_decider_sideways_breakout_regime_coefficient", 0.94))
+        return max(0.80, min(1.20, float(coef)))
+
     def _market_regime_family_bias(self, signal: TrendSignal, regime: str) -> float:
         if not bool(getattr(self.config, "market_regime_adaptation_enabled", True)):
             return 0.0
@@ -2073,7 +2236,7 @@ class CTARobot(BaseStrategyRobot):
                 strategy_name=self.strategy_name,
                 symbol=self.symbol,
                 limit=400,
-                event_types=("trade_close", "trade_open", "blocked_signal"),
+                event_types=("trade_close", "trade_open", "blocked_signal", "pre_signal_observation"),
             )
             return build_cta_dashboard_snapshot(family_records=family_records, journal_rows=journal_rows)
         except Exception:
@@ -2127,6 +2290,9 @@ class CTARobot(BaseStrategyRobot):
             boost_cap = float(getattr(self.config, "family_adaptation_boost_cap", 0.20))
             fast_start_trades = int(getattr(self.config, "family_adaptation_fast_start_trades", 3))
             fast_start_multiplier = float(getattr(self.config, "family_adaptation_fast_start_multiplier", 1.35))
+            loss_decay_enabled = bool(getattr(self.config, "loss_acceleration_decay_enabled", True))
+            loss_decay_threshold = int(getattr(self.config, "loss_acceleration_consecutive_losses", 3))
+            loss_decay_score = float(getattr(self.config, "loss_acceleration_decay_score", 0.12))
             records = self.database.fetch_trigger_family_performance(
                 strategy_name=self.strategy_name,
                 symbol=self.symbol,
@@ -2141,6 +2307,19 @@ class CTARobot(BaseStrategyRobot):
                 perf_score = base_edge + expectancy_term
                 if int(rec.close_count) <= fast_start_trades:
                     perf_score *= fast_start_multiplier
+                consecutive_losses = 0
+                loss_decay_applied = False
+                if loss_decay_enabled:
+                    consecutive_losses = int(self.database.fetch_consecutive_trigger_family_losses(
+                        strategy_name=self.strategy_name,
+                        symbol=self.symbol,
+                        trigger_family=rec.trigger_family,
+                        side=rec.side,
+                        limit=max(loss_decay_threshold, 1),
+                    ))
+                    if consecutive_losses >= loss_decay_threshold:
+                        perf_score -= loss_decay_score
+                        loss_decay_applied = True
                 perf_score = max(-boost_cap, min(boost_cap, perf_score))
                 self._family_adaptation_cache[key] = perf_score
                 self._family_adaptation_meta[key] = {
@@ -2149,6 +2328,8 @@ class CTARobot(BaseStrategyRobot):
                     "avg_pnl": float(rec.avg_pnl),
                     "close_count": int(rec.close_count),
                     "sample_count": int(rec.sample_count),
+                    "consecutive_losses": int(consecutive_losses),
+                    "loss_decay_applied": bool(loss_decay_applied),
                 }
             self._family_adaptation_cache_at = now
             logger.info(
@@ -2216,9 +2397,9 @@ class CTARobot(BaseStrategyRobot):
             score_ratio = max(0.0, min(1.3, dominant_score / threshold))
             score += min(1.0, score_ratio) * 0.20
             reasons.append(f"score_ratio={score_ratio:.2f}")
-        score += ((location_score + 1.0) / 2.0) * 0.25
+        score += ((location_score + 1.0) / 2.0) * 0.15
         reasons.append(f"location={location_score:.2f}")
-        score += rr_score * 0.15
+        score += rr_score * 0.25
         reasons.append(f"rr={'n/a' if expected_rr is None else f'{expected_rr:.2f}'}")
         if near_ready:
             score += 0.10
@@ -2240,6 +2421,11 @@ class CTARobot(BaseStrategyRobot):
         if family_score != 0.0 and bool(getattr(self.config, "entry_decider_use_family_adaptation", True)):
             score += family_score
             reasons.extend(family_reasons)
+
+        regime_coefficient = self._market_regime_entry_decider_coefficient(signal, direction)
+        if regime_coefficient != 1.0:
+            score *= regime_coefficient
+            reasons.append(f"regime_coef={self._current_market_regime()}({regime_coefficient:.2f})")
 
         if direction > 0:
             confidence_floor = float(getattr(self.config, "long_standard_min_confidence", 0.58))
@@ -2404,7 +2590,6 @@ class CTARobot(BaseStrategyRobot):
                     "near_breakout_release",
                     "price_led_override",
                     "major_bull_retest",
-                    "bullish_memory_breakout",
                 }
                 trigger_family = str(getattr(signal, "execution_trigger_family", "") or "")
                 if trigger_family in strict_order_flow_families or order_flow_assessment.imbalance_ratio < base_confirmation_ratio:
@@ -2618,6 +2803,10 @@ class CTARobot(BaseStrategyRobot):
         position_side: str,
         filled_amount: float,
         entry_price: float,
+        position_id: str | None = None,
+        entry_order_id: str | None = None,
+        position_size_before: float | None = None,
+        position_size_after: float | None = None,
     ) -> ManagedPosition:
         atr_value = self._normalized_atr(entry_price, signal.atr)
         stop_loss_multiplier = self._resolve_dynamic_stop_loss_multiplier(signal)
@@ -2653,6 +2842,10 @@ class CTARobot(BaseStrategyRobot):
             origin_trigger_family=str(signal.execution_trigger_family or "waiting"),
             origin_trigger_reason=str(signal.execution_trigger_reason or ""),
             origin_pathway=signal.entry_pathway.name,
+            position_id=str(position_id or f"cta-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"),
+            entry_order_id=entry_order_id,
+            position_size_before=position_size_before,
+            position_size_after=position_size_after,
         )
 
     def _resolve_filled_entry_price(
@@ -2852,6 +3045,7 @@ class CTARobot(BaseStrategyRobot):
         order_flow_assessment: OrderFlowAssessment | None,
         sentiment_halved: bool,
     ) -> str:
+        position_size_before = self._fetch_exchange_position_size(position_side)
         entry_order = self._place_entry_order(
             side=side,
             amount=amount,
@@ -2871,11 +3065,18 @@ class CTARobot(BaseStrategyRobot):
             order_flow_assessment=order_flow_assessment,
             fallback_price=notional_price,
         )
+        position_size_after = self._fetch_exchange_position_size(position_side)
+        position_id = f"cta-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+        entry_order_id = self._extract_order_id(entry_order.order)
         self.position = self._build_managed_position(
             signal=signal,
             position_side=position_side,
             filled_amount=filled_amount,
             entry_price=entry_price,
+            position_id=position_id,
+            entry_order_id=entry_order_id,
+            position_size_before=position_size_before,
+            position_size_after=position_size_after,
         )
         self._journal_event(
             event_type="trade_open",
@@ -2916,6 +3117,16 @@ class CTARobot(BaseStrategyRobot):
                 "entry_decider_score": float(signal.entry_decider_score),
                 "entry_decider_reasons": list(signal.entry_decider_reasons),
                 "market_regime": self._current_market_regime(),
+                "position_id": position_id,
+                "entry_order_id": entry_order_id,
+                "exchange_order_id": entry_order_id,
+                "requested_amount": float(amount),
+                "filled_amount": float(filled_amount),
+                "fill_ratio": float(filled_amount / amount) if amount > 0 else 0.0,
+                "avg_entry_price": float(entry_price),
+                "position_size_before": position_size_before,
+                "position_size_after": position_size_after,
+                "reduce_only": False,
             },
         )
         self._arm_fast_track_reuse_cooldown(signal)
@@ -3341,13 +3552,22 @@ class CTARobot(BaseStrategyRobot):
             return False
 
         position = self.position
+        position_size_before = self._fetch_exchange_position_size(position.side)
         exit_order = self.client.place_market_order(
             self.symbol,
             position.exit_side,
             amount,
             reduce_only=True,
         )
-        self._notify_realized_profit(position=position, amount=amount, exit_order=exit_order, reason="partial_take_profit")
+        position_size_after = self._fetch_exchange_position_size(position.side)
+        self._notify_realized_profit(
+            position=position,
+            amount=amount,
+            exit_order=exit_order,
+            reason="partial_take_profit",
+            position_size_before=position_size_before,
+            position_size_after=position_size_after,
+        )
         position.remaining_size = self._round_size(position.remaining_size - amount)
         if position.remaining_size <= 0:
             self.position = None
@@ -3363,6 +3583,7 @@ class CTARobot(BaseStrategyRobot):
         position = self.position
         amount = self._round_size(position.remaining_size)
         if amount > 0:
+            position_size_before = self._fetch_exchange_position_size(position.side)
             exit_order = self.client.place_market_order(
                 self.symbol,
                 position.exit_side,
@@ -3370,7 +3591,15 @@ class CTARobot(BaseStrategyRobot):
                 reduce_only=True,
                 params={"reason": reason},
             )
-            self._notify_realized_profit(position=position, amount=amount, exit_order=exit_order, reason=reason)
+            position_size_after = self._fetch_exchange_position_size(position.side)
+            self._notify_realized_profit(
+                position=position,
+                amount=amount,
+                exit_order=exit_order,
+                reason=reason,
+                position_size_before=position_size_before,
+                position_size_after=position_size_after,
+            )
         self.position = None
 
     def _apply_runtime_coordination(self, signal: TrendSignal) -> str | None:
@@ -3553,6 +3782,53 @@ class CTARobot(BaseStrategyRobot):
             return abs(float(amount))
         return float(fallback)
 
+    def _extract_order_id(self, order: dict | None) -> str | None:
+        if not order:
+            return None
+        for key in ("id", "order_id", "ordId"):
+            value = order.get(key)
+            if value not in (None, ""):
+                return str(value)
+        info = order.get("info") or {}
+        for key in ("ordId", "orderId", "clOrdId"):
+            value = info.get(key)
+            if value not in (None, ""):
+                return str(value)
+        return None
+
+    def _fetch_exchange_position_size(self, side: str | None = None) -> float | None:
+        fetch_positions = getattr(self.client, "fetch_positions", None)
+        if not callable(fetch_positions):
+            return None
+        try:
+            positions = fetch_positions([self.symbol])
+        except TypeError:
+            try:
+                positions = fetch_positions()
+            except Exception:
+                return None
+        except Exception:
+            return None
+        wanted_side = str(side or "").lower()
+        total = 0.0
+        found = False
+        for pos in positions or []:
+            try:
+                symbol = str(pos.get("symbol") or pos.get("info", {}).get("instId") or "")
+                if symbol and symbol != self.symbol and symbol.replace("/", "-").replace(":USDT", "") not in self.symbol.replace("/", "-"):
+                    continue
+                pos_side = str(pos.get("side") or pos.get("info", {}).get("posSide") or "").lower()
+                if wanted_side and pos_side and pos_side not in {wanted_side, "net"}:
+                    continue
+                size_value = pos.get("contracts", pos.get("contractSize", pos.get("size", pos.get("info", {}).get("pos"))))
+                if size_value in (None, ""):
+                    continue
+                total += abs(float(size_value))
+                found = True
+            except Exception:
+                continue
+        return total if found else None
+
     def _extract_order_price(self, order: dict | None, *, fallback: float) -> float:
         if not order:
             return float(fallback)
@@ -3569,7 +3845,16 @@ class CTARobot(BaseStrategyRobot):
                 return float(value)
         return float(fallback)
 
-    def _notify_realized_profit(self, *, position: ManagedPosition, amount: float, exit_order: dict | None, reason: str | None = None) -> None:
+    def _notify_realized_profit(
+        self,
+        *,
+        position: ManagedPosition,
+        amount: float,
+        exit_order: dict | None,
+        reason: str | None = None,
+        position_size_before: float | None = None,
+        position_size_after: float | None = None,
+    ) -> None:
         exit_amount = self._round_size(amount)
         if exit_amount <= 0:
             return
@@ -3584,6 +3869,7 @@ class CTARobot(BaseStrategyRobot):
             fallback_price = position.entry_price
 
         exit_price = self._extract_order_price(exit_order, fallback=float(fallback_price))
+        exit_order_id = self._extract_order_id(exit_order)
         if exit_price <= 0 or position.entry_price <= 0:
             return
 
@@ -3631,15 +3917,28 @@ class CTARobot(BaseStrategyRobot):
             size=float(exit_amount),
             pnl=float(pnl),
             metadata={
+                "position_id": str(position.position_id or ""),
+                "entry_order_id": position.entry_order_id,
+                "exit_order_id": exit_order_id,
+                "exchange_order_id": exit_order_id,
                 "entry_price": float(position.entry_price),
                 "exit_price": float(exit_price),
+                "realized_pnl": float(pnl),
                 "roi": float(roi),
                 "stop_price": float(position.stop_price),
                 "best_price": float(position.best_price),
+                "mfe_pct": float(position.max_unrealized_profit_pct),
+                "mae_pct": None,
                 "origin_trigger_family": str(position.origin_trigger_family or "waiting"),
                 "origin_trigger_reason": str(position.origin_trigger_reason or ""),
                 "origin_pathway": str(position.origin_pathway or ""),
                 "market_regime": self._current_market_regime(),
+                "position_size_before": position_size_before,
+                "position_size_after": position_size_after,
+                "entry_position_size_before": position.position_size_before,
+                "entry_position_size_after": position.position_size_after,
+                "reduce_only": True,
+                "exit_reason": reason or "unspecified",
             },
         )
 

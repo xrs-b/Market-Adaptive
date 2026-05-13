@@ -492,6 +492,40 @@ class DatabaseInitializer:
             )
         return results
 
+    def fetch_consecutive_trigger_family_losses(
+        self,
+        strategy_name: str,
+        symbol: str,
+        trigger_family: str,
+        side: str | None = None,
+        *,
+        limit: int = 20,
+    ) -> int:
+        with self.connect() as conn:
+            query = """
+                SELECT pnl
+                FROM trade_journal
+                WHERE strategy_name = ?
+                  AND symbol = ?
+                  AND event_type = 'trade_close'
+                  AND trigger_family = ?
+            """
+            params: list[object] = [strategy_name, symbol, trigger_family]
+            if side is not None:
+                query += " AND side = ?"
+                params.append(side)
+            query += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(max(1, int(limit)))
+            rows = conn.execute(query, params).fetchall()
+        losses = 0
+        for row in rows:
+            pnl = float(row["pnl"] or 0.0)
+            if pnl < 0:
+                losses += 1
+                continue
+            break
+        return losses
+
     def fetch_trade_journal_rows(
         self,
         strategy_name: str,

@@ -22,6 +22,27 @@ class EntryDeciderLite:
     def __init__(self, config: Any) -> None:
         self.config = config
 
+    def _market_regime_coefficient(self, signal: Any, direction: int) -> float:
+        if not bool(getattr(self.config, "market_regime_adaptation_enabled", True)):
+            return 1.0
+        regime = str(getattr(signal, "market_regime", getattr(signal, "regime", "unknown")) or "unknown")
+        family = str(getattr(signal, "execution_trigger_family", "") or "")
+        major_direction = int(getattr(signal, "major_direction", 0) or 0)
+        coef = 1.0
+        if regime in {"trend", "trend_impulse"}:
+            if major_direction != 0 and int(direction) == major_direction:
+                coef *= float(getattr(self.config, "entry_decider_trend_follow_regime_coefficient", 1.06))
+            elif major_direction != 0:
+                coef *= float(getattr(self.config, "entry_decider_countertrend_regime_coefficient", 0.92))
+        elif regime == "sideways":
+            reversal_families = {"spring_reclaim", "upthrust_reclaim", "bullish_retest_entry", "bearish_retest_entry", "pullback_support_entry", "pullback_resistance_entry"}
+            breakout_families = {"bullish_memory_breakout", "bearish_memory_breakdown", "starter_frontrun", "starter_short_frontrun", "trend_continuation_near_breakout", "near_breakout_release", "price_led_override"}
+            if family in reversal_families:
+                coef *= float(getattr(self.config, "entry_decider_sideways_reversal_regime_coefficient", 1.05))
+            elif family in breakout_families:
+                coef *= float(getattr(self.config, "entry_decider_sideways_breakout_regime_coefficient", 0.94))
+        return max(0.80, min(1.20, float(coef)))
+
     def evaluate(self, signal: Any) -> EntryDecisionLiteResult:
         direction = int(getattr(signal, "direction", 0) or 0)
         if direction == 0:
@@ -101,6 +122,12 @@ class EntryDeciderLite:
             else:
                 score -= 15.0
                 reasons.append("ml_gate_failed")
+
+        regime_coefficient = self._market_regime_coefficient(signal, direction)
+        breakdown["market_regime_coefficient"] = regime_coefficient
+        if regime_coefficient != 1.0:
+            score *= regime_coefficient
+            reasons.append(f"regime_coef={regime_coefficient:.2f}")
 
         score = max(0.0, min(100.0, score))
 
