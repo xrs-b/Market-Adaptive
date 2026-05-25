@@ -8,7 +8,7 @@ import subprocess
 from collections import deque
 from copy import deepcopy
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +66,10 @@ class ConfirmPayload(BaseModel):
     confirm: bool = False
 
 
+class RotateLogPayload(BaseModel):
+    confirm: bool = False
+
+
 class AdminSettings(BaseModel):
     username: str
     password: str
@@ -93,12 +97,34 @@ class InitialEquityPayload(BaseModel):
     initialEquity: float
 
 
+
+TRIGGER_FAMILY_POLICY_DEFAULTS = {
+    "disabled_trigger_families": {
+        "short": ["upthrust_reclaim"],
+        "long": [],
+    },
+    "allowed_trigger_families": {
+        "trend": {
+            "long": ["trend_continuation_near_breakout", "major_bull_retest", "bullish_memory_breakout", "near_breakout_release"],
+            "short": ["bearish_memory_breakdown", "early_bearish"],
+        },
+        "range": {
+            "long": ["spring_reclaim", "bullish_retest_entry"],
+            "short": ["bearish_retest_entry"],
+        },
+        "range_breakout_ready": {
+            "long": ["trend_continuation_near_breakout", "bullish_memory_breakout"],
+            "short": ["bearish_memory_breakdown"],
+        },
+    },
+}
+
 class LogSnapshot(BaseModel):
-    main: str | None = None
-    cta: str | None = None
-    grid: str | None = None
-    risk: str | None = None
-    oracle: str | None = None
+    main: Any = None
+    cta: Any = None
+    grid: Any = None
+    risk: Any = None
+    oracle: Any = None
 
 
 WORKER_NAME_MAP = {
@@ -151,6 +177,14 @@ CONFIG_SCHEMA: list[dict[str, Any]] = [
             {"path": "cta.breakout_rr_target_atr_multiplier", "label": "突破 RR ATR 倍数", "group": "RR / 入口过滤", "type": "number", "description": "突破形态目标价的 ATR 扩展倍数。", "mutable": True, "restartRequired": True, "step": 0.1},
             {"path": "cta.fast_track_min_entry_decider_score", "label": "FAST_TRACK 最小决策分", "group": "RR / 入口过滤", "type": "number", "description": "FAST_TRACK 额外 entry_decider 分数门槛；0 表示关闭额外硬门槛。", "mutable": True, "restartRequired": True, "step": 0.01},
             {"path": "cta.fast_track_minimum_expected_rr", "label": "FAST_TRACK 最小 RR", "group": "RR / 入口过滤", "type": "number", "description": "FAST_TRACK 额外 RR 门槛；0 表示关闭额外硬门槛。", "mutable": True, "restartRequired": True, "step": 0.01},
+            {"path": "cta.pro_signal_enabled", "label": "启用专业信号门控", "group": "专业信号 / 门控", "highImpact": True, "type": "boolean", "description": "启用 HTF EMA15、市场结构、位置、RR 和专业 setup 过滤。旧信号只作为候选。", "mutable": True, "restartRequired": True},
+            {"path": "cta.pro_signal_min_rr", "label": "专业信号最小 RR", "group": "专业信号 / 门控", "highImpact": True, "type": "number", "description": "ProfessionalSignalEngine 的最小交易计划 RR。过高会显著减少开仓。", "mutable": True, "restartRequired": True, "step": 0.1},
+            {"path": "cta.pro_signal_min_location_score", "label": "专业信号最小位置分", "group": "专业信号 / 门控", "highImpact": True, "type": "number", "description": "价格位置评分下限；结合 4h EMA、1h EMA、HTF 支撑阻力和目标空间。", "mutable": True, "restartRequired": True, "step": 0.05},
+            {"path": "cta.max_same_trigger_family_losses_per_day", "label": "同 family 当日亏损停用", "group": "专业信号 / 连续试错", "highImpact": True, "type": "number", "description": "同 trigger_family + side 当日亏损达到该笔数后，后续同类信号不再开仓；0 表示关闭。", "mutable": True, "restartRequired": True, "step": 1},
+            {"path": "cta.max_same_side_entries_per_6h", "label": "同方向 6h 最大开仓", "group": "专业信号 / 连续试错", "highImpact": True, "type": "number", "description": "最近 6 小时同方向开仓达到该次数后拦截，防止算法连续追多/追空；0 表示关闭。", "mutable": True, "restartRequired": True, "step": 1},
+            {"path": "cta.disable_upthrust_reclaim_short", "label": "禁用 upthrust short", "group": "专业信号 / Legacy 硬拦截", "highImpact": True, "type": "boolean", "description": "保留旧字段：直接禁用亏损严重的 upthrust_reclaim short。建议同时使用 trigger family 黑名单。", "mutable": True, "restartRequired": True},
+            {"path": "cta.disable_countertrend_short_in_trend", "label": "趋势中禁逆势 short", "group": "专业信号 / Legacy 硬拦截", "highImpact": True, "type": "boolean", "description": "保留旧字段：trend regime 下阻断与主方向冲突的 short。", "mutable": True, "restartRequired": True},
+            {"path": "cta.trigger_family_policy_json", "label": "Trigger Family 黑白名单 JSON", "group": "专业信号 / Family 黑白名单", "highImpact": True, "type": "textarea", "description": "运营级 trigger family 黑/白名单。保存时会写入 cta.disabled_trigger_families 与 cta.allowed_trigger_families。", "mutable": True, "restartRequired": True, "rows": 16},
             {"path": "cta.risk_percent_per_trade", "label": "单笔风险比例", "group": "风险仓位", "highImpact": True, "type": "number", "description": "普通信号每笔风险占比。", "mutable": True, "restartRequired": True, "step": 0.001},
             {"path": "cta.boosted_risk_percent_per_trade", "label": "高质量单笔风险比例", "group": "风险仓位", "highImpact": True, "type": "number", "description": "高质量信号的提升风险占比。", "mutable": True, "restartRequired": True, "step": 0.001},
             {"path": "cta.first_take_profit_pct", "label": "第一止盈比例", "group": "止盈设置", "type": "number", "description": "第一档止盈百分比。", "mutable": True, "restartRequired": True, "step": 0.001},
@@ -255,6 +289,89 @@ def tail_lines(path: Path, limit: int = 200) -> list[str]:
             bucket.append(strip_ansi(raw.rstrip()))
     return list(bucket)
 
+
+
+def file_size_text(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{size} B"
+
+
+def build_log_status(settings: AppSettings, lines: list[str] | None = None) -> dict[str, Any]:
+    log_path = settings.log_path
+    exists = log_path.exists()
+    size_bytes = log_path.stat().st_size if exists else 0
+    scoped_lines = lines if lines is not None else tail_lines(log_path, limit=300)
+    error_count = sum(1 for line in scoped_lines if "[ERROR]" in line)
+    warning_count = sum(1 for line in scoped_lines if "[WARNING]" in line)
+    latest_error = next((line for line in reversed(scoped_lines) if "[ERROR]" in line), None)
+    latest_warning = next((line for line in reversed(scoped_lines) if "[WARNING]" in line), None)
+    return {
+        "path": str(log_path),
+        "exists": exists,
+        "sizeBytes": size_bytes,
+        "sizeText": file_size_text(size_bytes),
+        "lineSample": len(scoped_lines),
+        "errorCount": error_count,
+        "warningCount": warning_count,
+        "latestError": summarize_log_line(latest_error) if latest_error else None,
+        "latestWarning": summarize_log_line(latest_warning) if latest_warning else None,
+    }
+
+
+def build_runtime_safety_summary(config_payload: dict[str, Any], cfg: AppConfig) -> dict[str, Any]:
+    active = str(get_by_path(config_payload, "position_profile.active") or "original")
+    sandbox = bool(get_by_path(config_payload, "okx.sandbox"))
+    simulated = bool(get_by_path(config_payload, "okx.simulated_trading"))
+    fast_score = float(get_by_path(config_payload, "cta.fast_track_min_entry_decider_score") or 0.0)
+    fast_rr = float(get_by_path(config_payload, "cta.fast_track_minimum_expected_rr") or 0.0)
+    cta_margin = float(get_by_path(config_payload, "cta.margin_fraction_per_trade") or getattr(cfg.cta, "margin_fraction_per_trade", 0.0) or 0.0)
+    cta_lev = float(get_by_path(config_payload, "cta.nominal_leverage") or getattr(cfg.cta, "nominal_leverage", 0.0) or 0.0)
+    grid_alloc = float(get_by_path(config_payload, "grid.equity_allocation_ratio") or getattr(cfg.grid, "equity_allocation_ratio", 0.0) or 0.0)
+    grid_lev = float(get_by_path(config_payload, "grid.leverage") or getattr(cfg.grid, "leverage", 0.0) or 0.0)
+    grid_levels = int(get_by_path(config_payload, "grid.levels") or getattr(cfg.grid, "levels", 0) or 0)
+    pro_signal_enabled = bool(get_by_path(config_payload, "cta.pro_signal_enabled"))
+    pro_signal_min_rr = float(get_by_path(config_payload, "cta.pro_signal_min_rr") or 0.0)
+    pro_signal_min_location_score = float(get_by_path(config_payload, "cta.pro_signal_min_location_score") or 0.0)
+    disabled_families = get_by_path(config_payload, "cta.disabled_trigger_families") or {}
+    allowed_families = get_by_path(config_payload, "cta.allowed_trigger_families") or {}
+    disabled_family_count = sum(len(v or []) for v in disabled_families.values()) if isinstance(disabled_families, dict) else 0
+    allowed_family_count = 0
+    if isinstance(allowed_families, dict):
+        for regime_policy in allowed_families.values():
+            if isinstance(regime_policy, dict):
+                allowed_family_count += sum(len(v or []) for v in regime_policy.values())
+    cta_exposure = cta_margin * cta_lev
+    grid_exposure = grid_alloc * grid_lev
+    warnings: list[dict[str, str]] = []
+    if active.upper() == "C":
+        warnings.append({"level": "danger", "title": "仓位方案 C / 高进攻", "detail": "当前 profile C 会显著放大 CTA 与网格曝险，调整和重启前务必确认。"})
+    if not sandbox and not simulated:
+        warnings.append({"level": "danger", "title": "实盘交易模式", "detail": "OKX sandbox/simulated 均未开启，系统可能向真实账户下单。"})
+    else:
+        warnings.append({"level": "ok", "title": "测试/模拟保护", "detail": f"sandbox={sandbox} / simulated={simulated}"})
+    if fast_score <= 0 and fast_rr <= 0:
+        warnings.append({"level": "warn", "title": "FAST_TRACK 额外硬门槛关闭", "detail": "fast_track_min_entry_decider_score 与 fast_track_minimum_expected_rr 均为 0。"})
+    if pro_signal_enabled:
+        warnings.append({"level": "ok", "title": "专业信号门控已开启", "detail": f"RR≥{pro_signal_min_rr:.2f}, location≥{pro_signal_min_location_score:.2f}; disabled={disabled_family_count}, allowed={allowed_family_count}"})
+    else:
+        warnings.append({"level": "warn", "title": "专业信号门控未开启", "detail": "旧信号会更容易直接进入执行链；建议仅在调试时关闭。"})
+    if cta_margin >= 0.08 or cta_lev >= 3:
+        warnings.append({"level": "warn", "title": "CTA 曝险偏高", "detail": f"margin={cta_margin:.3f}, leverage={cta_lev:.1f}, 理论名义≈{cta_exposure:.2f}x equity/信号。"})
+    if grid_alloc >= 0.5 or grid_lev >= 3 or grid_levels >= 8:
+        warnings.append({"level": "warn", "title": "Grid 曝险偏高", "detail": f"allocation={grid_alloc:.2f}, leverage={grid_lev:.1f}, levels={grid_levels}, 理论名义≈{grid_exposure:.2f}x equity。"})
+    return {
+        "profile": active, "profileHighRisk": active.upper() == "C", "sandbox": sandbox, "simulatedTrading": simulated,
+        "liveTrading": not sandbox and not simulated, "fastTrackExtraGatesEnabled": fast_score > 0 or fast_rr > 0,
+        "fastTrackMinScore": fast_score, "fastTrackMinRR": fast_rr, "ctaMarginFraction": cta_margin, "ctaLeverage": cta_lev,
+        "ctaExposureMultiple": cta_exposure, "gridAllocation": grid_alloc, "gridLeverage": grid_lev, "gridLevels": grid_levels,
+        "proSignalEnabled": pro_signal_enabled, "proSignalMinRR": pro_signal_min_rr, "proSignalMinLocationScore": pro_signal_min_location_score,
+        "disabledTriggerFamilyCount": disabled_family_count, "allowedTriggerFamilyCount": allowed_family_count,
+        "gridExposureMultiple": grid_exposure, "warnings": warnings,
+    }
 
 def load_runtime_config(settings: AppSettings) -> AppConfig:
     return load_config(settings.config_path)
@@ -743,7 +860,36 @@ def apply_config_values(payload: dict[str, Any], values: dict[str, Any], allowed
             continue
         set_by_path(payload, path, value)
         changed_paths.append(path)
-    return changed_paths
+    changed_paths.extend(apply_trigger_family_policy_payload(payload, values))
+    return sorted(set(changed_paths))
+
+
+def apply_trigger_family_policy_payload(payload: dict[str, Any], values: dict[str, Any]) -> list[str]:
+    changed: list[str] = []
+    cta_payload = payload.setdefault("cta", {})
+    current_disabled = cta_payload.get("disabled_trigger_families")
+    current_allowed = cta_payload.get("allowed_trigger_families")
+    if "cta.trigger_family_policy_json" in values:
+        raw = values.get("cta.trigger_family_policy_json")
+        if raw is None or str(raw).strip() == "":
+            return changed
+        try:
+            parsed = json.loads(str(raw))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"trigger family policy JSON 无效: {exc}")
+        if not isinstance(parsed, dict):
+            raise HTTPException(status_code=400, detail="trigger family policy 必须是 JSON object")
+        disabled = parsed.get("disabled_trigger_families", current_disabled or {})
+        allowed = parsed.get("allowed_trigger_families", current_allowed or {})
+        if not isinstance(disabled, dict) or not isinstance(allowed, dict):
+            raise HTTPException(status_code=400, detail="disabled_trigger_families / allowed_trigger_families 必须是 object")
+        if disabled != current_disabled:
+            cta_payload["disabled_trigger_families"] = disabled
+            changed.append("cta.disabled_trigger_families")
+        if allowed != current_allowed:
+            cta_payload["allowed_trigger_families"] = allowed
+            changed.append("cta.allowed_trigger_families")
+    return changed
 
 
 def cast_config_value(raw: Any, field_type: str) -> Any:
@@ -795,10 +941,17 @@ def build_config_sections(payload: dict[str, Any], settings: AppSettings | None 
             if field["path"] == "runtime.account_initial_equity" and initial_equity_value is not None:
                 item["value"] = initial_equity_value
             else:
-                value = get_by_path(payload, field["path"])
-                if value is None:
-                    value = get_runtime_value(field["path"])
-                item["value"] = value
+                if field["path"] == "cta.trigger_family_policy_json":
+                    value = {
+                        "disabled_trigger_families": get_by_path(payload, "cta.disabled_trigger_families") or TRIGGER_FAMILY_POLICY_DEFAULTS["disabled_trigger_families"],
+                        "allowed_trigger_families": get_by_path(payload, "cta.allowed_trigger_families") or TRIGGER_FAMILY_POLICY_DEFAULTS["allowed_trigger_families"],
+                    }
+                    item["value"] = json.dumps(value, ensure_ascii=False, indent=2)
+                else:
+                    value = get_by_path(payload, field["path"])
+                    if value is None:
+                        value = get_runtime_value(field["path"])
+                    item["value"] = value
             block["fields"].append(item)
         sections.append(block)
     return sections
@@ -877,6 +1030,7 @@ def dashboard_overview(
 ) -> dict[str, Any]:
     del session
     cfg = load_runtime_config(settings)
+    config_payload = read_config_payload(settings)
     client = OKXClient(cfg.okx, cfg.execution)
     risk_snapshot = safe_okx({
         "equity": None,
@@ -903,6 +1057,8 @@ def dashboard_overview(
         "主进程运行": process_running(),
         "主进程PID": main_controller_pids(),
         "交易对": cfg.cta.symbol,
+        "safetySummary": build_runtime_safety_summary(config_payload, cfg),
+        "logStatus": build_log_status(settings, lines),
         "刷新时间": now_text(),
     }
 
@@ -952,9 +1108,19 @@ def dashboard_cta(
         strategy_name="cta",
         symbol=cfg.cta.symbol,
         limit=400,
-        event_types=("trade_close", "trade_open", "blocked_signal"),
+        event_types=("trade_close", "trade_open", "blocked_signal", "pre_signal_observation"),
     )
-    snapshot = build_cta_dashboard_snapshot(family_records=family_records, journal_rows=journal_rows, hours=hours)
+    snapshot = build_cta_dashboard_snapshot(
+        family_records=family_records,
+        journal_rows=journal_rows,
+        hours=hours,
+        config_meta={
+            "loss_acceleration_decay_enabled": getattr(cfg.cta, "loss_acceleration_decay_enabled", True),
+            "loss_acceleration_consecutive_losses": getattr(cfg.cta, "loss_acceleration_consecutive_losses", 3),
+            "loss_acceleration_decay_score": getattr(cfg.cta, "loss_acceleration_decay_score", 0.12),
+            "loss_acceleration_decay_ttl_seconds": getattr(cfg.cta, "loss_acceleration_decay_ttl_seconds", 0),
+        },
+    )
     market_status = database.fetch_latest_market_status(cfg.cta.symbol)
     current_config = read_config_payload(settings)
     snapshot["刷新时间"] = now_text()
@@ -1041,7 +1207,38 @@ def recent_logs(
 ) -> dict[str, Any]:
     del session
     lines = tail_lines(settings.log_path, limit=max(20, min(limit, 500)))
-    return {"items": [summarize_log_line(line) for line in lines], "刷新时间": now_text()}
+    return {"items": [summarize_log_line(line) for line in lines], "status": build_log_status(settings, lines), "刷新时间": now_text()}
+
+
+@app.post("/api/logs/rotate")
+def rotate_logs(
+    payload: RotateLogPayload,
+    session: dict[str, Any] = Depends(require_auth),
+    settings: AppSettings = Depends(get_settings),
+) -> dict[str, Any]:
+    del session
+    if not payload.confirm:
+        raise HTTPException(status_code=400, detail="必须显式确认 confirm=true")
+    log_path = settings.log_path
+    if not log_path.exists():
+        return {"ok": True, "message": "日志文件不存在，无需归档", "status": build_log_status(settings), "刷新时间": now_text()}
+    if log_path.stat().st_size <= 0:
+        return {"ok": True, "message": "日志文件为空，无需归档", "status": build_log_status(settings), "刷新时间": now_text()}
+    archive_dir = log_path.parent / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    stem = log_path.stem
+    suffix = log_path.suffix or ".log"
+    archive_path = archive_dir / f"{stem}-{datetime.now().strftime('%Y%m%d-%H%M%S')}{suffix}"
+    log_path.replace(archive_path)
+    log_path.touch(mode=0o600, exist_ok=True)
+    return {
+        "ok": True,
+        "message": f"已归档日志到 {archive_path.name}，并创建新的空日志文件",
+        "archiveName": archive_path.name,
+        "archiveSizeBytes": archive_path.stat().st_size,
+        "status": build_log_status(settings),
+        "刷新时间": now_text(),
+    }
 
 
 @app.get("/api/account/initial-equity")

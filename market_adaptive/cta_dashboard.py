@@ -328,7 +328,82 @@ def filter_journal_rows_by_hours(journal_rows: list[TradeJournalRow], hours: int
     return filtered
 
 
-def build_cta_dashboard_snapshot(*, family_records: list[TriggerFamilyPerformance], journal_rows: list[TradeJournalRow], hours: int | None = None) -> dict[str, Any]:
+
+def _trigger_group(family: str) -> str:
+    value = _norm(family, "waiting")
+    if value.startswith("waiting_") or value == "waiting":
+        return "waiting"
+    if value.startswith("early_"):
+        return "early"
+    if value in {"bullish_memory_breakout", "bearish_memory_breakdown"}:
+        return "memory_breakout"
+    if value in {"bearish_retest", "major_bull_retest"}:
+        return "major_retest"
+    if value in {"near_breakout_release", "trend_continuation_near_breakout", "price_led_override", "soft_latch_breakout", "major_bull_impulse_reclaim", "rail_momentum"}:
+        return "breakout_continuation"
+    if value in {"spring_reclaim", "upthrust_reclaim", "bullish_retest_entry", "bearish_retest_entry", "pullback_support_entry", "pullback_resistance_entry"}:
+        return "reversal_reclaim"
+    if value in {"starter_frontrun", "starter_short_frontrun"}:
+        return "starter"
+    if value in {"weak_bull_scale_in", "weak_bear_scale_in"}:
+        return "scale_in"
+    return "other"
+
+def _loss_decay_meta(consecutive_losses: int, config_meta: dict[str, Any] | None) -> dict[str, Any]:
+    cfg = config_meta or {}
+    enabled = bool(cfg.get("loss_acceleration_decay_enabled", True))
+    threshold = _safe_int(cfg.get("loss_acceleration_consecutive_losses", 3), 3)
+    score = _safe_float(cfg.get("loss_acceleration_decay_score", 0.12), 0.12)
+    ttl = _safe_int(cfg.get("loss_acceleration_decay_ttl_seconds", 0), 0)
+    return {"enabled": enabled, "threshold": threshold, "decay_score": round(score, 6), "ttl_seconds": ttl, "consecutive_losses": int(consecutive_losses), "applied": bool(enabled and threshold > 0 and consecutive_losses >= threshold)}
+
+def build_pre_signal_observations(journal_rows: list[TradeJournalRow], *, limit: int = 40) -> list[dict[str, Any]]:
+    rows = [row for row in journal_rows if row.event_type == "pre_signal_observation"]
+    rows.sort(key=lambda row: str(row.timestamp), reverse=True)
+    return [{"timestamp": row.timestamp, "side": _norm(row.side, "none"), "action": _norm(row.action, "unknown"), "trigger_family": _norm(row.trigger_family), "trigger_group": _trigger_group(_norm(row.trigger_family)), "trigger_reason": _norm(row.trigger_reason, ""), "pathway": _norm(row.pathway, "unknown"), "price": round(_safe_float(row.price), 6), "candidate_state": _norm(_meta(row, "candidate_state", row.action)), "candidate_reason": _norm(_meta(row, "candidate_reason", ""), ""), "raw_direction": _safe_int(_meta(row, "raw_direction", 0)), "final_direction": _safe_int(_meta(row, "final_direction", 0)), "confidence": round(_safe_float(_meta(row, "signal_confidence", 0.0)), 4), "entry_decider_decision": _norm(_meta(row, "entry_decider_decision", "unknown")), "entry_decider_score": round(_safe_float(_meta(row, "entry_decider_score", 0.0)), 4), "blocker_reason": _norm(_meta(row, "blocker_reason", ""), ""), "market_regime": _norm(_meta(row, "market_regime", "unknown"))} for row in rows[: max(1, int(limit))]]
+
+def build_family_health(records: list[TriggerFamilyPerformance], journal_rows: list[TradeJournalRow], *, config_meta: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    closes = [row for row in journal_rows if row.event_type == "trade_close"]
+    by_key = {(str(rec.trigger_family), str(rec.side or "any")): rec for rec in records}
+    keys = set(by_key) | {(_norm(row.trigger_family), _norm(row.side, "any")) for row in closes if _norm(row.trigger_family, "")}
+    health = []
+    for family, side in keys:
+        rows = [row for row in closes if _norm(row.trigger_family) == family and _norm(row.side, "any") == side]
+        rows.sort(key=lambda row: str(row.timestamp), reverse=True)
+        consecutive_losses = 0
+        for row in rows:
+            if _safe_float(row.pnl) < 0: consecutive_losses += 1
+            else: break
+        rec = by_key.get((family, side))
+        close_count = int(rec.close_count) if rec else len(rows)
+        win_count = int(rec.win_count) if rec else sum(1 for row in rows if _safe_float(row.pnl) > 0)
+        loss_count = int(rec.loss_count) if rec else sum(1 for row in rows if _safe_float(row.pnl) < 0)
+        total_pnl = float(rec.total_pnl) if rec else sum(_safe_float(row.pnl) for row in rows)
+        avg_pnl = float(rec.avg_pnl) if rec else (total_pnl / close_count if close_count else 0.0)
+        win_rate = float(rec.win_rate) if rec else (win_count / close_count if close_count else 0.0)
+        health.append({"trigger_family": family, "trigger_group": _trigger_group(family), "side": side, "sample_count": int(rec.sample_count) if rec else close_count, "close_count": close_count, "win_count": win_count, "loss_count": loss_count, "win_rate": round(win_rate, 4), "avg_pnl": round(avg_pnl, 6), "total_pnl": round(total_pnl, 6), "score": round((win_rate - 0.45) + avg_pnl * 0.05, 6), "consecutive_losses": consecutive_losses, "loss_decay": _loss_decay_meta(consecutive_losses, config_meta)})
+    health.sort(key=lambda item: (-int(item["loss_decay"]["applied"]), -int(item["consecutive_losses"]), float(item["score"])))
+    return health
+
+def build_long_short_distribution(journal_rows: list[TradeJournalRow]) -> dict[str, Any]:
+    buckets: dict[str, dict[str, float]] = defaultdict(lambda: {"count": 0.0, "closed": 0.0, "pnl": 0.0})
+    for row in [r for r in journal_rows if r.event_type in {"trade_open", "trade_close", "blocked_signal", "pre_signal_observation"}]:
+        side = _norm(row.side, "none").lower(); buckets[side]["count"] += 1
+        if row.event_type == "trade_close": buckets[side]["closed"] += 1; buckets[side]["pnl"] += _safe_float(row.pnl)
+    long_count, short_count = buckets["long"]["count"], buckets["short"]["count"]; total = long_count + short_count
+    return {"by_side": {side: {"count": int(v["count"]), "closed": int(v["closed"]), "total_pnl": round(v["pnl"], 6)} for side, v in sorted(buckets.items())}, "long_count": int(long_count), "short_count": int(short_count), "long_ratio": round(long_count / total, 4) if total else 0.0, "short_ratio": round(short_count / total, 4) if total else 0.0, "imbalance": round(((long_count - short_count) / total) if total else 0.0, 4)}
+
+def build_short_diagnostics(journal_rows: list[TradeJournalRow], distribution: dict[str, Any]) -> dict[str, Any]:
+    short_rows = [row for row in journal_rows if _norm(row.side, "").lower() == "short"]
+    blocked = [row for row in short_rows if row.event_type == "blocked_signal"]
+    observations = [row for row in short_rows if row.event_type == "pre_signal_observation"]
+    closes = [row for row in short_rows if row.event_type == "trade_close"]
+    pnl = [_safe_float(row.pnl) for row in closes]
+    counts: dict[str, int] = defaultdict(int)
+    for row in blocked: counts[_norm(_meta(row, "blocker_reason", row.trigger_reason), "unknown")] += 1
+    return {"short_rows": len(short_rows), "blocked_count": len(blocked), "pre_signal_count": len(observations), "close_count": len(closes), "win_rate": round(sum(1 for value in pnl if value > 0) / len(pnl), 4) if pnl else 0.0, "total_pnl": round(sum(pnl), 6), "long_short_imbalance": distribution.get("imbalance", 0.0), "top_blockers": [{"reason": k, "count": v} for k, v in sorted(counts.items(), key=lambda item: -item[1])[:8]]}
+
+def build_cta_dashboard_snapshot(*, family_records: list[TriggerFamilyPerformance], journal_rows: list[TradeJournalRow], hours: int | None = None, config_meta: dict[str, Any] | None = None) -> dict[str, Any]:
     scoped_rows = filter_journal_rows_by_hours(journal_rows, hours)
     long_board = build_family_leaderboard(family_records, side="long")
     short_board = build_family_leaderboard(family_records, side="short")
@@ -340,6 +415,10 @@ def build_cta_dashboard_snapshot(*, family_records: list[TriggerFamilyPerformanc
     family_score_timeseries = build_family_score_timeseries(scoped_rows, family_catalog)
     regime_transitions = build_regime_transition_comparison(scoped_rows)
     family_regime_actions = build_family_regime_actions(regime_matrix)
+    pre_signal_observations = build_pre_signal_observations(scoped_rows)
+    family_health = build_family_health(family_records, scoped_rows, config_meta=config_meta)
+    long_short_distribution = build_long_short_distribution(scoped_rows)
+    short_diagnostics = build_short_diagnostics(scoped_rows, long_short_distribution)
 
     return {
         "overview": {
@@ -348,6 +427,7 @@ def build_cta_dashboard_snapshot(*, family_records: list[TriggerFamilyPerformanc
             "short_family_count": len(short_board),
             "recent_close_count": sum(1 for row in scoped_rows if row.event_type == "trade_close"),
             "recent_blocked_count": sum(1 for row in scoped_rows if row.event_type == "blocked_signal"),
+            "recent_pre_signal_count": sum(1 for row in scoped_rows if row.event_type == "pre_signal_observation"),
         },
         "leaderboards": {
             "all": all_board[:12],
@@ -359,5 +439,9 @@ def build_cta_dashboard_snapshot(*, family_records: list[TriggerFamilyPerformanc
         "regime_transitions": regime_transitions,
         "family_regime_actions": family_regime_actions,
         "family_score_timeseries": family_score_timeseries,
+        "pre_signal_observations": pre_signal_observations,
+        "family_health": family_health,
+        "long_short_distribution": long_short_distribution,
+        "short_diagnostics": short_diagnostics,
         "decision_audit": decision_audit,
     }

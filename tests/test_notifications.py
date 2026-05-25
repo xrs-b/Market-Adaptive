@@ -291,7 +291,25 @@ class NotificationTests(unittest.TestCase):
         field_map = {field["name"]: field["value"] for field in embed["fields"]}
         self.assertEqual(field_map["交易对"], "BTC/USDT")
         self.assertEqual(field_map["成交笔数"], "2")
+        self.assertEqual(field_map["成交均价"], "100.6667")
+        self.assertEqual(field_map["累计成交张数"], "0.30000000")
+        self.assertEqual(field_map["折算币数量"], "0.30000000")
         self.assertEqual(field_map["累计成交额"], "30.2000 USDT")
+
+    def test_discord_notifier_grid_fill_average_uses_contract_value_adjusted_quantity(self) -> None:
+        notifier = CapturingDiscordNotifier()
+
+        notifier.notify_trade("buy", 76860.4, 1.0, "grid", "grid_fill_websocket", symbol="BTC/USDT", notional=768.604, contract_value=0.01)
+
+        bucket_key = "grid::grid_fill_websocket::BUY::BTC/USDT"
+        notifier.submit_and_wait(notifier._flush_grid_trade_bucket_after_delay(bucket_key, 0.0))
+
+        embed = notifier.payloads[0]["embeds"][0]
+        field_map = {field["name"]: field["value"] for field in embed["fields"]}
+        self.assertEqual(field_map["成交均价"], "76860.4000")
+        self.assertEqual(field_map["累计成交张数"], "1.00000000")
+        self.assertEqual(field_map["折算币数量"], "0.01000000")
+        self.assertEqual(field_map["累计成交额"], "768.6040 USDT")
 
     def test_discord_notifier_builds_cta_open_trade_payload(self) -> None:
         notifier = CapturingDiscordNotifier()

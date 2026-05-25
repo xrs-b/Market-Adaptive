@@ -109,18 +109,20 @@ class DiscordNotifier:
         payload = self._build_embed_payload(title=title, description=message, color=color)
         return self._submit_coroutine(self._post_payload(payload))
 
-    def notify_trade(self, side: str, price: float, size: float, strategy: str, signal: str, *, symbol: str | None = None, notional: float | None = None) -> bool:
+    def notify_trade(self, side: str, price: float, size: float, strategy: str, signal: str, *, symbol: str | None = None, notional: float | None = None, contract_value: float | None = None) -> bool:
         if not self.enabled:
             return False
 
         normalized_strategy = str(strategy or "unknown")
         normalized_signal = str(signal or "trade")
         resolved_notional = abs(float(notional)) if notional not in (None, "") else abs(float(price)) * abs(float(size))
+        resolved_contract_value = self._resolve_contract_value(price=float(price), size=float(size), notional=float(resolved_notional), explicit=contract_value)
         trade = {
             "side": str(side).upper(),
             "price": float(price),
             "size": float(size),
             "notional": float(resolved_notional),
+            "contract_value": float(resolved_contract_value),
             "captured_at": datetime.now(timezone.utc),
         }
 
@@ -132,13 +134,37 @@ class DiscordNotifier:
             {"name": "交易对", "value": str(symbol or self._resolve_symbol_from_signal(normalized_signal)), "inline": True},
             {"name": "方向", "value": trade["side"], "inline": True},
             {"name": "策略", "value": self._display_strategy_name(normalized_strategy), "inline": True},
-            {"name": "成交价", "value": f"{trade['price']:.4f}", "inline": True},
-            {"name": "成交量", "value": f"{trade['size']:.8f}", "inline": True},
+            {"name": "成交价", "value": f"{self._display_trade_price(trade['price'], trade.get('contract_value')):.4f}", "inline": True},
+            {"name": "成交张数", "value": f"{trade['size']:.8f}", "inline": True},
             {"name": "名义成交额", "value": f"{trade['notional']:.4f} USDT", "inline": True},
             {"name": "触发信号", "value": normalized_signal, "inline": False},
         ]
         payload = self._build_embed_payload(title=title, description="订单已成交，请留意仓位变化与后续管理动作。", color=EMBED_COLOR_GOOD, fields=fields)
         return self._submit_coroutine(self._post_payload(payload))
+
+    @staticmethod
+    def _resolve_contract_value(*, price: float, size: float, notional: float, explicit: float | None = None) -> float:
+        if explicit not in (None, "", 0, 0.0):
+            return abs(float(explicit))
+        denominator = abs(float(price)) * abs(float(size))
+        if denominator <= 1e-12 or notional <= 0:
+            return 1.0
+        inferred = abs(float(notional)) / denominator
+        return inferred if inferred > 0 else 1.0
+
+    @staticmethod
+    def _display_trade_price(price: float, contract_value: float | None = None) -> float:
+        cv = abs(float(contract_value or 1.0))
+        if cv <= 0:
+            cv = 1.0
+        return float(price)
+
+    @staticmethod
+    def _display_contract_quantity(size: float, contract_value: float | None = None) -> float:
+        cv = abs(float(contract_value or 1.0))
+        if cv <= 0:
+            cv = 1.0
+        return abs(float(size)) * cv
 
     def notify_profit(
         self,
@@ -370,9 +396,10 @@ class DiscordNotifier:
         if bucket is None or not bucket.trades:
             return
 
-        total_size = sum(float(item["size"]) for item in bucket.trades)
+        total_contracts = sum(float(item["size"]) for item in bucket.trades)
+        total_quantity = sum(self._display_contract_quantity(float(item["size"]), item.get("contract_value")) for item in bucket.trades)
         total_notional = sum(float(item["notional"]) for item in bucket.trades)
-        avg_price = total_notional / total_size if total_size > 0 else 0.0
+        avg_price = total_notional / total_quantity if total_quantity > 0 else 0.0
         latest_trade = bucket.trades[-1]
         fields = [
             {"name": "交易对", "value": bucket.symbol, "inline": True},
@@ -380,7 +407,8 @@ class DiscordNotifier:
             {"name": "成交笔数", "value": str(len(bucket.trades)), "inline": True},
             {"name": "统计窗口", "value": "60秒", "inline": True},
             {"name": "成交均价", "value": f"{avg_price:.4f}", "inline": True},
-            {"name": "累计成交量", "value": f"{total_size:.8f}", "inline": True},
+            {"name": "累计成交张数", "value": f"{total_contracts:.8f}", "inline": True},
+            {"name": "折算币数量", "value": f"{total_quantity:.8f}", "inline": True},
             {"name": "累计成交额", "value": f"{total_notional:.4f} USDT", "inline": True},
             {"name": "策略", "value": self._display_strategy_name(bucket.strategy), "inline": True},
             {"name": "触发信号", "value": bucket.signal, "inline": True},

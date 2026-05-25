@@ -15,6 +15,7 @@ const bots = ref(null)
 const positions = ref([])
 const orders = ref([])
 const logs = ref([])
+const logStatus = ref({})
 const timeline = ref({ activity: [], equityPoints: [], ctaEvents: [], riskEvents: [] })
 const logFilter = ref('全部')
 const moduleFilter = ref('全部模块')
@@ -51,6 +52,19 @@ const ctaHeatmapSortMode = ref('bias_abs')
 const ctaFamilyTrendMode = ref('cum_pnl')
 const ctaPresetAudit = ref([])
 const positionProfileCards = computed(() => Object.entries(positionProfiles.value?.profiles || {}).map(([key, profile]) => ({ key, ...(profile || {}) })))
+const safetySummary = computed(() => overview.value?.safetySummary || {})
+const safetyWarnings = computed(() => safetySummary.value?.warnings || [])
+const safetyCards = computed(() => {
+  const s = safetySummary.value || {}
+  return [
+    { label: '仓位方案', value: s.profile || '--', hint: s.profileHighRisk ? '高进攻 / 高风险' : '普通', tone: s.profileHighRisk ? 'rose' : 'emerald' },
+    { label: '交易模式', value: s.liveTrading ? '实盘' : (s.simulatedTrading ? '模拟盘' : (s.sandbox ? 'Sandbox' : '--')), hint: `sandbox=${boolText(s.sandbox)} / simulated=${boolText(s.simulatedTrading)}`, tone: s.liveTrading ? 'rose' : 'emerald' },
+    { label: 'FAST_TRACK 门槛', value: s.fastTrackExtraGatesEnabled ? '已开启' : '未开启', hint: `score ${formatNumber(s.fastTrackMinScore)} / RR ${formatNumber(s.fastTrackMinRR)}`, tone: s.fastTrackExtraGatesEnabled ? 'emerald' : 'amber' },
+    { label: '专业信号门控', value: s.proSignalEnabled ? '已开启' : '未开启', hint: `RR ${formatNumber(s.proSignalMinRR)} / location ${formatNumber(s.proSignalMinLocationScore)} / 黑白名单 ${s.disabledTriggerFamilyCount || 0}/${s.allowedTriggerFamilyCount || 0}`, tone: s.proSignalEnabled ? 'emerald' : 'amber' },
+    { label: 'CTA 理论曝险', value: `${formatNumber(s.ctaExposureMultiple)}x`, hint: `margin ${formatNumber(s.ctaMarginFraction, 3)} / lev ${formatNumber(s.ctaLeverage, 1)}`, tone: Number(s.ctaExposureMultiple || 0) >= 0.24 ? 'amber' : 'sky' },
+    { label: 'Grid 理论曝险', value: `${formatNumber(s.gridExposureMultiple)}x`, hint: `alloc ${formatNumber(s.gridAllocation, 2)} / lev ${formatNumber(s.gridLeverage, 1)} / levels ${s.gridLevels ?? '--'}`, tone: Number(s.gridExposureMultiple || 0) >= 1.5 ? 'amber' : 'sky' },
+  ]
+})
 const ctaDashboard = ref({ overview: {}, leaderboards: { all: [], long: [], short: [] }, family_catalog: [], regime_matrix: [], regime_transitions: [], family_score_timeseries: [], decision_audit: { missed_opportunities: [], bad_releases: [] }, suggestions: [], tuningSnapshot: {} })
 
 const viewTabs = [
@@ -231,6 +245,84 @@ const ctaMissedRows = computed(() => ctaDashboard.value?.decision_audit?.missed_
 const ctaBadReleaseRows = computed(() => ctaDashboard.value?.decision_audit?.bad_releases || [])
 const ctaSuggestions = computed(() => ctaDashboard.value?.suggestions || [])
 const ctaTuningSnapshot = computed(() => ctaDashboard.value?.tuningSnapshot || {})
+
+const ctaPreSignalRows = computed(() => {
+  const dashboard = ctaDashboard.value || {}
+  const direct = dashboard.pre_signal_observations || dashboard.preSignalObservations || dashboard.pre_signals || dashboard.preSignals
+  const audit = dashboard.decision_audit?.pre_signal_observations || dashboard.decision_audit?.pre_signals
+  return Array.isArray(direct) ? direct : Array.isArray(audit) ? audit : []
+})
+const ctaFamilyHealthRows = computed(() => {
+  const buckets = new Map()
+  const ingest = (row, sideHint = '') => {
+    const family = String(row?.trigger_family || row?.family || '').trim()
+    if (!family) return
+    const side = String(row?.side || sideHint || 'any').toLowerCase()
+    const bucket = buckets.get(family) || { family, long: null, short: null, totalPnl: 0, samples: 0, bestScore: -Infinity }
+    const normalized = {
+      score: Number(row?.score || 0),
+      winRate: Number(row?.win_rate || row?.winRate || 0),
+      pnl: Number(row?.total_pnl || row?.totalPnl || 0),
+      samples: Number(row?.close_count || row?.trade_count || row?.samples || 0),
+    }
+    if (side.includes('long')) bucket.long = normalized
+    else if (side.includes('short')) bucket.short = normalized
+    bucket.totalPnl += normalized.pnl
+    bucket.samples += normalized.samples
+    bucket.bestScore = Math.max(bucket.bestScore, normalized.score)
+    buckets.set(family, bucket)
+  }
+  ;(ctaTopFamilies.value || []).forEach((row) => ingest(row))
+  ;(ctaLongFamilies.value || []).forEach((row) => ingest(row, 'long'))
+  ;(ctaShortFamilies.value || []).forEach((row) => ingest(row, 'short'))
+  return [...buckets.values()].map((row) => {
+    const longWr = row.long?.winRate ?? 0
+    const shortWr = row.short?.winRate ?? 0
+    const balance = row.long && row.short ? longWr - shortWr : null
+    let status = '观察'
+    if (row.samples >= 3 && row.totalPnl > 0 && row.bestScore >= 0.05) status = '健康'
+    if (row.samples >= 3 && row.totalPnl < 0) status = '降权'
+    if (balance !== null && Math.abs(balance) >= 0.2) status = balance > 0 ? '偏多' : '偏空'
+    return { ...row, balance, status }
+  }).sort((a, b) => Math.abs(b.totalPnl) - Math.abs(a.totalPnl)).slice(0, 12)
+})
+const ctaShortDiagnosticRows = computed(() => {
+  const matrixRows = (ctaRegimeMatrix.value || []).filter((row) => String(row?.side || '').toLowerCase() === 'short')
+  const mapped = matrixRows.map((row) => {
+    const pnl = Number(row.total_pnl || 0)
+    const wr = Number(row.win_rate || 0)
+    const trades = Number(row.trade_count || 0)
+    let diagnosis = '观察样本'
+    if (trades >= 2 && pnl > 0 && wr >= 0.45) diagnosis = '可保留/放大'
+    if (trades >= 2 && pnl < 0 && wr < 0.45) diagnosis = '需收紧'
+    if (trades < 2) diagnosis = '样本不足'
+    return { ...row, diagnosis }
+  })
+  const auditRows = [...(ctaMissedRows.value || []), ...(ctaBadReleaseRows.value || [])]
+    .filter((row) => String(row?.side || '').toLowerCase().includes('short'))
+    .slice(0, 6)
+    .map((row) => ({
+      market_regime: row.market_regime || '--',
+      trigger_family: row.trigger_family || '--',
+      trade_count: row.pnl === undefined ? 'blocked' : 'close',
+      win_rate: row.confidence,
+      total_pnl: row.pnl ?? 0,
+      diagnosis: row.pnl === undefined ? '疑似错杀' : '放错复盘',
+      audit: true,
+    }))
+  return [...mapped.sort((a, b) => Number(a.total_pnl || 0) - Number(b.total_pnl || 0)).slice(0, 8), ...auditRows]
+})
+const ctaTuningGroups = computed(() => {
+  const snap = ctaTuningSnapshot.value || {}
+  const groups = [
+    { title: '多空准入', keys: ['cta.long_standard_min_confidence', 'cta.short_standard_min_confidence', 'cta.near_breakout_release_standard_min_confidence', 'cta.fast_track_min_entry_decider_score', 'cta.fast_track_minimum_expected_rr'] },
+    { title: 'Family 自适应', keys: ['cta.family_adaptation_boost_cap', 'cta.family_adaptation_fast_start_multiplier', 'cta.market_regime_adaptation_enabled'] },
+    { title: 'Long Family 开关', keys: ['cta.disable_near_breakout_release_long', 'cta.disable_price_led_override_long', 'cta.disable_trend_continuation_long', 'cta.disable_bullish_memory_breakout_long', 'cta.trend_continuation_minimum_entry_pathway'] },
+    { title: '短线衰减 / 诊断', keys: ['cta.loss_acceleration_decay_enabled', 'cta.loss_acceleration_consecutive_losses', 'cta.loss_acceleration_decay_score', 'cta.loss_acceleration_decay_ttl_seconds', 'cta.pre_signal_observation_log_enabled'] },
+    { title: 'Regime 系数', keys: ['cta.entry_decider_trend_follow_regime_coefficient', 'cta.entry_decider_countertrend_regime_coefficient', 'cta.entry_decider_sideways_reversal_regime_coefficient', 'cta.entry_decider_sideways_breakout_regime_coefficient'] },
+  ]
+  return groups.map((group) => ({ ...group, items: group.keys.map((key) => ({ key, value: snap[key] })) }))
+})
 const ctaOverviewCards = computed(() => {
   const overviewData = ctaDashboard.value?.overview || {}
   return [
@@ -1140,6 +1232,7 @@ function logout(options = {}) {
   positions.value = []
   orders.value = []
   logs.value = []
+  logStatus.value = {}
   timeline.value = { activity: [], equityPoints: [], ctaEvents: [], riskEvents: [] }
   ctaSelectedFamily.value = ''
   ctaSelectedRegime.value = ''
@@ -1189,6 +1282,7 @@ async function refreshAll(options = {}) {
     positions.value = positionsRes.items || []
     orders.value = ordersRes.items || []
     logs.value = logsRes.items || []
+    logStatus.value = logsRes.status || overviewRes.logStatus || {}
     timeline.value = timelineRes || { activity: [], equityPoints: [], ctaEvents: [], riskEvents: [] }
     initialEquity.value = Number(initialEquityRes?.initialEquity || 0)
     initialEquityMeta.value = { source: initialEquityRes?.source || '--', updatedAt: initialEquityRes?.updatedAt || '' }
@@ -1550,6 +1644,27 @@ async function saveConfigSections() {
   }
 }
 
+async function rotateLogs() {
+  if (!token.value) return
+  const sizeText = logStatus.value?.sizeText || '--'
+  if (!confirm(`确认归档并轮换当前主日志？\n\n当前大小：${sizeText}\n操作会把现有日志移入 archive，并创建新的空日志文件。不会重启服务。`)) return
+  try {
+    const result = await api('/api/logs/rotate', {
+      method: 'POST',
+      headers: authHeaders.value,
+      body: JSON.stringify({ confirm: true }),
+    })
+    logStatus.value = result.status || {}
+    actionMessage.value = result.message || '日志已归档轮换。'
+    recordControlAction('日志轮换', '成功', actionMessage.value)
+    await refreshAll({ silent: true })
+  } catch (error) {
+    if (error?.status === 401) { logout({ expired: true }); return }
+    actionMessage.value = '日志轮换失败。'
+    recordControlAction('日志轮换', '失败', error?.message || '接口调用失败')
+  }
+}
+
 async function startSystem() {
   await sendSystemAction('/api/system/start', '确认启动主控进程？', '已发出启动指令。')
 }
@@ -1710,6 +1825,29 @@ onBeforeUnmount(() => {
             <div class="text-[12px] text-slate-500 dark:text-slate-400">{{ item.label }}</div>
             <div class="mt-1 text-lg font-semibold tracking-tight">{{ item.value }}</div>
             <div class="mt-1.5 text-[12px] text-slate-500 dark:text-slate-400">{{ item.sub }}</div>
+          </div>
+        </section>
+
+        <section v-if="currentView === 'overview'" class="mt-4 elevated-panel p-3.5">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <h3 class="panel-title !mt-0">运行安全摘要</h3>
+              <p class="mt-1 text-[13px] text-slate-500 dark:text-slate-400">明确显示仓位方案 C、高风险实盘/模拟状态、FAST_TRACK 门槛以及 CTA/Grid 曝险。</p>
+            </div>
+            <span :class="['result-badge', safetySummary.liveTrading || safetySummary.profileHighRisk ? 'text-rose-600 dark:text-rose-300' : '']">{{ safetySummary.liveTrading ? '实盘' : '测试/模拟' }}</span>
+          </div>
+          <div class="mt-3 grid gap-2 md:grid-cols-5">
+            <div v-for="item in safetyCards" :key="item.label" :class="['rounded-lg border p-3 shadow-sm', cardToneClass(item.tone)]">
+              <div class="text-[11px] text-slate-500 dark:text-slate-400">{{ item.label }}</div>
+              <div class="mt-1 text-[16px] font-semibold">{{ item.value }}</div>
+              <div class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">{{ item.hint }}</div>
+            </div>
+          </div>
+          <div class="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+            <div v-for="item in safetyWarnings" :key="`${item.title}-${item.detail}`" :class="['rounded-lg border p-3 text-[12px]', hintLevelClass(item.level === 'danger' ? 'danger' : item.level === 'warn' ? 'warn' : 'ok')]">
+              <div class="font-semibold">{{ item.title }}</div>
+              <div class="mt-1 opacity-90">{{ item.detail }}</div>
+            </div>
           </div>
         </section>
 
@@ -1977,24 +2115,64 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div class="elevated-panel p-4">
-            <div class="panel-header">
-              <div>
-                <div class="panel-kicker">Quick Tuning</div>
-                <h4 class="panel-title">Family 快速调参</h4>
-                <p class="panel-desc">直接在驾驶舱里做常用调参，不用手动翻配置页。</p>
+          <div class="grid gap-3 xl:grid-cols-[1.1fr,0.9fr]">
+            <div class="elevated-panel overflow-hidden">
+              <div class="toolbar-strip"><div><h4 class="subpanel-title">预信号观察</h4><p class="subpanel-desc">跟踪尚未成型但接近触发的候选信号，用于判断是否错过 early setup。</p></div></div>
+              <div class="table-wrap m-3 overflow-auto max-h-[260px]">
+                <table class="data-table min-w-full divide-y divide-slate-200 text-sm dark:divide-slate-800">
+                  <thead class="sticky top-0 bg-slate-50 dark:bg-slate-950/95"><tr><th class="text-left font-medium text-slate-500">时间</th><th class="text-left font-medium text-slate-500">Family</th><th class="text-left font-medium text-slate-500">方向</th><th class="text-left font-medium text-slate-500">状态</th><th class="text-right font-medium text-slate-500">Conf</th></tr></thead>
+                  <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+                    <tr v-for="row in ctaPreSignalRows.slice(0, 10)" :key="`${row.timestamp || row.time}-${row.trigger_family || row.family}`"><td class="whitespace-nowrap text-[12px] text-slate-500">{{ formatShortTime(row.timestamp || row.time) }}</td><td class="font-medium">{{ row.trigger_family || row.family || '--' }}</td><td>{{ row.side || '--' }}</td><td>{{ row.candidate_state || row.action || row.decider || '--' }}</td><td class="text-right tabular-nums">{{ formatNumber(row.confidence ?? row.signal_confidence, 4) }}</td></tr>
+                    <tr v-if="!ctaPreSignalRows.length"><td colspan="5" class="py-6 text-center text-[13px] text-slate-500 dark:text-slate-400">当前 API 暂无预信号观察记录；若已开启记录，等待新周期写入。</td></tr>
+                  </tbody>
+                </table>
               </div>
             </div>
-            <div class="mt-3 flex flex-wrap gap-2">
-              <button class="rounded-md bg-sky-600 px-3 py-2 text-[12.5px] font-medium text-white transition hover:bg-sky-700" @click="applyCtaPreset({ 'cta.disable_trend_continuation_long': false, 'cta.trend_continuation_minimum_entry_pathway': 'FAST_TRACK' }, '已偏向放大趋势延续 family')">放大趋势延续</button>
-              <button class="rounded-md bg-amber-500 px-3 py-2 text-[12.5px] font-medium text-white transition hover:bg-amber-600" @click="applyCtaPreset({ 'cta.disable_trend_continuation_long': true, 'cta.disable_near_breakout_release_long': true }, '已压制追突破型 family')">压制追突破</button>
-              <button class="rounded-md bg-emerald-600 px-3 py-2 text-[12.5px] font-medium text-white transition hover:bg-emerald-700" @click="applyCtaPreset({ 'cta.long_standard_min_confidence': 0.55, 'cta.short_standard_min_confidence': 0.53 }, '已适度放宽多空标准置信度')">适度放宽置信度</button>
-              <button class="rounded-md bg-rose-600 px-3 py-2 text-[12.5px] font-medium text-white transition hover:bg-rose-700" @click="applyCtaPreset({ 'cta.long_standard_min_confidence': 0.62, 'cta.short_standard_min_confidence': 0.60, 'cta.family_adaptation_boost_cap': 0.14 }, '已收紧放行并降低 family 自适应加成')">收紧放行</button>
-              <button class="rounded-md border border-slate-300 px-3 py-2 text-[12.5px] font-medium transition hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800" @click="rollbackCtaTuning">一键回滚 CTA 参数</button>
-              <button class="rounded-md border border-slate-300 px-3 py-2 text-[12.5px] font-medium transition hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800" @click="currentView = 'config'; activeConfigSection = 'cta'; activeConfigGroup = '自适应 / Family 开关'">打开 CTA 配置</button>
+            <div class="elevated-panel overflow-hidden">
+              <div class="toolbar-strip"><div><h4 class="subpanel-title">Family 健康度</h4><p class="subpanel-desc">合并总榜/多头/空头排行，快速识别健康、偏多、偏空或需降权 family。</p></div></div>
+              <div class="table-wrap m-3 overflow-auto max-h-[260px]">
+                <table class="data-table min-w-full divide-y divide-slate-200 text-sm dark:divide-slate-800">
+                  <thead class="sticky top-0 bg-slate-50 dark:bg-slate-950/95"><tr><th class="text-left font-medium text-slate-500">Family</th><th class="text-left font-medium text-slate-500">状态</th><th class="text-right font-medium text-slate-500">样本</th><th class="text-right font-medium text-slate-500">PnL</th><th class="text-right font-medium text-slate-500">多空差</th></tr></thead>
+                  <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+                    <tr v-for="row in ctaFamilyHealthRows" :key="`health-${row.family}`"><td class="font-medium">{{ row.family }}</td><td><span :class="['rounded-full px-2 py-0.5 text-[10px] font-medium', row.status === '健康' ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300' : row.status === '降权' ? 'bg-rose-500/15 text-rose-600 dark:text-rose-300' : row.status === '偏多' ? 'bg-sky-500/15 text-sky-600 dark:text-sky-300' : row.status === '偏空' ? 'bg-orange-500/15 text-orange-600 dark:text-orange-300' : 'bg-slate-500/15 text-slate-600 dark:text-slate-300']">{{ row.status }}</span></td><td class="text-right tabular-nums">{{ row.samples }}</td><td class="text-right tabular-nums" :class="pnlClass(row.totalPnl)">{{ signedNumber(row.totalPnl, 4) }}</td><td class="text-right tabular-nums">{{ row.balance === null ? '--' : signedNumber(row.balance, 3) }}</td></tr>
+                    <tr v-if="!ctaFamilyHealthRows.length"><td colspan="5" class="py-6 text-center text-[13px] text-slate-500 dark:text-slate-400">暂无 family 健康度数据</td></tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
-            <div class="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-[12px] text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
-              当前 CTA 快照：{{ JSON.stringify(ctaTuningSnapshot) }}
+          </div>
+
+          <div class="grid gap-3 xl:grid-cols-[0.95fr,1.05fr]">
+            <div class="elevated-panel overflow-hidden">
+              <div class="toolbar-strip"><div><h4 class="subpanel-title">Short-side 诊断</h4><p class="subpanel-desc">聚焦做空侧在不同 regime / family 下的亏损、错杀和放错样本。</p></div></div>
+              <div class="table-wrap m-3 overflow-auto max-h-[300px]">
+                <table class="data-table min-w-full divide-y divide-slate-200 text-sm dark:divide-slate-800">
+                  <thead class="sticky top-0 bg-slate-50 dark:bg-slate-950/95"><tr><th class="text-left font-medium text-slate-500">Regime</th><th class="text-left font-medium text-slate-500">Family</th><th class="text-left font-medium text-slate-500">诊断</th><th class="text-right font-medium text-slate-500">样本</th><th class="text-right font-medium text-slate-500">PnL</th></tr></thead>
+                  <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+                    <tr v-for="row in ctaShortDiagnosticRows" :key="`short-diag-${row.market_regime}-${row.trigger_family}-${row.diagnosis}`"><td>{{ row.market_regime }}</td><td class="font-medium">{{ row.trigger_family }}</td><td>{{ row.diagnosis }}</td><td class="text-right tabular-nums">{{ row.trade_count }}</td><td class="text-right tabular-nums" :class="pnlClass(row.total_pnl)">{{ signedNumber(row.total_pnl, 4) }}</td></tr>
+                    <tr v-if="!ctaShortDiagnosticRows.length"><td colspan="5" class="py-6 text-center text-[13px] text-slate-500 dark:text-slate-400">暂无 short-side 诊断数据</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div class="elevated-panel p-4">
+              <div class="panel-header"><div><div class="panel-kicker">Quick Tuning</div><h4 class="panel-title">CTA 调参分组</h4><p class="panel-desc">按准入、Family、Long 开关、短线衰减和 Regime 系数展示当前快照。</p></div></div>
+              <div class="mt-3 grid gap-3 md:grid-cols-2">
+                <div v-for="group in ctaTuningGroups" :key="group.title" class="rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/40">
+                  <div class="text-[12px] font-semibold text-slate-700 dark:text-slate-200">{{ group.title }}</div>
+                  <div class="mt-2 space-y-1.5">
+                    <div v-for="item in group.items" :key="item.key" class="flex items-start justify-between gap-3 text-[11px]"><span class="break-all text-slate-500 dark:text-slate-400">{{ item.key.replace('cta.', '') }}</span><span class="rounded bg-white px-1.5 py-0.5 font-mono text-slate-700 shadow-sm dark:bg-slate-950 dark:text-slate-200">{{ item.value === undefined || item.value === null ? '--' : item.value }}</span></div>
+                  </div>
+                </div>
+              </div>
+              <div class="mt-3 flex flex-wrap gap-2">
+                <button class="rounded-md bg-sky-600 px-3 py-2 text-[12.5px] font-medium text-white transition hover:bg-sky-700" @click="applyCtaPreset({ 'cta.disable_trend_continuation_long': false, 'cta.trend_continuation_minimum_entry_pathway': 'FAST_TRACK' }, '已偏向放大趋势延续 family')">放大趋势延续</button>
+                <button class="rounded-md bg-amber-500 px-3 py-2 text-[12.5px] font-medium text-white transition hover:bg-amber-600" @click="applyCtaPreset({ 'cta.disable_trend_continuation_long': true, 'cta.disable_near_breakout_release_long': true }, '已压制追突破型 family')">压制追突破</button>
+                <button class="rounded-md bg-emerald-600 px-3 py-2 text-[12.5px] font-medium text-white transition hover:bg-emerald-700" @click="applyCtaPreset({ 'cta.long_standard_min_confidence': 0.55, 'cta.short_standard_min_confidence': 0.53 }, '已适度放宽多空标准置信度')">适度放宽置信度</button>
+                <button class="rounded-md bg-rose-600 px-3 py-2 text-[12.5px] font-medium text-white transition hover:bg-rose-700" @click="applyCtaPreset({ 'cta.long_standard_min_confidence': 0.62, 'cta.short_standard_min_confidence': 0.60, 'cta.family_adaptation_boost_cap': 0.14 }, '已收紧放行并降低 family 自适应加成')">收紧放行</button>
+                <button class="rounded-md border border-slate-300 px-3 py-2 text-[12.5px] font-medium transition hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800" @click="rollbackCtaTuning">一键回滚 CTA 参数</button>
+                <button class="rounded-md border border-slate-300 px-3 py-2 text-[12.5px] font-medium transition hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800" @click="currentView = 'config'; activeConfigSection = 'cta'; activeConfigGroup = '自适应 / Family 开关'">打开 CTA 配置</button>
+              </div>
             </div>
           </div>
 
@@ -2605,7 +2783,10 @@ onBeforeUnmount(() => {
                 <p class="panel-desc">把筛选、统计、重点事件和主日志表拆成标准审计台结构。</p>
               </div>
               <div class="flex flex-wrap items-center gap-2">
+                <span class="result-badge">大小 {{ logStatus.sizeText || '--' }}</span>
+                <span class="result-badge">错误 {{ logStatus.errorCount ?? 0 }} / 警告 {{ logStatus.warningCount ?? 0 }}</span>
                 <span class="result-badge">结果 {{ logTableRows.length }}</span>
+                <button class="filter-pill filter-pill-muted" @click="rotateLogs">归档/轮换日志</button>
                 <button class="filter-pill filter-pill-muted" @click="logKeyword = ''; logQuickFilter = '全部'; logFilter = '全部'; moduleFilter = '全部模块'">清空筛选</button>
               </div>
             </div>
@@ -2649,6 +2830,11 @@ onBeforeUnmount(() => {
                 </div>
 
                 <div class="stat-strip sm:grid-cols-2">
+                  <div class="stat-cell">
+                    <div class="text-[10px] uppercase tracking-[0.14em] text-slate-400">日志大小</div>
+                    <div class="mt-1 text-[18px] font-semibold tracking-tight text-sky-600 dark:text-sky-400">{{ logStatus.sizeText || '--' }}</div>
+                    <div class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">样本 {{ logStatus.lineSample ?? logs.length }} 行</div>
+                  </div>
                   <div v-for="item in logAuditSummaryCards" :key="item.label" class="stat-cell">
                     <div class="text-[10px] uppercase tracking-[0.14em] text-slate-400">{{ item.label }}</div>
                     <div :class="['mt-1 text-[18px] font-semibold tracking-tight', item.tone === 'rose' ? 'text-rose-600 dark:text-rose-400' : item.tone === 'amber' ? 'text-amber-600 dark:text-amber-400' : item.tone === 'sky' ? 'text-sky-600 dark:text-sky-400' : 'text-slate-900 dark:text-slate-100']">{{ item.value }}</div>
@@ -3006,6 +3192,9 @@ onBeforeUnmount(() => {
                             <select v-model="field.value" class="config-input">
                               <option v-for="option in field.options || []" :key="option" :value="option">{{ option }}</option>
                             </select>
+                          </template>
+                          <template v-else-if="field.type === 'textarea'">
+                            <textarea v-model="field.value" :rows="field.rows || 8" class="config-input min-h-[220px] font-mono text-[11.5px]"></textarea>
                           </template>
                           <template v-else>
                             <input v-model="field.value" :type="field.type === 'number' ? 'number' : 'text'" :step="field.step || 'any'" class="config-input" />

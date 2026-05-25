@@ -7,7 +7,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from market_adaptive.config import CTAConfig, ExecutionConfig
@@ -29,6 +29,7 @@ from market_adaptive.ml_signal_engine import MLSignalDecision, MarketAdaptiveMLE
 from market_adaptive.strategies.mtf_engine import MTFSignal, MultiTimeframeSignalEngine
 from market_adaptive.strategies.obv_gate import resolve_dynamic_obv_gate_for_signal
 from market_adaptive.strategies.order_flow_sentinel import OrderFlowAssessment, OrderFlowSentinel
+from market_adaptive.strategies.pro_signal_engine import ProfessionalSignalDecision, ProfessionalSignalEngine
 from market_adaptive.strategies.signal_profiler import SignalProfiler
 
 logger = logging.getLogger(__name__)
@@ -325,6 +326,7 @@ class FinalEntryPermit:
     position_side: str = ""
     notional_price: float = 0.0
     order_flow_assessment: OrderFlowAssessment | None = None
+    pro_signal_decision: ProfessionalSignalDecision | None = None
 
 
 @dataclass
@@ -350,6 +352,7 @@ class ManagedPosition:
     entry_order_id: str | None = None
     position_size_before: float | None = None
     position_size_after: float | None = None
+    entry_metadata: dict | None = None
 
     @property
     def direction(self) -> int:
@@ -444,6 +447,7 @@ class CTARobot(BaseStrategyRobot):
         self.position: ManagedPosition | None = None
         self.mtf_engine = MultiTimeframeSignalEngine(client, config)
         self.order_flow_sentinel = OrderFlowSentinel(client, config)
+        self.pro_signal_engine = ProfessionalSignalEngine(client, config, symbol=config.symbol)
         self.statistical_pricing = StatisticalPricing(config.symbol)
         self.ml_engine = MarketAdaptiveMLEngine(
             enabled=bool(getattr(config, "ml_enabled", False)),
@@ -875,16 +879,20 @@ class CTARobot(BaseStrategyRobot):
             else:
                 action = "cta:no_signal" if self.position is None else "cta:hold"
 
-        if self.position is None and action in {
-            "cta:order_flow_blocked",
-            "cta:entry_quality_blocked",
-            "cta:entry_location_blocked",
-            "cta:reward_risk_blocked",
-            "cta:repeated_entry_zone_cooldown",
-            "cta:fast_track_reuse_cooldown",
-            "cta:same_direction_cooldown",
-            "cta:range_filter_blocked",
-        }:
+        if self.position is None and (
+            action in {
+                "cta:order_flow_blocked",
+                "cta:entry_quality_blocked",
+                "cta:entry_location_blocked",
+                "cta:reward_risk_blocked",
+                "cta:repeated_entry_zone_cooldown",
+                "cta:fast_track_reuse_cooldown",
+                "cta:same_direction_cooldown",
+                "cta:range_filter_blocked",
+            }
+            or action.startswith("cta:pro_signal_")
+            or action in {"cta:trigger_family_disabled", "cta:trigger_family_not_allowed", "cta:trigger_family_daily_loss_limit", "cta:same_side_6h_entry_limit"}
+        ):
             self._journal_event(
                 event_type="blocked_signal",
                 side="long" if signal.raw_direction > 0 else "short" if signal.raw_direction < 0 else None,
@@ -911,6 +919,7 @@ class CTARobot(BaseStrategyRobot):
                     "entry_decider_score": float(signal.entry_decider_score),
                     "entry_decider_reasons": list(signal.entry_decider_reasons),
                     "market_regime": self._current_market_regime(),
+                    **self._pro_signal_metadata_for_journal(signal),
                 },
             )
 
@@ -2828,6 +2837,17 @@ class CTARobot(BaseStrategyRobot):
                 float(stop_price),
                 float(stop_distance),
             )
+        entry_metadata = self._build_entry_metadata(
+            signal=signal,
+            notional_price=entry_price,
+            amount=filled_amount,
+            filled_amount=filled_amount,
+            entry_price=entry_price,
+            position_id=str(position_id or ""),
+            entry_order_id=entry_order_id,
+            position_size_before=position_size_before,
+            position_size_after=position_size_after,
+        )
         return ManagedPosition(
             side=position_side,
             entry_price=entry_price,
@@ -2846,7 +2866,80 @@ class CTARobot(BaseStrategyRobot):
             entry_order_id=entry_order_id,
             position_size_before=position_size_before,
             position_size_after=position_size_after,
+            entry_metadata=entry_metadata,
         )
+
+    def _build_entry_metadata(
+        self,
+        *,
+        signal: TrendSignal,
+        notional_price: float,
+        amount: float,
+        filled_amount: float,
+        entry_price: float,
+        position_id: str,
+        entry_order_id: str | None,
+        position_size_before: float | None,
+        position_size_after: float | None,
+    ) -> dict:
+        pro_signal_decision = getattr(signal, "pro_signal_decision", None)
+        pro_signal_metadata = {}
+        if pro_signal_decision is not None:
+            pro_signal_metadata = {
+                "pro_signal_allowed": bool(getattr(pro_signal_decision, "allowed", False)),
+                "pro_signal_reason": str(getattr(pro_signal_decision, "reason", "")),
+                "pro_signal_setup_family": str(getattr(pro_signal_decision, "setup_family", "")),
+                "pro_signal_htf_bias": str(getattr(pro_signal_decision, "htf_bias", "")),
+                "pro_signal_location_score": float(getattr(pro_signal_decision, "location_score", 0.0) or 0.0),
+                "pro_signal_rr": float(getattr(pro_signal_decision, "rr", 0.0) or 0.0),
+                "pro_signal_entry": float(getattr(pro_signal_decision, "entry", 0.0) or 0.0),
+                "pro_signal_stop": float(getattr(pro_signal_decision, "stop", 0.0) or 0.0),
+                "pro_signal_target": float(getattr(pro_signal_decision, "target", 0.0) or 0.0),
+                "pro_signal_reasons": list(getattr(pro_signal_decision, "reasons", ()) or ()),
+            }
+        return {
+            **pro_signal_metadata,
+            "raw_direction": int(signal.raw_direction),
+            "major_direction": int(signal.major_direction),
+            "execution_entry_mode": str(signal.execution_entry_mode),
+            "signal_confidence": float(signal.signal_confidence),
+            "signal_quality_tier": str(signal.signal_quality_tier),
+            "relaxed_entry": bool(signal.relaxed_entry),
+            "relaxed_reasons": list(signal.relaxed_reasons),
+            "risk_percent": float(signal.risk_percent),
+            "notional_price": float(notional_price),
+            "ml_used_model": bool(signal.ml_used_model),
+            "ml_prediction": int(signal.ml_prediction),
+            "ml_probability_up": float(signal.ml_probability_up),
+            "ml_aligned_confidence": float(signal.ml_aligned_confidence),
+            "ml_gate_passed": bool(signal.ml_gate_passed),
+            "ml_reason": str(signal.ml_reason),
+            "entry_location_score": float(signal.entry_location_score),
+            "entry_location_reasons": list(signal.entry_location_reasons),
+            "liquidity_sweep": bool(signal.liquidity_sweep),
+            "liquidity_sweep_side": str(signal.liquidity_sweep_side),
+            "oi_change_pct": float(signal.oi_change_pct),
+            "funding_rate": float(signal.funding_rate),
+            "resonance_allowed": bool(signal.resonance_allowed),
+            "resonance_reason": str(signal.resonance_reason),
+            "reverse_intercepted": bool(signal.reverse_intercepted),
+            "reverse_intercept_reason": str(signal.reverse_intercept_reason),
+            "sweep_extreme_price": signal.sweep_extreme_price,
+            "entry_decider_decision": str(signal.entry_decider_decision),
+            "entry_decider_score": float(signal.entry_decider_score),
+            "entry_decider_reasons": list(signal.entry_decider_reasons),
+            "market_regime": self._current_market_regime(),
+            "position_id": position_id,
+            "entry_order_id": entry_order_id,
+            "exchange_order_id": entry_order_id,
+            "requested_amount": float(amount),
+            "filled_amount": float(filled_amount),
+            "fill_ratio": float(filled_amount / amount) if amount > 0 else 0.0,
+            "avg_entry_price": float(entry_price),
+            "position_size_before": position_size_before,
+            "position_size_after": position_size_after,
+            "reduce_only": False,
+        }
 
     def _resolve_filled_entry_price(
         self,
@@ -2944,6 +3037,16 @@ class CTARobot(BaseStrategyRobot):
             )
             return "cta:repeated_entry_zone_cooldown", position_side, 0.0, None
 
+        hard_block_action = self._apply_conservative_hard_blocks(signal=signal, position_side=position_side)
+        if hard_block_action is not None:
+            return hard_block_action, position_side, float(signal.price), None
+
+        pro_signal_decision = self._evaluate_professional_signal(signal=signal, side=side)
+        if pro_signal_decision is not None and not pro_signal_decision.allowed:
+            self._attach_pro_signal_decision(signal, pro_signal_decision)
+            return str(pro_signal_decision.action or "cta:pro_signal_blocked"), position_side, float(signal.price), None
+        self._attach_pro_signal_decision(signal, pro_signal_decision)
+
         order_flow_assessment: OrderFlowAssessment | None = self._assess_order_flow(side=side, amount=amount)
         pathway_result = self._apply_entry_pathway_checks(
             signal=signal,
@@ -2975,6 +3078,183 @@ class CTARobot(BaseStrategyRobot):
 
         self._log_trade_open_context(signal=signal, side=side)
         return None, position_side, notional_price, order_flow_assessment
+
+    def _apply_conservative_hard_blocks(self, *, signal: TrendSignal, position_side: str) -> str | None:
+        """Production safety rails for drawdown control.
+
+        These are deliberately blunt: if recent journal evidence shows a setup is
+        bleeding, config can disable it without touching the signal engine.
+        """
+        trigger_family = str(getattr(signal, "execution_trigger_family", "") or "")
+        market_regime = str(getattr(signal, "market_regime", "") or getattr(signal, "market_status", "") or "" or self._current_market_regime()).lower()
+        family_policy_action = self._apply_trigger_family_policy(
+            trigger_family=trigger_family,
+            position_side=position_side,
+            market_regime=market_regime,
+        )
+        if family_policy_action is not None:
+            return family_policy_action
+        if bool(getattr(self.config, "disable_upthrust_reclaim_short", False)) and position_side == "short" and trigger_family == "upthrust_reclaim":
+            return "cta:disabled_upthrust_reclaim_short"
+        if bool(getattr(self.config, "disable_countertrend_short_in_trend", False)) and position_side == "short" and market_regime == "trend":
+            raw_direction = int(getattr(signal, "raw_direction", 0) or 0)
+            major_direction = int(getattr(signal, "major_direction", 0) or 0)
+            if raw_direction >= 0 or major_direction >= 0:
+                return "cta:disabled_countertrend_short_in_trend"
+        family_loss_limit = int(getattr(self.config, "max_same_trigger_family_losses_per_day", 0) or 0)
+        if family_loss_limit > 0 and trigger_family:
+            losses_today = self._count_recent_closed_trades(
+                trigger_family=trigger_family,
+                side=position_side,
+                since=self._local_day_start_utc(),
+                pnl_negative=True,
+            )
+            if losses_today >= family_loss_limit:
+                return "cta:trigger_family_daily_loss_limit"
+        side_entry_limit = int(getattr(self.config, "max_same_side_entries_per_6h", 0) or 0)
+        if side_entry_limit > 0:
+            entries = self._count_recent_open_trades(
+                side=position_side,
+                since=datetime.now(timezone.utc) - timedelta(hours=6),
+            )
+            if entries >= side_entry_limit:
+                return "cta:same_side_6h_entry_limit"
+        return None
+
+    def _evaluate_professional_signal(self, *, signal: TrendSignal, side: str) -> ProfessionalSignalDecision | None:
+        if not bool(getattr(self.config, "pro_signal_enabled", False)):
+            return None
+        engine = getattr(self, "pro_signal_engine", None)
+        if engine is None:
+            return None
+        try:
+            return engine.evaluate(signal, side=side)
+        except Exception:
+            logger.exception("CTA professional signal evaluation failed")
+            return ProfessionalSignalDecision(
+                allowed=False,
+                action="cta:pro_signal_error",
+                reason="pro_signal_error",
+                setup_family=str(getattr(signal, "execution_trigger_family", "") or "waiting"),
+            )
+
+    @staticmethod
+    def _attach_pro_signal_decision(signal: TrendSignal, decision: ProfessionalSignalDecision | None) -> None:
+        try:
+            setattr(signal, "pro_signal_decision", decision)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _pro_signal_metadata_for_journal(signal: TrendSignal) -> dict:
+        decision = getattr(signal, "pro_signal_decision", None)
+        if decision is None:
+            return {}
+        return {
+            "pro_signal_allowed": bool(getattr(decision, "allowed", False)),
+            "pro_signal_reason": str(getattr(decision, "reason", "")),
+            "pro_signal_setup_family": str(getattr(decision, "setup_family", "")),
+            "pro_signal_htf_bias": str(getattr(decision, "htf_bias", "")),
+            "pro_signal_location_score": float(getattr(decision, "location_score", 0.0) or 0.0),
+            "pro_signal_rr": float(getattr(decision, "rr", 0.0) or 0.0),
+            "pro_signal_entry": float(getattr(decision, "entry", 0.0) or 0.0),
+            "pro_signal_stop": float(getattr(decision, "stop", 0.0) or 0.0),
+            "pro_signal_target": float(getattr(decision, "target", 0.0) or 0.0),
+            "pro_signal_reasons": list(getattr(decision, "reasons", ()) or ()),
+            "market_structure": dict(getattr(decision, "metadata", {}) or {}).get("market_structure"),
+        }
+
+    def _apply_trigger_family_policy(self, *, trigger_family: str, position_side: str, market_regime: str) -> str | None:
+        if not trigger_family or trigger_family == "waiting":
+            return None
+
+        disabled = getattr(self.config, "disabled_trigger_families", {}) or {}
+        disabled_for_side = self._family_policy_list(disabled, position_side)
+        disabled_for_all = self._family_policy_list(disabled, "all")
+        if trigger_family in set(disabled_for_side + disabled_for_all):
+            return "cta:trigger_family_disabled"
+
+        allowed = getattr(self.config, "allowed_trigger_families", {}) or {}
+        if not isinstance(allowed, dict) or not allowed:
+            return None
+        regime_policy = allowed.get(market_regime) or allowed.get("default")
+        if not isinstance(regime_policy, dict):
+            return None
+        allowed_for_side = self._family_policy_list(regime_policy, position_side)
+        allowed_for_all = self._family_policy_list(regime_policy, "all")
+        allowed_set = set(allowed_for_side + allowed_for_all)
+        if allowed_set and trigger_family not in allowed_set:
+            return "cta:trigger_family_not_allowed"
+        return None
+
+    @staticmethod
+    def _family_policy_list(policy: object, key: str) -> list[str]:
+        if not isinstance(policy, dict):
+            return []
+        value = policy.get(key, [])
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        try:
+            return [str(item) for item in value]
+        except TypeError:
+            return []
+
+    def _local_day_start_utc(self) -> datetime:
+        local_now = datetime.now(self.risk_manager.timezone if self.risk_manager is not None and hasattr(self.risk_manager, "timezone") else timezone.utc)
+        local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return local_start.astimezone(timezone.utc)
+
+    def _count_recent_open_trades(self, *, side: str, since: datetime) -> int:
+        return self._count_recent_journal_rows(event_type="trade_open", side=side, since=since)
+
+    def _count_recent_closed_trades(self, *, trigger_family: str, side: str, since: datetime, pnl_negative: bool) -> int:
+        return self._count_recent_journal_rows(
+            event_type="trade_close",
+            side=side,
+            trigger_family=trigger_family,
+            since=since,
+            pnl_negative=pnl_negative,
+        )
+
+    def _count_recent_journal_rows(
+        self,
+        *,
+        event_type: str,
+        side: str,
+        since: datetime,
+        trigger_family: str | None = None,
+        pnl_negative: bool = False,
+    ) -> int:
+        try:
+            rows = self.database.fetch_trade_journal_rows(
+                self.strategy_name,
+                self.symbol,
+                limit=500,
+                event_types=(event_type,),
+            )
+        except Exception:
+            logger.exception("CTA recent journal scan failed | event_type=%s", event_type)
+            return 0
+        count = 0
+        for row in rows:
+            try:
+                ts = datetime.fromisoformat(str(row.timestamp).replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts < since:
+                    continue
+                if str(row.side or "").lower() != str(side).lower():
+                    continue
+                if trigger_family is not None and str(row.trigger_family or "") != str(trigger_family):
+                    continue
+                if pnl_negative and not (row.pnl is not None and float(row.pnl) < 0):
+                    continue
+                count += 1
+            except Exception:
+                continue
+        return count
 
     def _resolve_final_entry_permit(
         self,
@@ -3087,47 +3367,7 @@ class CTARobot(BaseStrategyRobot):
             pathway=signal.entry_pathway.name,
             price=float(entry_price),
             size=float(filled_amount),
-            metadata={
-                "raw_direction": int(signal.raw_direction),
-                "execution_entry_mode": str(signal.execution_entry_mode),
-                "signal_confidence": float(signal.signal_confidence),
-                "signal_quality_tier": str(signal.signal_quality_tier),
-                "relaxed_entry": bool(signal.relaxed_entry),
-                "relaxed_reasons": list(signal.relaxed_reasons),
-                "risk_percent": float(signal.risk_percent),
-                "notional_price": float(notional_price),
-                "ml_used_model": bool(signal.ml_used_model),
-                "ml_prediction": int(signal.ml_prediction),
-                "ml_probability_up": float(signal.ml_probability_up),
-                "ml_aligned_confidence": float(signal.ml_aligned_confidence),
-                "ml_gate_passed": bool(signal.ml_gate_passed),
-                "ml_reason": str(signal.ml_reason),
-                "entry_location_score": float(signal.entry_location_score),
-                "entry_location_reasons": list(signal.entry_location_reasons),
-                "liquidity_sweep": bool(signal.liquidity_sweep),
-                "liquidity_sweep_side": str(signal.liquidity_sweep_side),
-                "oi_change_pct": float(signal.oi_change_pct),
-                "funding_rate": float(signal.funding_rate),
-                "resonance_allowed": bool(signal.resonance_allowed),
-                "resonance_reason": str(signal.resonance_reason),
-                "reverse_intercepted": bool(signal.reverse_intercepted),
-                "reverse_intercept_reason": str(signal.reverse_intercept_reason),
-                "sweep_extreme_price": signal.sweep_extreme_price,
-                "entry_decider_decision": str(signal.entry_decider_decision),
-                "entry_decider_score": float(signal.entry_decider_score),
-                "entry_decider_reasons": list(signal.entry_decider_reasons),
-                "market_regime": self._current_market_regime(),
-                "position_id": position_id,
-                "entry_order_id": entry_order_id,
-                "exchange_order_id": entry_order_id,
-                "requested_amount": float(amount),
-                "filled_amount": float(filled_amount),
-                "fill_ratio": float(filled_amount / amount) if amount > 0 else 0.0,
-                "avg_entry_price": float(entry_price),
-                "position_size_before": position_size_before,
-                "position_size_after": position_size_after,
-                "reduce_only": False,
-            },
+            metadata=self.position.entry_metadata if self.position is not None else None,
         )
         self._arm_fast_track_reuse_cooldown(signal)
         self._arm_repeated_entry_zone_cooldown(signal, entry_price)
@@ -3906,17 +4146,8 @@ class CTARobot(BaseStrategyRobot):
             float(position.stop_price),
             float(position.best_price),
         )
-        self._journal_event(
-            event_type="trade_close",
-            side=position.side,
-            action=reason or "unspecified",
-            trigger_family=str(position.origin_trigger_family or "waiting"),
-            trigger_reason=str(position.origin_trigger_reason or ""),
-            pathway=str(position.origin_pathway or ""),
-            price=float(exit_price),
-            size=float(exit_amount),
-            pnl=float(pnl),
-            metadata={
+        close_metadata = dict(position.entry_metadata or {})
+        close_metadata.update({
                 "position_id": str(position.position_id or ""),
                 "entry_order_id": position.entry_order_id,
                 "exit_order_id": exit_order_id,
@@ -3939,7 +4170,18 @@ class CTARobot(BaseStrategyRobot):
                 "entry_position_size_after": position.position_size_after,
                 "reduce_only": True,
                 "exit_reason": reason or "unspecified",
-            },
+        })
+        self._journal_event(
+            event_type="trade_close",
+            side=position.side,
+            action=reason or "unspecified",
+            trigger_family=str(position.origin_trigger_family or "waiting"),
+            trigger_reason=str(position.origin_trigger_reason or ""),
+            pathway=str(position.origin_pathway or ""),
+            price=float(exit_price),
+            size=float(exit_amount),
+            pnl=float(pnl),
+            metadata=close_metadata,
         )
 
         if self.notifier is None or not hasattr(self.notifier, "notify_profit"):

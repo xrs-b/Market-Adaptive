@@ -368,6 +368,15 @@ class CTAConfig:
     signal_strength_volatility_bonus_cap: float = 5.0
     signal_strength_obv_bonus_cap: float = 10.0
     fast_track_reuse_cooldown_seconds: int = 300
+    disable_upthrust_reclaim_short: bool = False
+    disable_countertrend_short_in_trend: bool = False
+    max_same_trigger_family_losses_per_day: int = 0
+    max_same_side_entries_per_6h: int = 0
+    disabled_trigger_families: dict[str, list[str]] = field(default_factory=dict)
+    allowed_trigger_families: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    pro_signal_enabled: bool = False
+    pro_signal_min_rr: float = 1.8
+    pro_signal_min_location_score: float = 0.35
     ml_enabled: bool = False
     ml_model_path: str = DEFAULT_ML_MODEL_PATH
     ml_min_confidence: float = 0.60
@@ -929,6 +938,15 @@ def load_config(config_path: str | Path) -> AppConfig:
         starter_entry_minimum_expected_rr=float(cta_payload.get("starter_entry_minimum_expected_rr", 0.0)),
         standard_entry_minimum_expected_rr=float(cta_payload.get("standard_entry_minimum_expected_rr", 0.0)),
         fast_track_reuse_cooldown_seconds=int(cta_payload.get("fast_track_reuse_cooldown_seconds", 300)),
+        disable_upthrust_reclaim_short=bool(cta_payload.get("disable_upthrust_reclaim_short", False)),
+        disable_countertrend_short_in_trend=bool(cta_payload.get("disable_countertrend_short_in_trend", False)),
+        max_same_trigger_family_losses_per_day=int(cta_payload.get("max_same_trigger_family_losses_per_day", 0)),
+        max_same_side_entries_per_6h=int(cta_payload.get("max_same_side_entries_per_6h", 0)),
+        disabled_trigger_families=dict(cta_payload.get("disabled_trigger_families", {}) or {}),
+        allowed_trigger_families=dict(cta_payload.get("allowed_trigger_families", {}) or {}),
+        pro_signal_enabled=bool(cta_payload.get("pro_signal_enabled", False)),
+        pro_signal_min_rr=float(cta_payload.get("pro_signal_min_rr", 1.8)),
+        pro_signal_min_location_score=float(cta_payload.get("pro_signal_min_location_score", 0.35)),
         ml_enabled=bool(cta_payload.get("ml_enabled", False)),
         ml_model_path=str(cta_payload.get("ml_model_path", DEFAULT_ML_MODEL_PATH)),
         ml_min_confidence=float(cta_payload.get("ml_min_confidence", 0.60)),

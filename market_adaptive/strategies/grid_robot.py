@@ -16,6 +16,7 @@ from market_adaptive.config import ExecutionConfig, GridConfig
 from market_adaptive.coordination import StrategyRuntimeContext
 from market_adaptive.indicators import compute_atr, compute_bollinger_bands, compute_supertrend, ohlcv_to_dataframe
 from market_adaptive.risk import GridRiskProfile
+from market_adaptive.db import TradeJournalRecord
 from market_adaptive.strategies.base import BaseStrategyRobot, StrategyRunResult
 
 logger = logging.getLogger(__name__)
@@ -1264,6 +1265,7 @@ class GridRobot(BaseStrategyRobot):
             )
             if self.notifier is not None and hasattr(self.notifier, "notify_trade"):
                 trade_notional = self.client.estimate_notional(self.symbol, counter_amount, fill_price)
+                contract_value = self._contract_value()
                 self.notifier.notify_trade(
                     side=side,
                     price=fill_price,
@@ -1272,6 +1274,7 @@ class GridRobot(BaseStrategyRobot):
                     signal="grid_fill_websocket",
                     symbol=self.symbol,
                     notional=trade_notional,
+                    contract_value=contract_value,
                 )
             self._confirm_ws_hedge_order(response, counter_side=counter_side, counter_price=counter_price, amount=counter_amount)
 
@@ -1385,6 +1388,7 @@ class GridRobot(BaseStrategyRobot):
                 balance = float(self.client.fetch_total_equity("USDT"))
             except Exception:
                 balance = 0.0
+        pos_side = str(tracked.get("pos_side") or "")
         logger.info(
             "[GRID_TRADE_CLOSE] entry_side=%s exit_side=%s entry=%.4f exit=%.4f size=%.8f pnl=%.4f roi=%.4f%% pos_side=%s",
             entry_side,
@@ -1394,8 +1398,36 @@ class GridRobot(BaseStrategyRobot):
             float(delta_amount),
             float(pnl),
             float(roi),
-            str(tracked.get("pos_side") or ""),
+            pos_side,
         )
+        try:
+            self.database.insert_trade_journal(
+                TradeJournalRecord(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    strategy_name=self.strategy_name,
+                    symbol=self.symbol,
+                    event_type="trade_close",
+                    side=side,
+                    action="grid:reduce_only_close",
+                    trigger_family="grid_reduce_only",
+                    trigger_reason="reduce_only_fill",
+                    pathway="GRID",
+                    price=float(fill_price),
+                    size=float(delta_amount),
+                    pnl=float(pnl),
+                    metadata={
+                        "entry_side": entry_side,
+                        "exit_side": side,
+                        "entry_price": float(entry_price),
+                        "exit_price": float(fill_price),
+                        "roi": float(roi),
+                        "pos_side": pos_side,
+                        "contract_value": float(contract_value),
+                    },
+                )
+            )
+        except Exception:
+            logger.exception("Grid trade journal insert failed")
         self.notifier.notify_profit(
             pnl=pnl,
             roi=roi,
@@ -1855,12 +1887,20 @@ class GridRobot(BaseStrategyRobot):
             )
         return candidates
 
+    def _contract_value(self) -> float:
+        if hasattr(self.client, "get_contract_value"):
+            try:
+                value = float(self.client.get_contract_value(self.symbol))
+                if value > 0:
+                    return value
+            except Exception:
+                pass
+        return 1.0
+
     def _estimate_notional(self, amount: float, price: float) -> float:
         if hasattr(self.client, "estimate_notional"):
             return float(self.client.estimate_notional(self.symbol, amount, price))
-        contract_value = 1.0
-        if hasattr(self.client, "get_contract_value"):
-            contract_value = float(self.client.get_contract_value(self.symbol))
+        contract_value = self._contract_value()
         return abs(float(amount)) * abs(float(price)) * contract_value
 
     def _position_notional(self, position: dict) -> float:
