@@ -62,6 +62,7 @@ class EntryDeciderLite:
         major_direction = int(getattr(signal, "major_direction", 0) or 0)
         entry_pathway = str(getattr(getattr(signal, "entry_pathway", None), "name", getattr(signal, "entry_pathway", "STRICT")))
         signal_confidence = float(getattr(signal, "signal_confidence", 0.0) or 0.0)
+        signal_quality_tier = str(getattr(getattr(signal, "signal_quality_tier", None), "name", getattr(signal, "signal_quality_tier", "TIER_LOW")))
         strength_bonus = float(getattr(signal, "signal_strength_bonus", 0.0) or 0.0)
         obv_passed = bool(getattr(signal, "obv_confirmation_passed", False))
         volume_passed = bool(getattr(signal, "volume_filter_passed", False))
@@ -97,8 +98,16 @@ class EntryDeciderLite:
         if major_direction != 0 and major_direction == direction:
             score += 8.0
         elif major_direction != 0:
-            score -= 14.0
-            reasons.append("counter_major_trend")
+            countertrend_penalty = float(getattr(self.config, "entry_decider_countertrend_penalty", 8.0))
+            score -= countertrend_penalty
+            if signal_quality_tier == "TIER_HIGH" or signal_confidence >= 0.75:
+                score += float(getattr(self.config, "entry_decider_countertrend_high_quality_bonus", 4.0))
+                reasons.append("counter_trend_high_quality")
+            elif signal_quality_tier == "TIER_MEDIUM" or signal_confidence >= 0.60:
+                score += float(getattr(self.config, "entry_decider_countertrend_medium_quality_bonus", 1.0))
+                reasons.append("counter_trend_medium_quality")
+            else:
+                reasons.append("counter_major_trend")
 
         conflict_gap = directional_score - opposing_score
         breakdown["conflict_gap"] = conflict_gap

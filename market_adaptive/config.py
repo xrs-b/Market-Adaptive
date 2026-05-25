@@ -255,6 +255,7 @@ class CTAConfig:
     order_flow_enabled: bool = True
     order_flow_depth_levels: int = 20
     order_flow_confirmation_ratio: float = 1.5
+    order_flow_confirmation_ratio_short: float = 0.0
     order_flow_high_conviction_ratio: float = 2.0
     order_flow_history_window: int = 20
     order_flow_decay_lookback: int = 3
@@ -354,6 +355,9 @@ class CTAConfig:
     market_regime_adaptation_enabled: bool = True
     entry_decider_trend_follow_regime_coefficient: float = 1.06
     entry_decider_countertrend_regime_coefficient: float = 0.92
+    entry_decider_countertrend_penalty: float = 8.0
+    entry_decider_countertrend_high_quality_bonus: float = 4.0
+    entry_decider_countertrend_medium_quality_bonus: float = 1.0
     entry_decider_sideways_reversal_regime_coefficient: float = 1.05
     entry_decider_sideways_breakout_regime_coefficient: float = 0.94
     family_summary_log_interval_seconds: float = 1800.0
@@ -448,8 +452,10 @@ class CTAConfig:
         self.breakout_rr_target_atr_multiplier = max(0.0, float(self.breakout_rr_target_atr_multiplier))
         self.order_flow_depth_levels = max(1, int(self.order_flow_depth_levels))
         self.order_flow_confirmation_ratio = max(0.0, float(self.order_flow_confirmation_ratio))
+        self.order_flow_confirmation_ratio_short = max(0.0, float(self.order_flow_confirmation_ratio_short))
         self.order_flow_high_conviction_ratio = max(
             self.order_flow_confirmation_ratio,
+            self.order_flow_confirmation_ratio_short,
             float(self.order_flow_high_conviction_ratio),
         )
         self.order_flow_history_window = max(1, int(self.order_flow_history_window))
@@ -500,6 +506,9 @@ class CTAConfig:
         self.market_regime_adaptation_enabled = bool(self.market_regime_adaptation_enabled)
         self.entry_decider_trend_follow_regime_coefficient = max(0.8, min(1.2, float(self.entry_decider_trend_follow_regime_coefficient)))
         self.entry_decider_countertrend_regime_coefficient = max(0.8, min(1.2, float(self.entry_decider_countertrend_regime_coefficient)))
+        self.entry_decider_countertrend_penalty = max(0.0, float(self.entry_decider_countertrend_penalty))
+        self.entry_decider_countertrend_high_quality_bonus = max(0.0, float(self.entry_decider_countertrend_high_quality_bonus))
+        self.entry_decider_countertrend_medium_quality_bonus = max(0.0, float(self.entry_decider_countertrend_medium_quality_bonus))
         self.entry_decider_sideways_reversal_regime_coefficient = max(0.8, min(1.2, float(self.entry_decider_sideways_reversal_regime_coefficient)))
         self.entry_decider_sideways_breakout_regime_coefficient = max(0.8, min(1.2, float(self.entry_decider_sideways_breakout_regime_coefficient)))
         self.family_summary_log_interval_seconds = max(60.0, float(self.family_summary_log_interval_seconds))
@@ -962,6 +971,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         order_flow_enabled=bool(cta_payload.get("order_flow_enabled", True)),
         order_flow_depth_levels=int(cta_payload.get("order_flow_depth_levels", 20)),
         order_flow_confirmation_ratio=float(cta_payload.get("order_flow_confirmation_ratio", 1.5)),
+        order_flow_confirmation_ratio_short=float(cta_payload.get("order_flow_confirmation_ratio_short", 0.0)),
         order_flow_high_conviction_ratio=float(cta_payload.get("order_flow_high_conviction_ratio", 2.0)),
         order_flow_history_window=int(cta_payload.get("order_flow_history_window", 20)),
         order_flow_decay_lookback=int(cta_payload.get("order_flow_decay_lookback", 3)),
@@ -1013,6 +1023,9 @@ def load_config(config_path: str | Path) -> AppConfig:
         market_regime_adaptation_enabled=bool(cta_payload.get("market_regime_adaptation_enabled", True)),
         entry_decider_trend_follow_regime_coefficient=float(cta_payload.get("entry_decider_trend_follow_regime_coefficient", 1.06)),
         entry_decider_countertrend_regime_coefficient=float(cta_payload.get("entry_decider_countertrend_regime_coefficient", 0.92)),
+        entry_decider_countertrend_penalty=float(cta_payload.get("entry_decider_countertrend_penalty", 8.0)),
+        entry_decider_countertrend_high_quality_bonus=float(cta_payload.get("entry_decider_countertrend_high_quality_bonus", 4.0)),
+        entry_decider_countertrend_medium_quality_bonus=float(cta_payload.get("entry_decider_countertrend_medium_quality_bonus", 1.0)),
         entry_decider_sideways_reversal_regime_coefficient=float(cta_payload.get("entry_decider_sideways_reversal_regime_coefficient", 1.05)),
         entry_decider_sideways_breakout_regime_coefficient=float(cta_payload.get("entry_decider_sideways_breakout_regime_coefficient", 0.94)),
         family_summary_log_interval_seconds=float(cta_payload.get("family_summary_log_interval_seconds", 1800.0)),

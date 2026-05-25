@@ -177,7 +177,17 @@ class OrderFlowSentinel:
         history_sigma = self._history_sigma()
         health_floor = history_mean + (history_sigma * max(0.0, float(getattr(self.config, "order_flow_health_sigma_multiplier", 1.0))))
         decay_detected = self._is_decay_detected(imbalance_ratio)
-        confirmation_threshold = max(0.0, float(self.config.order_flow_confirmation_ratio), health_floor)
+        base_confirmation_ratio = float(self.config.order_flow_confirmation_ratio)
+        if normalized_side == "sell":
+            base_confirmation_ratio = float(
+                getattr(
+                    self.config,
+                    "order_flow_confirmation_ratio_short",
+                    base_confirmation_ratio,
+                )
+                or base_confirmation_ratio
+            )
+        confirmation_threshold = max(0.0, base_confirmation_ratio, health_floor)
         confirmation_passed = imbalance_ratio >= confirmation_threshold and not decay_detected
         high_conviction_threshold = max(
             confirmation_threshold,

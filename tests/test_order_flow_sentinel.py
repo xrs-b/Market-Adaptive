@@ -143,6 +143,23 @@ class OrderFlowSentinelTests(unittest.TestCase):
         self.assertFalse(assessment.entry_allowed)
         self.assertEqual(assessment.reason, "imbalance_below_1.50")
 
+    def test_sell_side_can_use_dedicated_confirmation_ratio(self) -> None:
+        config = CTAConfig(
+            order_flow_confirmation_ratio=1.5,
+            order_flow_confirmation_ratio_short=0.85,
+            order_flow_health_sigma_multiplier=0.0,
+        )
+        order_book = {
+            "bids": [[100.0 - index * 0.1, 1.0] for index in range(20)],
+            "asks": [[100.1 + index * 0.1, 0.9] for index in range(20)],
+        }
+        sentinel = OrderFlowSentinel(DummyClient(order_book), config)
+
+        assessment = sentinel.assess_entry("BTC/USDT", "sell", amount=0.02)
+
+        self.assertTrue(assessment.confirmation_passed)
+        self.assertEqual(assessment.reason, "confirmed")
+
 
 if __name__ == "__main__":
     unittest.main()

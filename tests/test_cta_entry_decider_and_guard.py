@@ -13,6 +13,9 @@ class _Config(SimpleNamespace):
     entry_decider_block_max_score = 45.0
     entry_decider_conflict_gap_allow = 12.0
     entry_decider_conflict_gap_watch = 6.0
+    entry_decider_countertrend_penalty = 8.0
+    entry_decider_countertrend_high_quality_bonus = 4.0
+    entry_decider_countertrend_medium_quality_bonus = 1.0
     bad_entry_long_falling_knife_rsi = 38.0
     bad_entry_short_falling_knife_rsi = 62.0
     bad_entry_support_guard_atr_ratio = 0.35
@@ -119,6 +122,27 @@ def test_bad_entry_guard_blocks_falling_knife_long_with_opposing_volume():
     assert "falling_knife" in result.triggers
     assert "counter_trend" in result.triggers
     assert "opposing_volume" in result.triggers
+
+
+def test_entry_decider_countertrend_high_quality_signal_gets_partial_credit():
+    decider = EntryDeciderLite(_Config())
+
+    result = decider.evaluate(
+        _signal(
+            direction=-1,
+            raw_direction=-1,
+            major_direction=1,
+            bullish_score=52.0,
+            bearish_score=79.0,
+            signal_quality_tier="TIER_HIGH",
+            signal_confidence=0.82,
+            obv_confirmation_passed=True,
+            volume_filter_passed=True,
+        )
+    )
+
+    assert result.score > 58.0
+    assert "counter_trend_high_quality" in result.reasons
 
 
 def test_open_position_chain_keeps_watch_advisory_and_continues_to_sizing():
