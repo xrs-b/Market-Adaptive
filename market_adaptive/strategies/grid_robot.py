@@ -1263,9 +1263,37 @@ class GridRobot(BaseStrategyRobot):
                 counter_price,
                 counter_amount,
             )
+            contract_value = self._contract_value()
+            try:
+                self.database.insert_trade_journal(
+                    TradeJournalRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        strategy_name=self.strategy_name,
+                        symbol=self.symbol,
+                        event_type="trade_open",
+                        side=side,
+                        action="grid:websocket_fill_open",
+                        trigger_family="grid_websocket_open",
+                        trigger_reason="websocket_fill",
+                        pathway="GRID",
+                        price=float(fill_price),
+                        size=float(counter_amount),
+                        pnl=None,
+                        metadata={
+                            "contract_value": float(contract_value),
+                            "entry_side": side,
+                            "fill_price": float(fill_price),
+                            "counter_side": counter_side,
+                            "counter_price": float(counter_price),
+                            "pos_side": close_pos_side,
+                            "source_order_id": str(order.get("id") or order.get("orderId") or order.get("info", {}).get("ordId") or ""),
+                        },
+                    )
+                )
+            except Exception:
+                logger.exception("Grid trade-open journal insert failed")
             if self.notifier is not None and hasattr(self.notifier, "notify_trade"):
                 trade_notional = self.client.estimate_notional(self.symbol, counter_amount, fill_price)
-                contract_value = self._contract_value()
                 self.notifier.notify_trade(
                     side=side,
                     price=fill_price,
@@ -1354,7 +1382,9 @@ class GridRobot(BaseStrategyRobot):
                 tracked_key = key
                 break
         if tracked is None:
-            return
+            tracked = self._recover_reduce_only_trade_context(order=order, side=side, fill_price=fill_price, filled=filled)
+            if tracked is None:
+                return
 
         cumulative_filled = max(0.0, float(filled))
         previous_cumulative = max(self._reduce_only_filled_amounts.get(tracked_key or order_keys[0], 0.0), 0.0)
@@ -1442,6 +1472,53 @@ class GridRobot(BaseStrategyRobot):
             for key in order_keys:
                 self._pending_reduce_only_profits.pop(key, None)
                 self._reduce_only_filled_amounts.pop(key, None)
+
+    def _recover_reduce_only_trade_context(self, *, order: dict, side: str, fill_price: float, filled: float) -> dict | None:
+        try:
+            journal_rows = self.database.fetch_trade_journal_rows(
+                self.strategy_name,
+                self.symbol,
+                limit=200,
+                event_types=("trade_open",),
+            )
+        except Exception:
+            logger.exception("Grid reduce-only recovery lookup failed")
+            return None
+
+        contract_value = self._contract_value()
+        target_pos_side = "long" if str(side).lower() == "sell" else "short"
+        normalized_filled = max(0.0, float(filled))
+        best: dict | None = None
+        best_score: tuple[float, float] | None = None
+        for row in journal_rows:
+            metadata = row.metadata or {}
+            row_pos_side = str(metadata.get("pos_side") or "").lower()
+            if row_pos_side != target_pos_side:
+                continue
+            entry_side = str(metadata.get("entry_side") or row.side or "").lower()
+            if entry_side not in {"buy", "sell"}:
+                continue
+            entry_price = float(metadata.get("fill_price") or metadata.get("entry_price") or row.price or 0.0)
+            row_size = float(row.size or 0.0)
+            if entry_price <= 0 or row_size <= 0:
+                continue
+            size_gap = abs(row_size - normalized_filled)
+            price_gap = abs(entry_price - float(fill_price))
+            score = (size_gap, price_gap)
+            if best_score is None or score < best_score:
+                best_score = score
+                best = {
+                    "entry_side": entry_side,
+                    "exit_side": str(side).lower(),
+                    "entry_price": entry_price,
+                    "exit_price": float(fill_price),
+                    "amount": row_size,
+                    "pos_side": row_pos_side,
+                    "contract_value": float(contract_value),
+                    "recovered_from_journal": True,
+                    "source_trade_open_ts": row.timestamp,
+                }
+        return best
 
     @staticmethod
     def _extract_order_keys(order: dict | None) -> list[str]:

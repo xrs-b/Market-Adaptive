@@ -441,6 +441,42 @@ class NotificationTests(unittest.TestCase):
         self.assertAlmostEqual(notifier.profit_calls[0]['balance'], 1500.0)
         self.assertEqual(notifier.profit_calls[0]['strategy'], 'grid')
 
+        rows = db.fetch_trade_journal_rows('grid', 'BTC/USDT', limit=10)
+        self.assertEqual(sum(1 for row in rows if row.event_type == 'trade_open'), 1)
+        self.assertEqual(sum(1 for row in rows if row.event_type == 'trade_close'), 1)
+
+    def test_grid_reduce_only_fill_can_recover_trade_context_from_journal(self) -> None:
+        client = DummyClient()
+        client.total_equity = 1500.0
+        notifier = DummyNotifier()
+        db = self.database
+        db.insert_market_status(MarketStatusRecord('2026-04-10T00:00:00+00:00', 'BTC/USDT', 'sideways', 10.0, 0.01))
+        client.ohlcv_by_timeframe['1h'] = [
+            [1_700_000_000_000 + i * 3_600_000, 100.0, 101.0, 99.0, 100.0, 120.0]
+            for i in range(80)
+        ]
+        robot = GridRobot(client, db, GridConfig(), ExecutionConfig(), notifier=notifier, market_oracle=None, use_dynamic_range=False)
+        robot._cached_context = robot._fallback_context(100.0, 2.0)
+        client.fetch_positions = lambda symbols=None: [{"contracts": 1.0, "side": "long", "entryPrice": 100.0}]
+        client.fetch_order = lambda order_id, symbol: {"status": "open", "id": order_id, "symbol": symbol}
+
+        def place_limit_order(symbol: str, side: str, amount: float, price: float, **kwargs):
+            payload = {"symbol": symbol, "side": side, "amount": amount, "price": price, "id": "hedge-1", **kwargs}
+            client.limit_orders.append(payload)
+            return payload
+
+        client.place_limit_order = place_limit_order
+
+        robot._on_ws_orders({"status": "filled", "filled": 0.5, "side": "buy", "average": 100.0, "id": "fill-1"})
+        robot._pending_reduce_only_profits.clear()
+        robot._reduce_only_filled_amounts.clear()
+        robot._on_ws_orders({"status": "filled", "filled": 0.5, "side": "sell", "average": 101.0, "id": "hedge-1", "reduceOnly": True})
+
+        self.assertEqual(len(notifier.profit_calls), 1)
+        self.assertAlmostEqual(notifier.profit_calls[0]['pnl'], 0.5)
+        rows = db.fetch_trade_journal_rows('grid', 'BTC/USDT', limit=10)
+        self.assertEqual(sum(1 for row in rows if row.event_type == 'trade_close'), 1)
+
     def test_discord_notifier_localizes_profit_payload_and_timestamp(self) -> None:
         notifier = CapturingDiscordNotifier()
 
